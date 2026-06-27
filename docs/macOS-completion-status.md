@@ -1,6 +1,6 @@
 # macOS 端完成状态
 
-> 最后更新：2026-06-26
+> 最后更新：2026-06-27
 > 版本：v1.0.0
 > 状态：✅ 稳定可用
 
@@ -11,14 +11,14 @@
 ```
 ClipFlow App (Flutter)
     ↓ HTTP POST (JSON)
-云函数 (Node.js + @cloudbase/node-sdk)
-    ↓ cloud.init({ env: envId })
-腾讯云数据库 (Firestore)
+Node.js Server (Express + SQLite)
+    ↓
+阿里云 ECS (2核2G, 40GB SSD)
 ```
 
-- **云函数地址：** `https://universal-clipboard-d7b1c6cd31bc-1446090713.ap-shanghai.app.tcloudbase.com/api`
-- **环境 ID：** `universal-clipboard-d7b1c6cd31bc`
-- **数据库集合：** `devices`、`clipboard`、`history`（权限 ADMINWRITE）
+- **服务器地址：** `http://121.196.222.122:3000/api`
+- **数据库：** SQLite（本地存储）
+- **API 端点：** `/api/clipboard`、`/api/history`、`/api/device`、`/api/salt`
 
 ## 已实现功能
 
@@ -126,7 +126,7 @@ lib/
 ├── core/exceptions.dart         # 异常定义
 ├── models/clipboard_entry.dart  # 剪切板条目模型（含 platform 字段）
 ├── models/device.dart           # 设备模型
-├── services/cloudbase_service.dart  # 云函数 API 封装
+├── services/cloudbase_service.dart  # 服务器 API 封装
 ├── services/encryption_service.dart # AES 加密
 ├── services/sync_service.dart   # 同步服务
 ├── services/clipboard_monitor.dart # 剪切板监听（桌面轮询）

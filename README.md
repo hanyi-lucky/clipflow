@@ -22,9 +22,9 @@
 ## 技术栈
 
 - **前端**：Flutter
-- **后端**：腾讯云开发 (CloudBase) + 云函数
+- **后端**：Node.js + Express + SQLite
 - **加密**：AES-256-GCM + PBKDF2-HMAC-SHA256
-- **数据库**：腾讯云 Firestore
+- **服务器**：阿里云 ECS
 
 ## 快速开始
 
@@ -34,9 +34,13 @@
 flutter pub get
 ```
 
-### 2. 配置云函数
+### 2. 部署服务器
 
-在腾讯云开发控制台创建云函数 `api`，代码见项目文档。
+```bash
+cd server
+# 在阿里云服务器上执行
+bash deploy.sh
+```
 
 ### 3. 运行
 
@@ -55,7 +59,7 @@ flutter build apk --release
 ## 架构
 
 ```
-Flutter App → HTTP POST → 云函数 (Node.js) → 腾讯云数据库
+Flutter App → HTTP POST → Node.js Server (Express + SQLite)
 ```
 
 ## 加密
@@ -75,6 +79,11 @@ lib/
 ├── providers/     # 状态管理
 ├── screens/       # 页面
 └── widgets/       # 可复用组件
+
+server/
+├── index.js       # 服务器主文件
+├── package.json   # 依赖配置
+└── deploy.sh      # 部署脚本
 ```
 
 ## 许可证
