@@ -8,13 +8,15 @@ class CloudBaseService {
 
   String? _token;
   String? _openId;
+  String? _userId; // 保存用于自动重新登录
 
   String? get openId => _openId;
   bool get isLoggedIn => _token != null;
 
-  /// 登录/注册
-  Future<void> signInAnonymously() async {
-    final userId = DateTime.now().millisecondsSinceEpoch.toString();
+  /// 登录/注册（userId 从密码派生，相同密码 = 相同账户 = 共享数据）
+  Future<void> signInAnonymously({String? userId}) async {
+    userId ??= DateTime.now().millisecondsSinceEpoch.toString();
+    _userId = userId; // 保存用于自动重新登录
     final response = await http.post(
       Uri.parse('$_baseUrl/auth'),
       headers: {'Content-Type': 'application/json'},
@@ -34,7 +36,23 @@ class CloudBaseService {
     }
   }
 
-  /// 调用 API
+  /// 发送 HTTP 请求
+  Future<http.Response> _sendRequest(String method, Uri uri, {Map<String, String>? headers, Object? body}) async {
+    switch (method) {
+      case 'GET':
+        return http.get(uri, headers: headers);
+      case 'POST':
+        return http.post(uri, headers: headers, body: body);
+      case 'PATCH':
+        return http.patch(uri, headers: headers, body: body);
+      case 'DELETE':
+        return http.delete(uri, headers: headers);
+      default:
+        throw Exception('Unsupported method: $method');
+    }
+  }
+
+  /// 调用 API（token 失效时自动重新登录并重试）
   Future<Map<String, dynamic>> _callApi(String method, String path, {Map<String, dynamic>? body}) async {
     final uri = Uri.parse('$_baseUrl$path');
     final headers = {
@@ -42,17 +60,13 @@ class CloudBaseService {
       if (_token != null) 'Authorization': 'Bearer $_token',
     };
 
-    http.Response response;
-    if (method == 'GET') {
-      response = await http.get(uri, headers: headers);
-    } else if (method == 'POST') {
-      response = await http.post(uri, headers: headers, body: jsonEncode(body ?? {}));
-    } else if (method == 'PATCH') {
-      response = await http.patch(uri, headers: headers, body: jsonEncode(body ?? {}));
-    } else if (method == 'DELETE') {
-      response = await http.delete(uri, headers: headers);
-    } else {
-      throw Exception('Unsupported method: $method');
+    var response = await _sendRequest(method, uri, headers: headers, body: body != null ? jsonEncode(body) : null);
+
+    // token 失效 → 自动重新登录并重试一次
+    if (response.statusCode == 401 && _userId != null) {
+      await signInAnonymously(userId: _userId);
+      headers['Authorization'] = 'Bearer $_token';
+      response = await _sendRequest(method, uri, headers: headers, body: body != null ? jsonEncode(body) : null);
     }
 
     if (response.statusCode != 200) {

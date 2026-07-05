@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
@@ -35,8 +37,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
       final auth = context.read<AuthProvider>();
       final storage = await LocalStorage.create();
       await auth.initialize(storage);
-      await auth.signIn();
 
+      // 连接检查（不登录，登录在解锁时根据密码派生 userId）
       final settings = context.read<SettingsProvider>();
       await settings.initialize(storage);
 
@@ -68,8 +70,16 @@ class _UnlockScreenState extends State<UnlockScreen> {
     });
 
     try {
+      // 从密码派生 userId：相同密码 → 相同 userId → 共享数据
+      final passwordHash = sha256.convert(utf8.encode('clipflow:$password')).toString();
+      final userId = 'user_${passwordHash.substring(0, 16)}';
+
       final storage = await LocalStorage.create();
       final auth = context.read<AuthProvider>();
+
+      // 使用密码派生的 userId 登录
+      await auth.signIn(userId: userId);
+
       final cloudRepo = auth.cloudRepo;
       List<int> salt;
 

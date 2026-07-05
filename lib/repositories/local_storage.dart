@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class LocalStorage {
+  static const _keyUserId = 'user_id';
   static const _keyLastSyncTimestamp = 'last_sync_timestamp';
   static const _keyLastContentHash = 'last_content_hash';
   static const _keyDeviceId = 'device_id';
@@ -19,6 +20,13 @@ class LocalStorage {
   static Future<LocalStorage> create() async {
     final prefs = await SharedPreferences.getInstance();
     return LocalStorage(prefs);
+  }
+
+  // User identity (stable across sessions, shared across devices via same password)
+  String? get userId => _prefs.getString(_keyUserId);
+
+  Future<void> setUserId(String id) async {
+    await _prefs.setString(_keyUserId, id);
   }
 
   // Sync state

@@ -42,13 +42,13 @@ class AuthProvider extends ChangeNotifier {
     _storage = storage;
   }
 
-  Future<void> signIn() async {
+  Future<void> signIn({String? userId}) async {
     _isLoading = true;
     _error = null;
     notifyListeners();
 
     try {
-      await _authService.signInAnonymously();
+      await _authService.signInAnonymously(userId: userId);
       await _registerCurrentDevice();
     } on Exception catch (e) {
       _error = e.toString();

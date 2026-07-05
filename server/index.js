@@ -29,8 +29,7 @@ db.exec(`
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     platform TEXT NOT NULL,
-    last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    last_seen TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS clipboard (
@@ -42,8 +41,7 @@ db.exec(`
     source_device_name TEXT NOT NULL,
     source_platform TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    type TEXT DEFAULT 'text',
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    type TEXT DEFAULT 'text'
   );
 
   CREATE TABLE IF NOT EXISTS history (
@@ -55,29 +53,32 @@ db.exec(`
     source_platform TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
     type TEXT DEFAULT 'text',
-    pinned INTEGER DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    pinned INTEGER DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS salt (
     user_id TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS tokens (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
-// 简单的 token 存储（生产环境应用 Redis 或数据库）
-const tokens = new Map();
-
-// 认证中间件
+// 认证中间件（token 从数据库读取，重启不丢失）
 function authenticate(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token || !tokens.has(token)) {
-    // 允许无 token 访问（简化版，使用 userId 参数）
-    req.userId = req.query.userId || req.body?.userId || 'default';
-    return next();
+  if (!token) {
+    return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Token required' });
   }
-  req.userId = tokens.get(token);
+  const row = db.prepare('SELECT user_id FROM tokens WHERE token = ?').get(token);
+  if (!row) {
+    return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Token invalid or expired' });
+  }
+  req.userId = row.user_id;
   next();
 }
 
@@ -107,7 +108,10 @@ app.post('/api/auth', (req, res) => {
   }
 
   const token = uuidv4();
-  tokens.set(token, userId);
+  db.prepare('INSERT INTO tokens (token, user_id) VALUES (?, ?)').run(token, userId);
+
+  // 清理超过24小时的旧 token
+  db.prepare("DELETE FROM tokens WHERE created_at < datetime('now', '-1 day')").run();
 
   res.json({
     code: 'SUCCESS',
