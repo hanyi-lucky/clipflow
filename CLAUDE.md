@@ -2,6 +2,21 @@
 
 本文件为 Claude Code (claude.ai/code) 在此仓库中工作提供指引。
 
+## 可用 Skills
+
+本项目已安装以下插件提供的 Skills，可通过 `/<skill名称>` 调用：
+
+| Skill | 用途 | 使用场景 |
+|-------|------|----------|
+| `code-review` | 代码审查 | 提交前检查代码质量、潜在 bug |
+| `github` | GitHub 操作 | PR、Issue、Release 管理 |
+| `playwright` | 浏览器自动化 | Web 端 UI 测试 |
+| `frontend-design` | 前端设计 | UI/UX 设计建议 |
+| `feature-dev` | 功能开发 | 新功能开发流程 |
+| `skill-creator` | 创建 Skill | 自定义项目专属 Skill |
+| `claude-md-management` | 文档管理 | CLAUDE.md 维护优化 |
+| `superpowers` | 增强能力 | 高级推理、多步任务 |
+
 ## 构建、测试、检查
 
 ```bash
