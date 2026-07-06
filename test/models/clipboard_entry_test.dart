@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:universal_clipboard/models/clipboard_entry.dart';
+import 'package:clipflow/models/clipboard_entry.dart';
 
 void main() {
   group('ClipboardEntry', () {

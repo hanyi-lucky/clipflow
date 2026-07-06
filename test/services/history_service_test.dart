@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:universal_clipboard/services/history_service.dart';
-import 'package:universal_clipboard/models/clipboard_entry.dart';
+import 'package:clipflow/services/history_service.dart';
+import 'package:clipflow/models/clipboard_entry.dart';
 
 void main() {
   late HistoryService service;

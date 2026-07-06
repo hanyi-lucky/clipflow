@@ -16,7 +16,7 @@ class ClipboardMonitor {
 
   ClipboardMonitor({required this.onChanged}) {
     if (Platform.isAndroid) {
-      _androidChannel = const MethodChannel('universal_clipboard/clipboard');
+      _androidChannel = const MethodChannel('clipflow/clipboard');
       _androidChannel!.setMethodCallHandler(_handleAndroidMethodCall);
     }
   }

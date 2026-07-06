@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:universal_clipboard/models/clipboard_entry.dart';
-import 'package:universal_clipboard/models/device.dart';
-import 'package:universal_clipboard/services/history_service.dart';
-import 'package:universal_clipboard/services/encryption_service.dart';
+import 'package:clipflow/models/clipboard_entry.dart';
+import 'package:clipflow/models/device.dart';
+import 'package:clipflow/services/history_service.dart';
+import 'package:clipflow/services/encryption_service.dart';
 
 /// Smoke tests for core services.
 /// Full UI tests will be verified manually via `flutter run` on each platform.

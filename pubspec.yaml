@@ -1,4 +1,4 @@
-name: universal_clipboard
+name: clipflow
 description: Cross-platform clipboard sync with E2E encryption
 publish_to: 'none'
 version: 1.0.0+1

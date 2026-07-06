@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:universal_clipboard/services/encryption_service.dart';
+import 'package:clipflow/services/encryption_service.dart';
 
 void main() {
   late EncryptionService service;
