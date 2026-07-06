@@ -66,7 +66,8 @@ Flutter App → HTTP POST → Node.js Server (Express + SQLite)
 
 - 主密码 → PBKDF2 派生 256 位 AES 密钥
 - 每台设备共享同一 Salt（存储在云端）
-- 不同密码 → 不同密钥 → 无法解密
+- 相同密码 → 相同密钥 → 数据共享
+- 不同密码 → 不同密钥 → 数据隔离
 
 ## 项目结构
 

@@ -34,5 +34,5 @@ flutter build windows --release
 | 平台 | 版本 | 日期 | 文件 |
 |-----|------|------|------|
 | macOS | v1.1.0 | 2026-06-26 | `macos/ClipFlow.dmg` |
-| Android | - | - | 待构建 |
+| Android | v1.3.0 | 2026-07-05 | `build/app/outputs/flutter-apk/app-release.apk` |
 | Windows | - | - | 待开发 |

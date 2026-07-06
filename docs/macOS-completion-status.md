@@ -50,7 +50,23 @@ Node.js Server (Express + SQLite)
 | Dock 图标重新打开 | applicationShouldHandleReopen | ✅ |
 | App 图标 | 自定义 ClipFlow 图标 | ✅ |
 
-## 加密机制
+## 账户与加密机制
+
+### 密码即账户
+
+```
+用户输入密码
+    ↓
+SHA256("clipflow:$password") → userId（前16位，加 user_ 前缀）
+    ↓
+POST /api/auth { userId } → 获取 token
+```
+
+- 相同密码 → 相同 userId → 共享数据
+- 不同密码 → 不同 userId → 数据完全隔离
+- 无需注册，密码本身就是身份标识
+
+### 端到端加密
 
 ```
 主密码 → PBKDF2(100000轮, SHA-256) → 256位 AES 密钥
@@ -62,6 +78,10 @@ Salt（所有设备共享）→ 存储在 clipboard/salt
 
 - 不同密码 → 不同密钥 → 解密失败
 - 相同密码 + 相同 Salt → 相同密钥 → 解密成功
+
+### Token 持久化
+
+服务器 token 存储在 SQLite `tokens` 表中（非内存），重启不丢失。客户端收到 401 时自动重新登录并重试请求。
 
 ## 同步去重
 
@@ -115,6 +135,8 @@ hdiutil create -volname "ClipFlow" -srcfolder /path/to/ClipFlow.app -ov -format 
 |-----|------|------|
 | v1.0.0 | 2026-06-24 | 初版：核心同步功能 |
 | v1.1.0 | 2026-06-26 | UI 设计 + Salt 同步修复 + 主题切换 |
+| v1.2.0 | 2026-06-27 | 迁移阿里云自建服务器 |
+| v1.3.0 | 2026-07-05 | 密码即账户 + Token 持久化 + 401 自动重登录 |
 
 ---
 
