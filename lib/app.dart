@@ -5,8 +5,8 @@ import 'screens/home_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/unlock_screen.dart';
 
-class UniversalClipboardApp extends StatelessWidget {
-  const UniversalClipboardApp({super.key});
+class ClipFlowApp extends StatelessWidget {
+  const ClipFlowApp({super.key});
 
   static const _seedColor = Color(0xFF5B6CF0);
 

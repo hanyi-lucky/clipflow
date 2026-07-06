@@ -1,4 +1,4 @@
-# Universal Clipboard — MVP 使用说明
+# ClipFlow — MVP 使用说明
 
 ## 概述
 
@@ -55,7 +55,7 @@
 ### 安装
 
 ```bash
-cd ~/universal_clipboard
+cd ~/clipflow
 flutter build apk --release
 ```
 
@@ -80,13 +80,13 @@ flutter build apk --release
 ## Windows 使用
 
 ```bash
-cd ~/universal_clipboard
+cd ~/clipflow
 flutter build windows --release
 ```
 
 产物路径：`build/windows/x64/runner/Release/`
 
-将整个 Release 文件夹复制到 Windows 电脑，运行 `universal_clipboard.exe`。
+将整个 Release 文件夹复制到 Windows 电脑，运行 `clipflow.exe`。
 
 使用方式与 macOS 相同。
 

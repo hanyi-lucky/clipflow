@@ -1,4 +1,4 @@
-package com.universalclipboard.universal_clipboard
+package com.clipflow.clipflow
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine

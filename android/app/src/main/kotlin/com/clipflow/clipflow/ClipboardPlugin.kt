@@ -1,4 +1,4 @@
-package com.universalclipboard.universal_clipboard
+package com.clipflow.clipflow
 
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,7 +12,7 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ClipboardManager.OnPri
     private var clipboardManager: ClipboardManager? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        channel = MethodChannel(binding.binaryMessenger, "universal_clipboard/clipboard")
+        channel = MethodChannel(binding.binaryMessenger, "clipflow/clipboard")
         channel.setMethodCallHandler(this)
         clipboardManager = binding.applicationContext
             .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

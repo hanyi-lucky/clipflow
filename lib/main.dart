@@ -14,7 +14,7 @@ void main() {
         ChangeNotifierProvider(create: (_) => SettingsProvider()),
         ChangeNotifierProvider(create: (_) => ClipboardProvider()),
       ],
-      child: const UniversalClipboardApp(),
+      child: const ClipFlowApp(),
     ),
   );
 }

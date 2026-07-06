@@ -8,7 +8,7 @@
 
 ### 1. 应用清理与重新安装
 - Mac 端：删除 `/Applications/ClipFlow.app`、Preferences、Application Scripts、CrashReporter 残留
-- Android 端：卸载旧版 APK（`com.universalclipboard.universal_clipboard`）
+- Android 端：卸载旧版 APK（`com.clipflow.clipflow`）
 - 两端均已重新构建并安装最新代码
 
 ### 2. 同步架构修复 — userId 生成策略

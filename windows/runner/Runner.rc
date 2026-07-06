@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.universalclipboard" "\0"
-            VALUE "FileDescription", "universal_clipboard" "\0"
+            VALUE "CompanyName", "com.clipflow" "\0"
+            VALUE "FileDescription", "ClipFlow" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "universal_clipboard" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.universalclipboard. All rights reserved." "\0"
-            VALUE "OriginalFilename", "universal_clipboard.exe" "\0"
-            VALUE "ProductName", "universal_clipboard" "\0"
+            VALUE "InternalName", "clipflow" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 clipflow. All rights reserved." "\0"
+            VALUE "OriginalFilename", "clipflow.exe" "\0"
+            VALUE "ProductName", "ClipFlow" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

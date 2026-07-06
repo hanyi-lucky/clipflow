@@ -29,7 +29,7 @@ void main() {
 
   test('encrypt and decrypt should round-trip correctly', () async {
     final key = await service.deriveKey(testPassword, testSalt);
-    const plaintext = 'Hello, Universal Clipboard!';
+    const plaintext = 'Hello, ClipFlow!';
 
     final encrypted = await service.encrypt(plaintext, key);
     final decrypted = await service.decrypt(encrypted, key);
