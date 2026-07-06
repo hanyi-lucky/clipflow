@@ -43,19 +43,117 @@ Node.js Server (Express + SQLite)
 
 - **API 基础地址：** `http://121.196.222.122:3000/api`
 - **健康检查：** `http://121.196.222.122:3000/api/ping`
+- **SSH：** `ssh -i /Users/hanyi/Downloads/key241294.pem root@121.196.222.122`
+- **服务管理：** `systemctl restart clipflow`
+- **服务器代码路径：** `/opt/clipflow/index.js`
+- **数据库路径：** `/opt/clipflow/clipflow.db`（SQLite）
 
-### 入口与路由
+## 历史重大决策
+
+记录项目演进过程中的关键选择，帮助理解"为什么是现在这样"。
+
+### 后端三迁：Firebase → 腾讯云 → 阿里云自建
+
+| 阶段 | 方案 | 迁移原因 |
+|------|------|----------|
+| v1.0 | Firebase | 初期快速验证，但国内需要梯子，用户无法使用 |
+| v1.1 | 腾讯云开发 CloudBase | 国内直连，通过云函数 HTTP 端点访问数据库。但使用的是体验版，每月有资源点上限，而本项目的轮询机制会 24 小时与数据库互动，资源点很快耗尽 |
+| v1.2+ | 阿里云 ECS 自建 | 买了一年服务器，无限次调用，完全自主可控，可直接 SSH 调试 |
+
+**教训：** 有持续轮询需求的项目不适合按量计费或有资源上限的 BaaS 服务。自建服务器固定成本，无调用次数限制。
+
+### 桌面端轮询 vs 系统原生 API
+
+**决策：** macOS/Windows 使用 `Timer.periodic` 500ms 轮询 `Clipboard.getData()`，而非系统原生剪切板变更通知 API。
+
+**原因：**
+- Flutter 没有跨平台的剪切板变更通知 API
+- 各平台原生 API 差异大（macOS 用 NSPasteboard observer，Windows 用 AddClipboardFormatListener）
+- 500ms 轮询对剪切板场景完全够用，CPU 占用极低
+- 实现简单，一个文件覆盖所有桌面平台
+
+**例外：** Android 使用原生 `ClipboardManager.OnPrimaryClipChangedListener`（通过 MethodChannel），因为 Android 10+ 限制了后台剪切板访问，轮询方式不可靠。
+
+### 端到端加密 vs 服务器端加密
+
+**决策：** 所有数据在客户端加密后才上传，服务器只存储密文。
+
+**原因：** 剪切板内容可能包含密码、token、私密信息等极度敏感数据。如果服务器被攻破，密文无法被解读。即使是我们自己运维的服务器，也不应该能看到用户数据。
+
+### SQLite vs MongoDB/Redis
+
+**决策：** 使用 SQLite 作为服务器数据库。
+
+**原因：** 阿里云 ECS 是 2核2G 小机器，SQLite 零配置、零运维、单文件存储，对这个量级（个人工具，几台设备）绰绰有余。MongoDB/Redis 会额外占用几百 MB 内存，对小机器不友好。
+
+---
+
+## 核心设计决策（重要！）
+
+以下是不可轻易更改的架构决策，修改前必须理解其原因。
+
+### 1. 密码即账户（Password-as-Identity）
+
+**机制：** userId = `user_` + `SHA256("clipflow:$password").substring(0, 16)`
+
+- 相同密码 → 相同 userId → 共享数据
+- 不同密码 → 不同 userId → 数据完全隔离
+- 不存在传统的注册/登录/用户名系统
+
+**为什么这样做：** 用户无需注册账号，输入密码即可跨设备同步。密码本身就是身份标识。
+
+**⚠️ 不要做的事：**
+- 不要实现邮箱/用户名注册系统
+- 不要让用户创建独立的账户
+- 不要修改 userId 的派生算法（会导致已有数据无法访问）
+
+### 2. Token 持久化
+
+**机制：** 服务器 token 存储在 SQLite `tokens` 表中（不是内存 Map），重启不丢失。
+
+**为什么这样做：** 早期版本用内存 Map 存 token，服务器重启后所有客户端 token 失效，触发 FOREIGN KEY 错误。
+
+**⚠️ 不要做的事：**
+- 不要把 token 改回内存存储
+- 不要删除 `tokens` 表
+- 客户端收到 401 时会自动重新登录（`cloudbase_service.dart` 的 `_callApi`），不要手动处理
+
+### 3. 数据库无外键约束
+
+**机制：** 所有表（clipboard、history、devices、salt、tokens）都没有 FOREIGN KEY 约束。
+
+**为什么这样做：** 早期有 FOREIGN KEY，当 token 失效导致 userId fallback 到不存在的 `'default'` 时，INSERT 操作报错且无法被客户端优雅处理。
+
+**⚠️ 不要做的事：**
+- 不要给现有表添加 FOREIGN KEY 约束
+- 如果需要新建表，也不要加 FOREIGN KEY
+
+### 4. 认证流程
+
+```
+用户输入密码
+    ↓
+SHA256("clipflow:$password") → userId
+    ↓
+POST /api/auth { userId } → 获取 token
+    ↓
+后续请求 Authorization: Bearer <token>
+    ↓
+token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
+```
+
+## 入口与路由
 
 - `lib/main.dart` — 应用入口。用 `MultiProvider` 包裹组件树启动 App。
 - `lib/app.dart` — `MaterialApp`，3 个命名路由：`/unlock` → `/home` → `/settings`。
 
-### Provider 状态层
+## Provider 状态层
 
 - `AuthProvider` — 生成设备 ID + 设备注册。通过 `LocalStorage` 在本地存储 `deviceId`/`deviceName`。
 - `SettingsProvider` — 自动同步开关、历史记录条数限制。底层使用 `SharedPreferences`。
 - `ClipboardProvider` — **核心调度器。** 持有 `SyncService`、`ClipboardMonitor`、`HistoryService`、`EncryptionService`。管理同步循环（500ms 轮询）、多选拼接状态、以及所有剪切板读写（含循环防护）。
 
-### 数据流（复制 → 同步 → 粘贴）
+## 数据流（复制 → 同步 → 粘贴）
 
 ```
 [设备 A 复制内容]
@@ -63,20 +161,20 @@ Node.js Server (Express + SQLite)
     ↓ _onClipboardChanged() → 防抖 500ms → _uploadContent()
     ↓ SyncService.uploadContent()：SHA256 哈希 → AES-256-GCM 加密 → 调用服务器 API 写入数据库
     ↓
-[其他设备通过 _startSyncLoop() 每 500ms 轮询云函数]
+[其他设备通过 _startSyncLoop() 每 500ms 轮询服务器]
     ↓ SyncService.downloadLatestContent()：跳过自己的上传或过期数据 → 解密 → 返回
     ↓ ClipboardProvider 写入系统剪切板（先暂停监听器防止循环同步）
     ↓ 条目加入 HistoryService
 ```
 
-### 服务器 API
+## 服务器 API
 
 服务器通过 HTTP 接收 JSON 请求：
 
 | 方法 | 路径 | 说明 |
 |-----|------|------|
 | GET | `/api/ping` | 健康检查 |
-| POST | `/api/auth` | 登录/注册 |
+| POST | `/api/auth` | 登录/注册（body: `{ userId }`） |
 | GET | `/api/clipboard` | 获取最新剪切板 |
 | POST | `/api/clipboard` | 上传剪切板内容 |
 | GET | `/api/history` | 获取历史记录 |
@@ -87,46 +185,47 @@ Node.js Server (Express + SQLite)
 | GET | `/api/salt` | 获取加密盐值 |
 | POST | `/api/salt` | 设置加密盐值 |
 
-### 加密
+## 加密
 
 - `EncryptionService` 在 `lib/services/encryption_service.dart` — AES-256-GCM（基于 pointycastle）。密钥通过 PBKDF2-HMAC-SHA256 派生（10 万次迭代）。`EncryptedData` 将 IV + 密文打包为单个 base64 字符串。
 - 主密码在 `UnlockScreen` 输入。Salt 存储在服务器数据库。所有设备使用相同密码即可派生相同密钥。
 
-### 剪切板监听
+## 剪切板监听
 
 - `ClipboardMonitor` 在 `lib/services/clipboard_monitor.dart` — 桌面端：`Timer.periodic` 每 500ms 检查 `Clipboard.getData()`。Android：通过 `MethodChannel` 调用原生 `ClipboardManager.OnPrimaryClipChangedListener`。提供 `pause()`/`resume()` 方法，在将接收到的数据写入剪切板时暂停监听以防止循环同步。
 
-### 数据库模型
+## 数据库模型
 
 ```
 devices/{deviceId}        — 设备信息
 clipboard/current         — 最新剪切板条目（已加密）
 clipboard/salt            — PBKDF2 密钥派生盐值
 history/{entryId}         — 剪切板历史记录（已加密）
+tokens/{token}            — 认证 token（持久化，重启不丢失）
 ```
 
-数据库表在服务器启动时自动创建（SQLite）。
+数据库表在服务器启动时自动创建（SQLite）。所有表无 FOREIGN KEY 约束。
 
-### 同步去重
+## 同步去重
 
 - 上传：明文 SHA256 与 `_lastUploadedHash` 比对 — 相同则跳过。
 - 下载：时间戳比对 + 来源设备检查 — 跳过自己的上传和过期数据。
 
-### 多选拼接
+## 多选拼接
 
 - `ClipboardProvider` 维护 `_isMergeMode`、`_selectedIds`（有序集合）、`_mergeSeparator`。
 - `MergeBar` 组件显示实时拼接预览和分隔符下拉选择器（换行、逗号、分号、空格）。
 - 复制拼接内容：用选定的分隔符将已选条目的内容拼接为一个字符串写入剪切板。
 
-### 测试说明
+## 测试说明
 
 核心服务测试（加密、历史记录、数据模型）不依赖服务器，可直接运行。UI 测试需要网络连接，当前以 smoke test 为主。`test/widget_test.dart` 包含核心模型和服务的基础验证。
 
-### 服务器部署
+## 服务器部署
 
 ```bash
 # 在阿里云服务器上
-ssh -i key241294.pem root@121.196.222.122
+ssh -i /Users/hanyi/Downloads/key241294.pem root@121.196.222.122
 cd /opt/clipflow
 bash deploy.sh
 ```
