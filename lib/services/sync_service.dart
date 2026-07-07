@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import '../repositories/cloud_repository.dart';
 import '../services/encryption_service.dart';
 
@@ -17,6 +18,11 @@ class SyncService {
 
   String get lastUploadedHash => _lastUploadedHash;
 
+  /// 标记内容为"已同步"，防止剪切板监听器重复上传刚下载的内容
+  void markAsDownloaded(String content) {
+    _lastUploadedHash = sha256.convert(utf8.encode(content)).toString();
+  }
+
   SyncService({
     required CloudRepository repo,
     required EncryptionService encryption,
@@ -31,9 +37,10 @@ class SyncService {
         _devicePlatform = devicePlatform,
         _key = key;
 
-  Future<void> uploadContent(String content) async {
+  /// 上传内容到服务器。返回 true 表示成功上传，false 表示跳过（重复内容）
+  Future<bool> uploadContent(String content) async {
     final hash = sha256.convert(utf8.encode(content)).toString();
-    if (hash == _lastUploadedHash) return;
+    if (hash == _lastUploadedHash) return false;
 
     _lastUploadedHash = hash;
 
@@ -57,13 +64,14 @@ class SyncService {
       ...data,
       'pinned': false,
     });
+    return true;
   }
 
   Future<String?> downloadLatestContent() async {
     final current = await _repo.getCurrentClipboard();
     if (current == null) return null;
 
-    final sourceDevice = current['sourceDevice'] as String?;
+    final sourceDevice = current['source_device'] as String?;
     if (sourceDevice == _deviceId) return null;
 
     final timestamp = DateTime.fromMillisecondsSinceEpoch(
@@ -78,8 +86,14 @@ class SyncService {
     _lastReceivedTimestamp = timestamp;
 
     final encryptedBase64 = current['content'] as String;
-    final encryptedData = EncryptedData.fromBase64(encryptedBase64);
-    return await _encryption.decrypt(encryptedData, _key);
+    try {
+      final encryptedData = EncryptedData.fromBase64(encryptedBase64);
+      final result = await _encryption.decrypt(encryptedData, _key);
+      return result;
+    } catch (e) {
+      debugPrint('[SYNC-DL] DECRYPT ERROR: $e');
+      return null;
+    }
   }
 
   Future<String?> getSalt() => _repo.getSalt();

@@ -12,6 +12,12 @@ class LocalStorage {
   static const _keyHistoryLimit = 'history_limit';
   static const _keyHistory = 'clipboard_history';
   static const _keyThemeMode = 'theme_mode';
+  static const _keyMonitorLastHash = 'monitor_last_hash';
+  static const _keyMonitorLastSyncTime = 'monitor_last_sync_time';
+  static const _keyMonitorIgnoreHashes = 'monitor_ignore_hashes';
+  static const _keyBackgroundSync = 'background_sync';
+  static const _keyAutoSyncOnResume = 'auto_sync_on_resume';
+  static const _keyNotificationSync = 'notification_sync';
 
   final SharedPreferences _prefs;
 
@@ -100,5 +106,44 @@ class LocalStorage {
 
   Future<void> setHistoryJson(String json) async {
     await _prefs.setString(_keyHistory, json);
+  }
+
+  // ClipboardMonitor sync state persistence
+  String? get monitorLastHash => _prefs.getString(_keyMonitorLastHash);
+
+  Future<void> setMonitorLastHash(String hash) async {
+    await _prefs.setString(_keyMonitorLastHash, hash);
+  }
+
+  int? get monitorLastSyncTimeMs => _prefs.getInt(_keyMonitorLastSyncTime);
+
+  Future<void> setMonitorLastSyncTime(int ms) async {
+    await _prefs.setInt(_keyMonitorLastSyncTime, ms);
+  }
+
+  List<String> get monitorIgnoreHashes =>
+      _prefs.getStringList(_keyMonitorIgnoreHashes) ?? [];
+
+  Future<void> setMonitorIgnoreHashes(List<String> hashes) async {
+    await _prefs.setStringList(_keyMonitorIgnoreHashes, hashes);
+  }
+
+  // New sync mode settings
+  bool get backgroundSync => _prefs.getBool(_keyBackgroundSync) ?? true;
+
+  Future<void> setBackgroundSync(bool value) async {
+    await _prefs.setBool(_keyBackgroundSync, value);
+  }
+
+  bool get autoSyncOnResume => _prefs.getBool(_keyAutoSyncOnResume) ?? true;
+
+  Future<void> setAutoSyncOnResume(bool value) async {
+    await _prefs.setBool(_keyAutoSyncOnResume, value);
+  }
+
+  bool get notificationSync => _prefs.getBool(_keyNotificationSync) ?? true;
+
+  Future<void> setNotificationSync(bool value) async {
+    await _prefs.setBool(_keyNotificationSync, value);
   }
 }

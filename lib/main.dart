@@ -14,7 +14,21 @@ void main() {
         ChangeNotifierProvider(create: (_) => SettingsProvider()),
         ChangeNotifierProvider(create: (_) => ClipboardProvider()),
       ],
-      child: const ClipFlowApp(),
+      child: const _ClipFlowBootstrap(),
     ),
   );
+}
+
+/// Wires cross-provider references that can't be done in MultiProvider alone.
+class _ClipFlowBootstrap extends StatelessWidget {
+  const _ClipFlowBootstrap();
+
+  @override
+  Widget build(BuildContext context) {
+    // Connect ClipboardProvider to SettingsProvider after both are created
+    final clipboard = context.read<ClipboardProvider>();
+    final settings = context.read<SettingsProvider>();
+    clipboard.setSettingsProvider(settings);
+    return const ClipFlowApp();
+  }
 }
