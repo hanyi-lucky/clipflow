@@ -19,31 +19,46 @@
 
 ---
 
-# 三代理强制工作流
+# Agent 专用管线工作流
 
 ## 1. 核心原则
 - 禁止主代理在当前会话内分角色模拟开发/测试/验收，必须串行委派真实子代理实例执行。
 - 仅串行委派，一次只启动一个子代理，等其返回后再启动下一个。
 - 子代理拥有完全独立的上下文，其内部工具调用、中间推理过程严禁输出到用户主聊天框，仅将最终结果返回给主代理，由主代理统一汇总交付。
+- 主代理只做路由和编排，不加载 Skill 定义，不执行分析流程。
+
+### 6 个专用 Agent
+| Agent | 职责 | 方法论 | 可写代码 |
+|-------|------|--------|---------|
+| explorer | 代码探索、执行路径追踪 | code-explorer | ❌ |
+| architect | 方案设计、架构决策 | code-architect | ❌ |
+| coder | TDD 代码实现 | test-driven-development | ✅ |
+| tester | 测试验证、完成声明验证 | verification-before-completion | ❌ |
+| reviewer | 终审、置信度评分 | confidence-scoring | ❌ |
+| debugger | 根因分析 | systematic-debugging | ❌ |
 
 ### 工具约束与校验
-- tester、reviewer 禁止使用 Write、Edit 工具修改业务代码，为指令级软约束；
-- 主代理在收到子代理结果后，需交叉校验是否存在违规修改业务代码的操作（检查子代理是否调用了 Write/Edit）；
+- explorer、architect、tester、reviewer、debugger 禁止使用 Write、Edit 工具修改业务代码，为指令级软约束；
+- 主代理在收到子代理结果后，需交叉校验是否存在违规修改业务代码的操作；
 - 所有子代理工具调用可通过 Argus 插件回溯审计。
 
-## 2. 固定执行流程
-用户下发需求 → 主代理判断需求等级 → 按流程串行委派：
+## 2. 任务路由
+用户下发需求 → 主代理判断任务类型 → 按路由表串行委派：
 
-1. **第一阶段：coder** — 完成代码开发与单元测试编写
-2. **第二阶段：tester** — 执行全量测试，输出测试报告
-3. **第三阶段：reviewer** — 终审验收，给出最终结论
+| 类型 | 判断条件 | Agent 管线 |
+|------|---------|-----------|
+| 轻量改动 | 单文件、无逻辑变更（注释、配置、文档、文案） | 主代理直接处理 |
+| Bug 修复 | 用户描述了具体错误行为或测试失败 | explorer → debugger → coder → tester |
+| 新功能 | 需要新增组件、服务、API 或 UI 交互 | explorer → architect → coder → tester → reviewer |
+| 重大改动 | 涉及加密、同步机制、架构重构，或跨 3+ 文件 | explorer → architect → coder → tester → reviewer |
 
 ### 整改循环（最多 3 轮）
-若 reviewer 判定不通过：
-- 主代理将 tester 报告 + reviewer 整改清单合并，作为新上下文传给 coder
-- coder 基于整改清单修复，输出新一轮改动
-- 重新进入 tester → reviewer 流程
-- **最多执行 3 轮整改**；若 3 轮仍未通过 reviewer 验收，则自动终止流程，向用户上报完整问题详情与历史迭代记录，由人工介入处理
+若 tester 或 reviewer 判定不通过：
+1. 主代理派 debugger 做根因分析
+2. 将 debugger 根因分析 + tester 失败报告 + reviewer 整改清单合并，传给 coder
+3. coder 基于根因修复（不自由探索）
+4. 重新进入 tester → reviewer 流程
+5. **最多执行 3 轮整改**；若 3 轮仍未通过，则自动终止流程，向用户上报完整问题详情与历史迭代记录，由人工介入处理
 
 ### 交付规范
 全部验收通过后，主代理统一汇总并交付给用户，内容必须精简：
@@ -54,13 +69,13 @@
 ## 3. 分场景触发规则
 | 场景 | 处理方式 |
 |------|---------|
-| 轻量改动（注释、文案、配置、文档） | 主代理直接处理，不启动三代理流程 |
-| 普通功能新增 / Bug 修复 | 执行标准三代理流程 |
-| 核心重大改动（架构重构、加密逻辑、同步机制、云服务迁移） | 执行完整三代理流程，tester 和 reviewer 加严校验 |
+| 轻量改动（注释、文案、配置、文档） | 主代理直接处理，不启动任何 agent |
+| 普通功能新增 / Bug 修复 | 执行标准管线流程 |
+| 核心重大改动（架构重构、加密逻辑、同步机制） | 执行完整管线流程，reviewer 加严校验 |
 
 ## 4. 子代理调用方式
 使用 Agent 工具，关键参数：
-- `subagent_type`：分别指定 `coder`、`tester`、`reviewer`
+- `subagent_type`：分别指定 `explorer`、`architect`、`coder`、`tester`、`reviewer`、`debugger`
 - `run_in_background: false`：确保串行等待
 - `prompt`：包含完整的任务描述 + 上下文（整改时需包含前序报告）
 
