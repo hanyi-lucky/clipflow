@@ -50,7 +50,7 @@
 | 轻量改动 | 单文件、无逻辑变更（注释、配置、文档、文案） | 主代理直接处理 |
 | Bug 修复 | 用户描述了具体错误行为或测试失败 | explorer → debugger → coder → tester |
 | 新功能 | 需要新增组件、服务、API 或 UI 交互 | explorer → architect → coder → tester → reviewer |
-| 重大改动 | 涉及加密、同步机制、架构重构，或跨 3+ 文件 | explorer → architect → coder → tester → reviewer |
+| 重大改动 | 涉及加密、同步机制、架构重构，或跨 3+ 文件 | explorer → architect → coder → tester → reviewer → /code-review |
 
 ### 整改循环（最多 3 轮）
 若 tester 或 reviewer 判定不通过：
@@ -71,7 +71,7 @@
 |------|---------|
 | 轻量改动（注释、文案、配置、文档） | 主代理直接处理，不启动任何 agent |
 | 普通功能新增 / Bug 修复 | 执行标准管线流程 |
-| 核心重大改动（架构重构、加密逻辑、同步机制） | 执行完整管线流程，reviewer 加严校验 |
+| 核心重大改动（架构重构、加密逻辑、同步机制） | 执行完整管线流程，reviewer 通过后再调 /code-review 做多角度审查 |
 
 ## 4. 子代理调用方式
 使用 Agent 工具，关键参数：
