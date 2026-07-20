@@ -7,6 +7,7 @@ import '../providers/clipboard_provider.dart';
 import '../providers/settings_provider.dart';
 import '../repositories/local_storage.dart';
 import '../services/encryption_service.dart';
+import '../core/hex_utils.dart';
 
 class UnlockScreen extends StatefulWidget {
   const UnlockScreen({super.key});
@@ -88,20 +89,20 @@ class _UnlockScreenState extends State<UnlockScreen> {
 
       if (cloudSalt != null) {
         // 云端已有 salt → 所有设备共享同一 salt
-        salt = _hexToBytes(cloudSalt);
+        salt = hexToBytes(cloudSalt);
         await storage.setEncryptionSalt(cloudSalt);
       } else {
         // 云端无 salt → 生成新 salt 并上传（首台设备）
         final localSalt = storage.encryptionSalt;
         if (localSalt != null) {
-          salt = _hexToBytes(localSalt);
+          salt = hexToBytes(localSalt);
         } else {
           salt = _encryption.generateSalt().toList();
-          final saltHex = _bytesToHex(salt);
+          final saltHex = bytesToHex(salt);
           await storage.setEncryptionSalt(saltHex);
         }
         // 上传到云端，让其他设备共享
-        await cloudRepo.setSalt(_bytesToHex(salt));
+        await cloudRepo.setSalt(bytesToHex(salt));
       }
 
       final key = await _encryption.deriveKey(password, salt);
@@ -306,18 +307,6 @@ class _UnlockScreenState extends State<UnlockScreen> {
         ),
       ),
     );
-  }
-
-  List<int> _hexToBytes(String hex) {
-    final bytes = <int>[];
-    for (int i = 0; i < hex.length; i += 2) {
-      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
-    }
-    return bytes;
-  }
-
-  String _bytesToHex(List<int> bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   @override

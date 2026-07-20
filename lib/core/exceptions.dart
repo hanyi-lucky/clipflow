@@ -18,3 +18,10 @@ class SyncException extends ClipboardException {
 class AuthException extends ClipboardException {
   AuthException(super.message) : super(code: 'AUTH_ERROR');
 }
+
+class DecryptionException implements Exception {
+  final String message;
+  DecryptionException(this.message);
+  @override
+  String toString() => 'DecryptionException: $message';
+}

@@ -13,6 +13,13 @@ class CloudBaseService {
   String? get openId => _openId;
   bool get isLoggedIn => _token != null;
 
+  /// Clear all authentication state
+  void clearToken() {
+    _token = null;
+    _openId = null;
+    _userId = null;
+  }
+
   /// 登录/注册（userId 从密码派生，相同密码 = 相同账户 = 共享数据）
   Future<void> signInAnonymously({String? userId}) async {
     userId ??= DateTime.now().millisecondsSinceEpoch.toString();
@@ -126,6 +133,26 @@ class CloudBaseService {
     return null;
   }
 
+  /// 获取剪切板内容（含 deletedIds，用于同步删除）
+  Future<Map<String, dynamic>?> getClipboardWithDeletedIds() async {
+    final result = await _callApi('GET', '/clipboard');
+    if (result['code'] == 'NOT_FOUND') return null;
+    if (result['code'] != 'SUCCESS') return null;
+    final data = result['data'] as Map<String, dynamic>?;
+    if (data == null) return null;
+    final deletedIds = (result['deletedIds'] as List?)?.cast<String>() ?? [];
+    final restoredEntries = (result['restoredEntries'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    return {...data, '_deletedIds': deletedIds, '_restoredEntries': restoredEntries};
+  }
+
+  /// 恢复已删除的历史记录
+  Future<void> restoreHistoryEntry(String entryId) async {
+    final result = await _callApi('POST', '/history/$entryId/restore');
+    if (result['code'] != 'SUCCESS') {
+      throw Exception('restoreHistoryEntry failed');
+    }
+  }
+
   /// 查询文档列表（兼容旧接口）
   Future<List<Map<String, dynamic>>> queryDocuments(
     String collection, {
@@ -136,6 +163,11 @@ class CloudBaseService {
   }) async {
     if (collection == 'history') {
       final result = await _callApi('GET', '/history?limit=$limit');
+      if (result['code'] != 'SUCCESS') return [];
+      final records = result['data']['records'] as List? ?? [];
+      return records.cast<Map<String, dynamic>>();
+    } else if (collection == 'trash') {
+      final result = await _callApi('GET', '/history/trash');
       if (result['code'] != 'SUCCESS') return [];
       final records = result['data']['records'] as List? ?? [];
       return records.cast<Map<String, dynamic>>();

@@ -25,7 +25,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=clipflow
 WorkingDirectory=/opt/clipflow
 ExecStart=/usr/bin/node index.js
 Restart=always

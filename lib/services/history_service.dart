@@ -5,7 +5,17 @@ class HistoryService {
   final int maxEntries;
   final List<ClipboardEntry> _entries = [];
 
-  List<ClipboardEntry> get entries => List.unmodifiable(_entries);
+  List<ClipboardEntry> get entries {
+    final sorted = List<ClipboardEntry>.from(_entries);
+    sorted.sort((a, b) {
+      // 置顶条目优先
+      if (a.isPinned && !b.isPinned) return -1;
+      if (!a.isPinned && b.isPinned) return 1;
+      // 同组内按时间倒序（最新在前）
+      return b.timestamp.compareTo(a.timestamp);
+    });
+    return List.unmodifiable(sorted);
+  }
 
   HistoryService({required this.maxEntries});
 
@@ -17,6 +27,7 @@ class HistoryService {
     if (existingIndex >= 0) {
       final existing = _entries[existingIndex];
       _entries[existingIndex] = existing.copyWith(
+        id: entry.id,
         timestamp: entry.timestamp,
         sourceDeviceId: entry.sourceDeviceId,
         sourceDeviceName: entry.sourceDeviceName,

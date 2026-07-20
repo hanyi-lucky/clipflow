@@ -89,6 +89,7 @@ class AuthProvider extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
+    _cloudService.clearToken();
     _currentDevice = null;
     notifyListeners();
   }

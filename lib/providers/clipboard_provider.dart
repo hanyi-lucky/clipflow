@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:ui' show AppExitResponse, ViewFocusEvent;
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
@@ -70,6 +73,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   String _mergeSeparator = '\n';
   Timer? _uploadDebounce;
   Timer? _syncTimer;
+  Timer? _nextSyncTimer;
+  final Set<String> _recentlyDeletedHashes = {};
+  int _consecutiveFailures = 0;
   bool _serverConnected = false;
 
   List<ClipboardEntry> get history => _historyService.entries;
@@ -88,12 +94,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   DateTime? get lastSyncTime => _monitor?.lastSyncTime;
 
   List<ClipboardEntry> get selectedEntries {
+    final orderMap = <String, int>{};
+    var i = 0;
+    for (final id in _selectedIds) {
+      orderMap[id] = i++;
+    }
     final entries = _historyService.entries.where((e) => _selectedIds.contains(e.id)).toList();
-    entries.sort((a, b) {
-      final orderA = _selectedIds.toList().indexOf(a.id);
-      final orderB = _selectedIds.toList().indexOf(b.id);
-      return orderA.compareTo(orderB);
-    });
+    entries.sort((a, b) => (orderMap[a.id] ?? 0).compareTo(orderMap[b.id] ?? 0));
     return entries;
   }
 
@@ -115,10 +122,8 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     _storage = storage;
     _cloudRepo = cloudRepo;
 
-    final savedHistory = storage.historyJson;
-    if (savedHistory != null) {
-      _historyService.fromJson(savedHistory);
-    }
+    // 不从本地存储加载旧历史（可能包含错误的设备名）
+    // 改为从服务器加载正确的历史记录
 
     _syncService = SyncService(
       repo: cloudRepo,
@@ -129,8 +134,12 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       key: encryptionKey,
     );
 
+    // 从服务器加载历史记录（带有正确的设备来源信息）
+    await _loadHistoryFromServer();
+
     _monitor = ClipboardMonitor(onChanged: _onClipboardChanged, storage: storage);
-    _monitor!.setSyncService(_syncService);
+    _monitor!.setSyncService(_syncService!);
+    _monitor!.onContentSynced = _addSyncedToHistory;
     _monitor!.loadState();
     // Forward monitor state changes to UI
     _monitor!.addListener(_onMonitorChanged);
@@ -147,14 +156,76 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     }
 
     // Start foreground service if notification sync is enabled
-    debugPrint('[CLIP-PROVIDER] _settingsProvider: ${_settingsProvider != null ? "set" : "NULL"}');
-    debugPrint('[CLIP-PROVIDER] notificationSync: ${_settingsProvider?.notificationSync}');
     if (_settingsProvider?.notificationSync ?? true) {
-      debugPrint('[CLIP-PROVIDER] Starting sync service...');
       startSyncService();
     }
 
     notifyListeners();
+  }
+
+  /// 从服务器加载历史记录，确保设备来源信息正确
+  ///
+  /// 全量加载策略：请求更大 limit（200），失败时保留当前内存历史，
+  /// 加载后合并本地独有的条目（服务器没有的）。
+  Future<void> _loadHistoryFromServer() async {
+    if (_cloudRepo == null) return;
+    try {
+      final serverEntries = await _cloudRepo!.getHistoryEntries(limit: 200);
+
+      // 保存当前本地独有的条目（服务器没有的）
+      final serverIds = serverEntries.map((e) => e['id'] as String).toSet();
+      final localOnlyEntries = _historyService.entries
+          .where((e) => !serverIds.contains(e.id))
+          .toList();
+
+      _historyService.clear();
+
+      // 反转顺序：从最旧到最新处理
+      // 这样当 addEntry 的去重逻辑遇到重复内容时，
+      // 最新条目的设备名会覆盖最旧条目的设备名
+      final reversed = serverEntries.reversed.toList();
+
+      for (final entry in reversed) {
+        final content = entry['content'] as String? ?? '';
+        if (content.isEmpty) continue;
+
+        // 解密内容，失败则跳过该条目
+        String decryptedContent;
+        try {
+          decryptedContent = await _syncService!.decryptContent(content);
+        } catch (e) {
+          continue;
+        }
+
+        _historyService.addEntry(ClipboardEntry(
+          id: entry['id'] as String? ?? const Uuid().v4(),
+          content: decryptedContent,
+          sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+          sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+          sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+          timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+          type: ContentType.text,
+          isPinned: (entry['pinned'] as int?) == 1,
+        ));
+      }
+
+      // 合并本地独有的条目（服务器没有的）
+      for (final entry in localOnlyEntries) {
+        _historyService.addEntry(entry);
+      }
+
+      await _saveHistory();
+    } catch (e) {
+      _errorMessage = '从服务器加载历史失败: $e';
+      notifyListeners();
+      // 失败时保留当前内存历史，不清空
+      if (_historyService.entries.isEmpty) {
+        final savedHistory = _storage?.historyJson;
+        if (savedHistory != null) {
+          _historyService.fromJson(savedHistory);
+        }
+      }
+    }
   }
 
   // -- WidgetsBindingObserver --
@@ -182,9 +253,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       const channel = MethodChannel('clipflow/clipboard');
       try {
         await channel.invokeMethod('startSyncService');
-        print('[CLIP-PROVIDER] Native startSyncService invoked');
+        debugPrint('[CLIP-PROVIDER] Native startSyncService invoked');
       } catch (e) {
-        print('[CLIP-PROVIDER] startSyncService ERROR: $e');
+        debugPrint('[CLIP-PROVIDER] startSyncService ERROR: $e');
       }
     }
     _startSyncLoop();
@@ -197,13 +268,15 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       const channel = MethodChannel('clipflow/clipboard');
       try {
         await channel.invokeMethod('stopSyncService');
-        print('[CLIP-PROVIDER] Native stopSyncService invoked');
+        debugPrint('[CLIP-PROVIDER] Native stopSyncService invoked');
       } catch (e) {
-        print('[CLIP-PROVIDER] stopSyncService ERROR: $e');
+        debugPrint('[CLIP-PROVIDER] stopSyncService ERROR: $e');
       }
     }
     _syncTimer?.cancel();
     _syncTimer = null;
+    _nextSyncTimer?.cancel();
+    _nextSyncTimer = null;
   }
 
   /// Stop all sync activity (used when user disables background sync)
@@ -211,6 +284,8 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     _monitor?.pause();
     _syncTimer?.cancel();
     _syncTimer = null;
+    _nextSyncTimer?.cancel();
+    _nextSyncTimer = null;
     _setStatus(SyncStatus.paused);
   }
 
@@ -238,6 +313,21 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     notifyListeners();
   }
 
+  /// Add synced content to local history (called by monitor after upload)
+  void _addSyncedToHistory(String content, String serverId) {
+    _historyService.addEntry(ClipboardEntry(
+      id: serverId,
+      content: content,
+      sourceDeviceId: _syncService!.deviceId,
+      sourceDeviceName: _syncService!.deviceName,
+      sourcePlatform: Platform.operatingSystem,
+      timestamp: DateTime.now(),
+      type: ContentType.text,
+    ));
+    _saveHistory();
+    notifyListeners();
+  }
+
   void _onClipboardChanged(String content) {
     _uploadDebounce?.cancel();
     _uploadDebounce = Timer(AppConstants.uploadDebounce, () {
@@ -247,18 +337,24 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
   Future<void> _uploadContent(String content) async {
     if (_syncService == null) return;
+
+    // 截断超长内容
+    final truncatedContent = content.length > AppConstants.maxContentLength
+        ? content.substring(0, AppConstants.maxContentLength)
+        : content;
+
     _setStatus(SyncStatus.syncing);
 
     try {
-      final uploaded = await _syncService!.uploadContent(content);
+      final serverId = await _syncService!.uploadContent(truncatedContent);
 
       // 只有真正上传成功才创建本地历史记录（跳过从其他设备同步来的内容）
-      if (uploaded) {
+      if (serverId != null) {
         _historyService.addEntry(ClipboardEntry(
-          id: const Uuid().v4(),
-          content: content,
-          sourceDeviceId: 'local',
-          sourceDeviceName: '本设备',
+          id: serverId,
+          content: truncatedContent,
+          sourceDeviceId: _syncService!.deviceId,
+          sourceDeviceName: _syncService!.deviceName,
           sourcePlatform: Platform.operatingSystem,
           timestamp: DateTime.now(),
           type: ContentType.text,
@@ -277,74 +373,169 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   }
 
   void _startSyncLoop() {
-    _syncTimer?.cancel(); // 防止 Timer 泄漏
-    _syncTimer = Timer.periodic(AppConstants.pollInterval, (_) async {
-      if (_syncService == null || _cloudRepo == null) return;
-      if (_syncStatus == SyncStatus.paused) return;
+    _syncTimer?.cancel();
+    _nextSyncTimer?.cancel();
+    _consecutiveFailures = 0;
+    // 启动时立即执行一次同步，确保数据最新
+    _setStatus(SyncStatus.syncing);
+    _syncTick();
+  }
 
-      try {
-        final content = await _syncService!.downloadLatestContent();
-        if (content != null && content.isNotEmpty) {
-          // 标记为已下载，防止监听器重复上传
-          _syncService!.markAsDownloaded(content);
+  void _scheduleNextSync() {
+    final delay = _consecutiveFailures == 0
+        ? AppConstants.pollInterval
+        : Duration(
+            milliseconds: (AppConstants.pollInterval.inMilliseconds * (1 << _consecutiveFailures.clamp(0, 6)))
+                .clamp(500, 30000),
+          );
+    _nextSyncTimer = Timer(delay, _syncTick);
+  }
 
-          // Add to ignoreHashes so syncClipboard() won't re-upload this content
+  Future<void> _syncTick() async {
+    if (_syncService == null || _cloudRepo == null) return;
+    if (_syncStatus == SyncStatus.paused) {
+      _scheduleNextSync();
+      return;
+    }
+
+    try {
+      final result = await _syncService!.downloadLatestContent();
+
+      // 处理删除同步：从本地历史中移除被其他设备删除的条目
+      if (result != null && result.deletedIds.isNotEmpty) {
+        for (final id in result.deletedIds) {
+          _historyService.removeEntry(id);
+        }
+        await _saveHistory();
+        notifyListeners();
+      }
+
+      // 处理恢复同步：将其他设备恢复的条目添加回本地历史
+      if (result != null && result.restoredEntries.isNotEmpty) {
+        for (final entry in result.restoredEntries) {
+          final content = entry['content'] as String? ?? '';
+          if (content.isEmpty) continue;
+          // 解密内容
+          String decryptedContent;
+          try {
+            decryptedContent = await _syncService!.decryptContent(content);
+          } catch (e) {
+            continue;
+          }
+          // 跳过已删除的内容
+          final restoredHash = sha256.convert(utf8.encode(decryptedContent)).toString();
+          if (_recentlyDeletedHashes.contains(restoredHash)) continue;
+          _historyService.addEntry(ClipboardEntry(
+            id: entry['id'] as String? ?? const Uuid().v4(),
+            content: decryptedContent,
+            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+            sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+            timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+            type: ContentType.text,
+          ));
+        }
+        await _saveHistory();
+        notifyListeners();
+      }
+
+      if (result != null && result.content.isNotEmpty) {
+        // 跳过已删除的内容
+        final syncContentHash = sha256.convert(utf8.encode(result.content)).toString();
+        if (_recentlyDeletedHashes.contains(syncContentHash)) {
+          _syncService!.markAsDownloaded(result.content);
+        } else {
+          _syncService!.markAsDownloaded(result.content);
+
           final contentHash = _syncService!.lastUploadedHash;
           _monitor?.addIgnoreHash(contentHash);
 
           _monitor?.pause();
-          await Clipboard.setData(ClipboardData(text: content));
-          await Future.delayed(const Duration(milliseconds: 100));
+          await Clipboard.setData(ClipboardData(text: result.content));
+          await Future.delayed(const Duration(milliseconds: 50));
           _monitor?.resume();
 
-          final current = await _cloudRepo!.getCurrentClipboard();
-          if (current != null) {
-            _historyService.addEntry(ClipboardEntry(
-              id: const Uuid().v4(),
-              content: content,
-              sourceDeviceId: current['source_device'] as String? ?? 'unknown',
-              sourceDeviceName: current['source_device_name'] as String? ?? 'Unknown',
-              sourcePlatform: current['source_platform'] as String? ?? 'unknown',
-              timestamp: DateTime.fromMillisecondsSinceEpoch(current['timestamp'] as int),
-              type: ContentType.text,
-            ));
-            await _saveHistory();
-            notifyListeners(); // 通知 UI 刷新
-          }
+          _historyService.addEntry(ClipboardEntry(
+            id: const Uuid().v4(),
+            content: result.content,
+            sourceDeviceId: result.sourceDeviceId,
+            sourceDeviceName: result.sourceDeviceName,
+            sourcePlatform: result.sourcePlatform,
+            timestamp: result.timestamp,
+            type: ContentType.text,
+          ));
+          await _saveHistory();
+          notifyListeners();
         }
-        _serverConnected = true;
-        _setStatus(SyncStatus.connected);
-      } catch (e) {
-        _errorMessage = e.toString();
-        _serverConnected = false;
-        _setStatus(SyncStatus.error);
       }
-    });
+      _consecutiveFailures = 0;
+      _serverConnected = true;
+      _setStatus(SyncStatus.connected);
+    } catch (e) {
+      _consecutiveFailures++;
+      _errorMessage = e.toString();
+      _serverConnected = false;
+      _setStatus(SyncStatus.error);
+    }
+    _scheduleNextSync();
   }
 
   Future<void> refresh() async {
     _setStatus(SyncStatus.syncing);
-    if (_syncService != null) {
-      try {
-        final content = await _syncService!.downloadLatestContent();
-        if (content != null && content.isNotEmpty) {
-          // Add to ignoreHashes
-          final contentHash = _syncService!.lastUploadedHash;
-          _monitor?.addIgnoreHash(contentHash);
-
+    // 暂停 sync loop 防止并发
+    _nextSyncTimer?.cancel();
+    try {
+      // 全量加载历史
+      await _loadHistoryFromServer();
+      // 下载最新 clipboard
+      if (_syncService != null) {
+        final result = await _syncService!.downloadLatestContent();
+        if (result != null && result.hasContent) {
           _monitor?.pause();
-          await Clipboard.setData(ClipboardData(text: content));
-          await Future.delayed(const Duration(milliseconds: 100));
+          await Clipboard.setData(ClipboardData(text: result.content));
+          await Future.delayed(const Duration(milliseconds: 50));
           _monitor?.resume();
+          _syncService!.markAsDownloaded(result.content);
         }
-        _serverConnected = true;
-        _setStatus(SyncStatus.connected);
-      } catch (e) {
-        _errorMessage = e.toString();
-        _serverConnected = false;
-        _setStatus(SyncStatus.error);
+        // 处理删除同步
+        if (result != null && result.hasDeletions) {
+          for (final id in result.deletedIds) {
+            _historyService.removeEntry(id);
+          }
+        }
+        // 处理恢复同步
+        if (result != null && result.hasRestorations) {
+          for (final entry in result.restoredEntries) {
+            final content = entry['content'] as String? ?? '';
+            if (content.isEmpty) continue;
+            try {
+              final decrypted = await _syncService!.decryptContent(content);
+              _historyService.addEntry(ClipboardEntry(
+                id: entry['id'] as String? ?? const Uuid().v4(),
+                content: decrypted,
+                sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+                sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+                sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+                timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+                type: ContentType.text,
+              ));
+            } catch (e) {
+              continue;
+            }
+          }
+        }
       }
+      await _saveHistory();
+      _serverConnected = true;
+      _setStatus(SyncStatus.connected);
+    } catch (e) {
+      _errorMessage = e.toString();
+      _serverConnected = false;
+      _setStatus(SyncStatus.error);
     }
+    // 恢复 sync loop
+    _consecutiveFailures = 0;
+    _scheduleNextSync();
     notifyListeners();
   }
 
@@ -352,19 +543,76 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     final entry = _historyService.entries.firstWhere((e) => e.id == id);
     _monitor?.pause();
     await Clipboard.setData(ClipboardData(text: entry.content));
-    await Future.delayed(const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 50));
     _monitor?.resume();
   }
 
-  void togglePin(String id) {
+  Future<void> togglePin(String id) async {
     _historyService.togglePin(id);
     notifyListeners();
+    try {
+      final entry = _historyService.entries.firstWhere((e) => e.id == id);
+      await _cloudRepo?.updateHistoryEntry(id, {'pinned': entry.isPinned ? 1 : 0});
+    } catch (e) {
+      // 乐观更新，失败不回滚
+    }
   }
 
-  void removeEntry(String id) {
+  Future<void> removeEntry(String id) async {
+    // 记录已删除内容的 hash，防止 sync loop 重新下载
+    final entry = _historyService.entries.where((e) => e.id == id).firstOrNull;
+    if (entry != null) {
+      _recentlyDeletedHashes.add(entry.contentHash);
+      // 30秒后清除，避免长期占用内存
+      Timer(const Duration(seconds: 30), () {
+        _recentlyDeletedHashes.remove(entry.contentHash);
+      });
+    }
     _historyService.removeEntry(id);
     _selectedIds.remove(id);
     notifyListeners();
+    try {
+      await _cloudRepo?.deleteHistoryEntry(id);
+    } catch (e) {
+      // 乐观更新，失败不回滚
+    }
+  }
+
+  /// 恢复已删除的条目
+  ///
+  /// 仅调用服务器 API，不触发全量加载。
+  /// 恢复的条目将通过 sync loop 的 restoredEntries 处理自动同步回来。
+  Future<void> restoreEntry(String id) async {
+    try {
+      await _cloudRepo?.restoreHistoryEntry(id);
+      // 不调用 _loadHistoryFromServer，让 sync loop 处理
+      notifyListeners();
+    } catch (e) {
+      _errorMessage = '恢复失败: $e';
+      notifyListeners();
+    }
+  }
+
+  /// 获取垃圾箱条目
+  Future<List<Map<String, dynamic>>> getTrashEntries() async {
+    if (_cloudRepo == null) return [];
+    try {
+      final entries = await _cloudRepo!.getTrashEntries();
+      // 解密每条内容
+      for (final entry in entries) {
+        final encrypted = entry['content'] as String? ?? '';
+        if (encrypted.isNotEmpty && _syncService != null) {
+          try {
+            entry['content'] = await _syncService!.decryptContent(encrypted);
+          } catch (e) {
+            entry['content'] = '[解密失败]';
+          }
+        }
+      }
+      return entries;
+    } catch (e) {
+      return [];
+    }
   }
 
   void enterMergeMode() {
@@ -401,7 +649,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     final merged = mergePreview;
     _monitor?.pause();
     await Clipboard.setData(ClipboardData(text: merged));
-    await Future.delayed(const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 50));
     _monitor?.resume();
     exitMergeMode();
   }
@@ -421,6 +669,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   void dispose() {
     _uploadDebounce?.cancel();
     _syncTimer?.cancel();
+    _nextSyncTimer?.cancel();
     _monitor?.removeListener(_onMonitorChanged);
     _monitor?.stop();
     _monitor?.dispose();

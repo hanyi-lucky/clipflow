@@ -71,4 +71,21 @@ class CloudRepository {
   Future<void> updateHistoryEntry(String entryId, Map<String, dynamic> data) async {
     await _cloud.updateDocument('history', entryId, data);
   }
+
+  // --- 垃圾箱 ---
+
+  /// 获取剪切板内容（含 deletedIds，用于同步删除）
+  Future<Map<String, dynamic>?> getCurrentClipboardWithDeletions() async {
+    return await _cloud.getClipboardWithDeletedIds();
+  }
+
+  /// 获取垃圾箱条目
+  Future<List<Map<String, dynamic>>> getTrashEntries() async {
+    return await _cloud.queryDocuments('trash');
+  }
+
+  /// 恢复已删除条目
+  Future<void> restoreHistoryEntry(String entryId) async {
+    await _cloud.restoreHistoryEntry(entryId);
+  }
 }

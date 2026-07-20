@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:crypto/crypto.dart';
 import '../core/constants.dart';
 import '../repositories/local_storage.dart';
+import '../services/sync_service.dart';
 
 typedef ClipboardChangeCallback = void Function(String content);
 
@@ -27,7 +28,10 @@ class ClipboardMonitor extends ChangeNotifier {
   String _syncStatus = 'idle';
 
   // SyncService reference (set externally)
-  dynamic _syncService;
+  SyncService? _syncService;
+
+  /// Callback when content is successfully uploaded (for adding to local history)
+  void Function(String content, String serverId)? onContentSynced;
 
   ClipboardMonitor({required this.onChanged, LocalStorage? storage}) {
     _storage = storage;
@@ -58,7 +62,7 @@ class ClipboardMonitor extends ChangeNotifier {
   }
 
   /// Set the SyncService reference for syncClipboard() to use
-  void setSyncService(dynamic syncService) {
+  void setSyncService(SyncService syncService) {
     _syncService = syncService;
   }
 
@@ -100,8 +104,8 @@ class ClipboardMonitor extends ChangeNotifier {
 
   // -- New sync API --
 
-  /// Unified sync method: reads clipboard, checks for duplicates/ignored, uploads
-  Future<void> syncClipboard() async {
+  /// Unified sync method: reads clipboard (or uses pre-read content), checks for duplicates/ignored, uploads
+  Future<void> syncClipboard({String? preReadContent}) async {
     if (_isSyncing) return;
     _isSyncing = true;
     _syncStatus = 'syncing';
@@ -109,14 +113,22 @@ class ClipboardMonitor extends ChangeNotifier {
     debugPrint('[SYNC] syncClipboard started, _syncService=${_syncService != null ? "set" : "NULL"}');
 
     try {
-      final content = await Clipboard.getData(Clipboard.kTextPlain);
-      debugPrint('[SYNC] Clipboard content: ${content?.text?.length ?? 0} chars');
-      if (content?.text == null || content!.text!.isEmpty) {
+      String? text;
+      if (preReadContent != null) {
+        text = preReadContent;
+        debugPrint('[SYNC] Using pre-read content: ${text.length} chars');
+      } else {
+        final content = await Clipboard.getData(Clipboard.kTextPlain);
+        debugPrint('[SYNC] Clipboard content: ${content?.text?.length ?? 0} chars');
+        text = content?.text;
+      }
+
+      if (text == null || text.isEmpty) {
         _syncStatus = 'idle';
         return;
       }
 
-      final hash = sha256.convert(utf8.encode(content.text!)).toString();
+      final hash = sha256.convert(utf8.encode(text)).toString();
       debugPrint('[SYNC] Hash: $hash, lastHash: $_lastHash');
 
       // Check ignoreHashes (one-time skip for content synced from other devices)
@@ -138,13 +150,15 @@ class ClipboardMonitor extends ChangeNotifier {
       // Upload
       if (_syncService != null) {
         debugPrint('[SYNC] Uploading...');
-        final success = await _syncService.uploadContent(content.text!);
-        debugPrint('[SYNC] Upload result: $success');
-        if (success) {
+        final serverId = await _syncService!.uploadContent(text);
+        debugPrint('[SYNC] Upload result: $serverId');
+        if (serverId != null) {
           _lastHash = hash;
           _lastSyncTime = DateTime.now();
           _saveSyncState();
           _syncStatus = 'success';
+          // Notify provider to add to local history
+          onContentSynced?.call(text, serverId);
         } else {
           _syncStatus = 'idle';
         }
@@ -240,65 +254,12 @@ class ClipboardMonitor extends ChangeNotifier {
         // Native layer passes clipboard content (Android 10+ can't read clipboard from background)
         final clipboardText = call.arguments as String?;
         if (clipboardText != null && clipboardText.isNotEmpty) {
-          await syncClipboardWithContent(clipboardText);
+          await syncClipboard(preReadContent: clipboardText);
         } else {
           // Fallback: try reading from Flutter (for foreground cases)
           await syncClipboard();
         }
         break;
-    }
-  }
-
-  /// Sync with pre-read clipboard content (for Android notification button)
-  Future<void> syncClipboardWithContent(String content) async {
-    if (_isSyncing) return;
-    _isSyncing = true;
-    _syncStatus = 'syncing';
-    notifyListeners();
-    debugPrint('[SYNC] syncClipboardWithContent: ${content.length} chars');
-
-    try {
-      final hash = sha256.convert(utf8.encode(content)).toString();
-
-      // Check ignoreHashes
-      if (_ignoreHashes.contains(hash)) {
-        debugPrint('[SYNC] Hash in ignoreHashes, skipping');
-        _ignoreHashes.remove(hash);
-        _saveIgnoreHashes();
-        _syncStatus = 'idle';
-        return;
-      }
-
-      // Check duplicate
-      if (hash == _lastHash) {
-        debugPrint('[SYNC] Same hash, skipping');
-        _syncStatus = 'idle';
-        return;
-      }
-
-      // Upload
-      if (_syncService != null) {
-        debugPrint('[SYNC] Uploading...');
-        final success = await _syncService.uploadContent(content);
-        debugPrint('[SYNC] Upload result: $success');
-        if (success) {
-          _lastHash = hash;
-          _lastSyncTime = DateTime.now();
-          _saveSyncState();
-          _syncStatus = 'success';
-        } else {
-          _syncStatus = 'idle';
-        }
-      } else {
-        debugPrint('[SYNC] _syncService is NULL');
-        _syncStatus = 'idle';
-      }
-    } catch (e) {
-      _syncStatus = 'error';
-      debugPrint('[SYNC] Error: $e');
-    } finally {
-      _isSyncing = false;
-      notifyListeners();
     }
   }
 

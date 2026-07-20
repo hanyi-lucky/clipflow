@@ -53,7 +53,8 @@ db.exec(`
     source_platform TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
     type TEXT DEFAULT 'text',
-    pinned INTEGER DEFAULT 0
+    pinned INTEGER DEFAULT 0,
+    deleted_at INTEGER DEFAULT NULL
   );
 
   CREATE TABLE IF NOT EXISTS salt (
@@ -67,6 +68,10 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// 为已有数据库的 history 表添加 deleted_at 列（如果不存在）
+try { db.exec('ALTER TABLE history ADD COLUMN deleted_at INTEGER DEFAULT NULL'); } catch(e) {}
+try { db.exec('ALTER TABLE history ADD COLUMN restored_at INTEGER DEFAULT NULL'); } catch(e) {}
 
 // 认证中间件（token 从数据库读取，重启不丢失）
 function authenticate(req, res, next) {
@@ -103,7 +108,7 @@ app.post('/api/auth', (req, res) => {
   if (!existing) {
     // 新用户，注册
     db.prepare('INSERT INTO users (id, password_hash, salt) VALUES (?, ?, ?)').run(
-      userId, password || 'default', salt || 'default'
+      userId, userId, salt || 'default'
     );
   }
 
@@ -130,9 +135,20 @@ app.get('/api/clipboard', authenticate, (req, res) => {
     return res.json({ code: 'NOT_FOUND' });
   }
 
+  // 获取最近 30 秒内删除的条目 ID
+  const deletedRows = db.prepare('SELECT id FROM history WHERE user_id = ? AND deleted_at > ?')
+    .all(req.userId, Date.now() - 30000);
+  const deletedIds = deletedRows.map(r => r.id);
+
+  // 获取最近 30 秒内恢复的条目（完整数据，客户端需要重新添加到本地历史）
+  const restoredRows = db.prepare('SELECT * FROM history WHERE user_id = ? AND restored_at > ? AND deleted_at IS NULL')
+    .all(req.userId, Date.now() - 30000);
+
   res.json({
     code: 'SUCCESS',
-    data: row
+    data: row,
+    deletedIds,
+    restoredEntries: restoredRows
   });
 });
 
@@ -146,16 +162,20 @@ app.post('/api/clipboard', authenticate, (req, res) => {
 
   const id = uuidv4();
 
-  // 覆盖当前剪切板
-  db.prepare(`INSERT OR REPLACE INTO clipboard (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type)
+  // 删除该用户旧的 clipboard 记录，防止无限膨胀
+  db.prepare('DELETE FROM clipboard WHERE user_id = ?').run(req.userId);
+
+  // 插入新记录
+  db.prepare(`INSERT INTO clipboard (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     id, req.userId, content, hash, sourceDevice || 'unknown', sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text'
   );
 
-  // 同时写入历史记录
+  // 同时写入历史记录（使用客户端提供的 ID，确保客户端和服务器 ID 一致）
+  const historyId = req.body.historyId || uuidv4();
   db.prepare(`INSERT INTO history (id, user_id, content, source_device, source_device_name, source_platform, timestamp, type)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    uuidv4(), req.userId, content, sourceDevice || 'unknown', sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text'
+    historyId, req.userId, content, sourceDevice || 'unknown', sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text'
   );
 
   // 清理旧历史记录（保留最近100条）
@@ -168,10 +188,10 @@ app.post('/api/clipboard', authenticate, (req, res) => {
 
 // ==================== 历史记录 API ====================
 
-// 获取历史记录
+// 获取历史记录（排除已删除）
 app.get('/api/history', authenticate, (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
-  const rows = db.prepare('SELECT * FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?')
+  const rows = db.prepare('SELECT * FROM history WHERE user_id = ? AND deleted_at IS NULL ORDER BY timestamp DESC LIMIT ?')
     .all(req.userId, limit);
 
   res.json({
@@ -188,10 +208,27 @@ app.patch('/api/history/:id', authenticate, (req, res) => {
   res.json({ code: 'SUCCESS' });
 });
 
-// 删除历史记录
+// 删除历史记录（软删除）
 app.delete('/api/history/:id', authenticate, (req, res) => {
-  db.prepare('DELETE FROM history WHERE id = ? AND user_id = ?')
-    .run(req.params.id, req.userId);
+  db.prepare('UPDATE history SET deleted_at = ? WHERE id = ? AND user_id = ?')
+    .run(Date.now(), req.params.id, req.userId);
+  res.json({ code: 'SUCCESS' });
+});
+
+// 获取垃圾箱（已删除条目）
+app.get('/api/history/trash', authenticate, (req, res) => {
+  const rows = db.prepare('SELECT * FROM history WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC')
+    .all(req.userId);
+  res.json({
+    code: 'SUCCESS',
+    data: { records: rows }
+  });
+});
+
+// 恢复已删除条目
+app.post('/api/history/:id/restore', authenticate, (req, res) => {
+  db.prepare('UPDATE history SET deleted_at = NULL, restored_at = ? WHERE id = ? AND user_id = ?')
+    .run(Date.now(), req.params.id, req.userId);
   res.json({ code: 'SUCCESS' });
 });
 
@@ -252,8 +289,27 @@ app.post('/api/salt', authenticate, (req, res) => {
   res.json({ code: 'SUCCESS' });
 });
 
+// 全局错误处理中间件
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ code: 'ERROR', message: 'Internal server error' });
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err);
+});
+
 // 启动服务器
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`ClipFlow server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/ping`);
+
+  // 每小时清理过期 token 和超过 24h 的已删除条目
+  setInterval(() => {
+    db.prepare("DELETE FROM tokens WHERE created_at < datetime('now', '-1 day')").run();
+    db.prepare("DELETE FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?").run(Date.now() - 24 * 60 * 60 * 1000);
+  }, 60 * 60 * 1000);
 });
