@@ -466,6 +466,8 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           ));
           await _saveHistory();
           notifyListeners();
+          // 内容处理成功后才标记时间戳，防止处理失败导致该内容被永久跳过
+          _syncService!.markAsReceived(result.timestamp);
         }
       }
       _consecutiveFailures = 0;

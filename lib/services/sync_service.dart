@@ -74,6 +74,12 @@ class SyncService {
     _lastUploadedHash = sha256.convert(utf8.encode(content)).toString();
   }
 
+  /// 标记时间戳为"已接收"，防止重复下载同一条内容
+  /// 必须在内容成功处理（写入历史+剪切板）后调用
+  void markAsReceived(DateTime timestamp) {
+    _lastReceivedTimestamp = timestamp;
+  }
+
   SyncService({
     required CloudRepository repo,
     required EncryptionService encryption,
@@ -92,8 +98,6 @@ class SyncService {
   Future<String?> uploadContent(String content) async {
     final hash = sha256.convert(utf8.encode(content)).toString();
     if (hash == _lastUploadedHash) return null;
-
-    _lastUploadedHash = hash;
 
     final encrypted = await _encryption.encrypt(content, _key);
     final encryptedBase64 = encrypted.toBase64();
@@ -116,6 +120,8 @@ class SyncService {
       ...data,
       'pinned': false,
     });
+    // 上传成功后才标记，防止服务器报错后相同内容被永久跳过
+    _lastUploadedHash = hash;
     return historyId;
   }
 
@@ -142,8 +148,6 @@ class SyncService {
       if (deletedIds.isEmpty && restoredRaw.isEmpty) return null;
       return DownloadResult.empty(deletedIds: deletedIds, restoredEntries: restoredRaw);
     }
-
-    _lastReceivedTimestamp = timestamp;
 
     final encryptedBase64 = current['content'] as String;
     try {

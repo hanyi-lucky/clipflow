@@ -173,7 +173,7 @@ app.post('/api/clipboard', authenticate, (req, res) => {
 
   // 同时写入历史记录（使用客户端提供的 ID，确保客户端和服务器 ID 一致）
   const historyId = req.body.historyId || uuidv4();
-  db.prepare(`INSERT INTO history (id, user_id, content, source_device, source_device_name, source_platform, timestamp, type)
+  db.prepare(`INSERT OR REPLACE INTO history (id, user_id, content, source_device, source_device_name, source_platform, timestamp, type)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
     historyId, req.userId, content, sourceDevice || 'unknown', sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text'
   );

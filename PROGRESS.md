@@ -1,16 +1,16 @@
 # ClipFlow 开发进度
 
-> 更新时间：2026-07-19
+> 更新时间：2026-07-21
 
 ---
 
 ## 已完成的功能
 
 ### 1. 核心同步机制
-- [x] 跨设备剪切板同步（macOS ↔ Android）
+- [x] 跨设备剪切板同步（macOS ↔ Android ↔ Windows）
 - [x] 端到端加密（AES-256-GCM + PBKDF2）
 - [x] 密码即账户（无需注册）
-- [x] 设备来源显示（正确区分 Mac / Android Phone）
+- [x] 设备来源显示（正确区分 Mac / Android Phone / Windows PC）
 
 ### 2. 混合同步架构
 - [x] 启动/刷新时全量加载服务器历史（200 条）
@@ -40,6 +40,17 @@
 - [x] token 定期清理（每小时）
 - [x] restored_at 列支持
 - [x] 客户端提供 historyId，服务器使用客户端 ID
+- [x] history INSERT 主键冲突修复（INSERT → INSERT OR REPLACE）
+
+### 6. Windows 平台支持
+- [x] Windows 剪切板监听（500ms 轮询 Clipboard.getData）
+- [x] Windows 构建和部署（flutter build windows）
+- [x] Windows 应用图标（从 PNG 生成多尺寸 ICO）
+- [x] Windows 开发环境搭建指南（WINDOWS_SETUP.md）
+
+### 7. 同步 Bug 修复
+- [x] _lastUploadedHash 时序修复（移到上传成功后赋值，防止失败后永久跳过）
+- [x] _lastReceivedTimestamp 时序修复（移到内容处理成功后标记）
 
 ### 6. 客户端代码质量
 - [x] ClipboardMonitor 类型安全（dynamic → SyncService?）
@@ -81,9 +92,10 @@
 ## 待开发
 
 ### Windows 端
-- [ ] Windows 平台适配
-- [ ] 剪切板监听（Windows AddClipboardFormatListener）
-- [ ] 构建和部署
+- [x] Windows 平台适配
+- [x] 剪切板监听（500ms 轮询，与 macOS 一致）
+- [x] 构建和部署
+- [x] 应用图标
 
 ### 潜在优化
 - [ ] HTTPS（需要域名 + 证书）
@@ -118,6 +130,8 @@ Node.js Server (Express + SQLite)
 | `lib/providers/clipboard_provider.dart` | 核心调度器：同步循环、历史管理、刷新 |
 | `lib/services/sync_service.dart` | 上传/下载/解密、DownloadResult |
 | `lib/services/clipboard_monitor.dart` | 剪切板监听、上传触发 |
+| `windows/runner/resources/app_icon.ico` | Windows 应用图标 |
+| `WINDOWS_SETUP.md` | Windows 开发环境搭建指南 |
 | `lib/services/history_service.dart` | 内存历史列表、去重、排序 |
 | `lib/services/cloudbase_service.dart` | HTTP API 封装 |
 | `lib/screens/trash_screen.dart` | 垃圾箱页面 |
