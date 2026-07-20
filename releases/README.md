@@ -5,7 +5,7 @@
 ```
 releases/
 ├── macos/      # macOS DMG 安装包
-├── windows/    # Windows EXE 安装包
+├── windows/    # Windows 构建产物（clipflow.exe + 依赖）
 ├── android/    # Android APK 安装包
 └── ios/        # iOS/iPadOS（快捷指令 + Web App）
 ```
@@ -26,7 +26,7 @@ cp build/app/outputs/flutter-apk/app-release.apk releases/android/ClipFlow.apk
 
 # Windows
 flutter build windows --release
-# 需要 Inno Setup 或 NSIS 打包为 EXE 安装包
+cp -r build/windows/x64/runner/Release/* releases/windows/
 ```
 
 ## 最新版本
@@ -34,5 +34,5 @@ flutter build windows --release
 | 平台 | 版本 | 日期 | 文件 |
 |-----|------|------|------|
 | macOS | v1.1.0 | 2026-06-26 | `macos/ClipFlow.dmg` |
-| Android | v1.3.0 | 2026-07-05 | `build/app/outputs/flutter-apk/app-release.apk` |
-| Windows | - | - | 待开发 |
+| Android | v1.3.0 | 2026-07-05 | `android/ClipFlow.apk` |
+| Windows | v1.0.0 | 2026-07-21 | `windows/clipflow.exe` |
