@@ -52,7 +52,7 @@
 - [x] _lastUploadedHash 时序修复（移到上传成功后赋值，防止失败后永久跳过）
 - [x] _lastReceivedTimestamp 时序修复（移到内容处理成功后标记）
 
-### 6. 客户端代码质量
+### 8. 客户端代码质量
 - [x] ClipboardMonitor 类型安全（dynamic → SyncService?）
 - [x] syncClipboard/syncClipboardWithContent 合并
 - [x] hex_utils 工具类提取
@@ -63,7 +63,7 @@
 - [x] selectedEntries 排序优化
 - [x] Android 单实例模式（singleTask）
 
-### 7. UI/UX
+### 9. UI/UX
 - [x] 列表排序：置顶优先 + 时间倒序
 - [x] 刷新按钮：全量同步 + 删除/恢复处理
 - [x] 垃圾箱入口：左下角浮窗

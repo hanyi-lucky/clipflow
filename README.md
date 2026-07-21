@@ -16,7 +16,7 @@
 |-----|------|
 | macOS | ✅ 已完成 |
 | Android | ✅ 已完成 |
-| Windows | ⏳ 待开发 |
+| Windows | ✅ 已完成 |
 | iOS/iPadOS | ⏳ 快捷指令 + Web App |
 
 ## 技术栈
