@@ -15,7 +15,6 @@
 
 # 验证
 flutter --version
-# 应显示 Flutter 3.44.2
 ```
 
 ## Step 2：安装 Git（如果没有）

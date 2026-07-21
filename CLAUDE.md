@@ -15,7 +15,6 @@
 | `feature-dev` | 功能开发 | 新功能开发流程 |
 | `skill-creator` | 创建 Skill | 自定义项目专属 Skill |
 | `claude-md-management` | 文档管理 | CLAUDE.md 维护优化 |
-| `superpowers` | 增强能力 | 高级推理、多步任务 |
 
 ---
 
@@ -276,19 +275,31 @@ token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
 
 ## 剪切板监听
 
-- `ClipboardMonitor` 在 `lib/services/clipboard_monitor.dart` — 桌面端：`Timer.periodic` 每 500ms 检查 `Clipboard.getData()`。Android：通过 `MethodChannel` 调用原生 `ClipboardManager.OnPrimaryClipChangedListener`。提供 `pause()`/`resume()` 方法，在将接收到的数据写入剪切板时暂停监听以防止循环同步。
+- `ClipboardMonitor` 在 `lib/services/clipboard_monitor.dart`
+- **桌面端（macOS/Windows）：** `Timer.periodic` 每 500ms 轮询 `Clipboard.getData()`
+- **Android：** 通过 `MethodChannel` (`clipflow/clipboard`) 与原生层通信。原生层使用 `ClipboardManager.OnPrimaryClipChangedListener` + Foreground Service 保活，检测到变化后调用 `syncClipboard` 传入剪切板内容（Android 10+ 限制后台读取剪切板，因此由原生层传递内容而非 Flutter 层主动读取）
+- 提供 `pause()`/`resume()` 方法，在将接收到的数据写入剪切板时暂停监听以防止循环同步
+- `ignoreHashes` 机制：从其他设备同步来的内容加入忽略列表，防止上传自己刚下载的内容
 
 ## 数据库模型
 
-```
-devices/{deviceId}        — 设备信息
-clipboard/current         — 最新剪切板条目（已加密）
-clipboard/salt            — PBKDF2 密钥派生盐值
-history/{entryId}         — 剪切板历史记录（已加密）
-tokens/{token}            — 认证 token（持久化，重启不丢失）
+服务器使用 SQLite，表在启动时自动创建，**所有表无 FOREIGN KEY 约束**。
+
+```sql
+users (id TEXT PK, password_hash TEXT, salt TEXT, created_at TEXT)
+devices (id TEXT PK, user_id TEXT, name TEXT, platform TEXT, last_seen TEXT)
+clipboard (id TEXT PK, user_id TEXT, content TEXT, hash TEXT, source_device TEXT,
+           source_device_name TEXT, source_platform TEXT, timestamp INTEGER, type TEXT)
+history (id TEXT PK, user_id TEXT, content TEXT, source_device TEXT,
+         source_device_name TEXT, source_platform TEXT, timestamp INTEGER,
+         type TEXT, pinned INTEGER, deleted_at INTEGER, restored_at INTEGER)
+salt (user_id TEXT PK, value TEXT)
+tokens (token TEXT PK, user_id TEXT, created_at TEXT)
 ```
 
-数据库表在服务器启动时自动创建（SQLite）。所有表无 FOREIGN KEY 约束。
+- `clipboard` 表仅保留每用户最新 1 条记录（上传时 DELETE + INSERT）
+- `history` 表保留最近 100 条（服务端自动清理），支持软删除（`deleted_at`）和恢复（`restored_at`）
+- `tokens` 每小时清理超过 24 小时的过期 token
 
 ## 同步去重
 

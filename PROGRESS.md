@@ -87,21 +87,7 @@
 | ClipboardProvider Hybrid | clipboard_provider_hybrid_sync_test.dart | 6 |
 | Widget Smoke Test | widget_test.dart | 4 |
 
----
-
-## 待开发
-
-### Windows 端
-- [x] Windows 平台适配
-- [x] 剪切板监听（500ms 轮询，与 macOS 一致）
-- [x] 构建和部署
-- [x] 应用图标
-
-### 潜在优化
-- [ ] HTTPS（需要域名 + 证书）
-- [ ] 服务器非 root 用户运行
-- [ ] WebSocket 推送（替代轮询）
-- [ ] 分页加载历史（超过 200 条时）
+> 下一阶段：v1.1 发布准备（Android 签名、macOS 公证）。详见 `docs/version-roadmap.md`。
 
 ---
 
