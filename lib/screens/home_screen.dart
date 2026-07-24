@@ -1,4 +1,3 @@
-import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/clipboard_provider.dart';
@@ -12,11 +11,7 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Column(
-        children: [
-          if (Platform.isAndroid) _buildSyncStatusBar(context),
-          Expanded(
-            child: Stack(
+      body: Stack(
               children: [
                 CustomScrollView(
                   slivers: [
@@ -195,64 +190,8 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ],
-            ),
-          ),
-        ],
       ),
       bottomNavigationBar: const MergeBar(),
     );
-  }
-
-  Widget _buildSyncStatusBar(BuildContext context) {
-    final provider = ClipboardProvider.of(context);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
-      child: Row(
-        children: [
-          // Connection status dot
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: provider.serverConnected ? Colors.green : Colors.red,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            provider.serverConnected ? '已连接' : '未连接',
-            style: TextStyle(
-              fontSize: 12,
-              color: provider.serverConnected ? Colors.green.shade700 : Colors.red.shade700,
-            ),
-          ),
-          const Spacer(),
-          // Last sync time
-          if (provider.lastSyncTime != null) ...[
-            Icon(Icons.access_time, size: 14, color: Colors.grey.shade600),
-            const SizedBox(width: 4),
-            Text(
-              _formatSyncTime(provider.lastSyncTime!),
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade600,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  String _formatSyncTime(DateTime time) {
-    final now = DateTime.now();
-    final diff = now.difference(time);
-
-    if (diff.inMinutes < 1) return '刚刚同步';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前';
-    if (diff.inHours < 24) return '${diff.inHours}小时前';
-    return '${diff.inDays}天前';
   }
 }
