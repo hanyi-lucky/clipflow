@@ -93,6 +93,10 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   bool get hasActiveFilters =>
       _searchQuery.isNotEmpty || _activeTypeFilter != null || _activeDeviceFilter != null;
 
+  ContentType? get activeTypeFilter => _activeTypeFilter;
+  String? get activeDeviceFilter => _activeDeviceFilter;
+  String get searchQuery => _searchQuery;
+
   List<ClipboardEntry> get filteredHistory {
     var results = _historyService.entries;
 
