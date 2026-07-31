@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/clipboard_entry.dart';
 import '../providers/clipboard_provider.dart';
 import '../widgets/clipboard_item.dart';
+import '../widgets/image_grid_view.dart';
 import '../widgets/merge_bar.dart';
 import '../widgets/search_bar.dart';
 import 'trash_screen.dart';
@@ -138,6 +140,14 @@ class HomeScreen extends StatelessWidget {
                           );
                         }
 
+                        // Image grid mode
+                        if (provider.activeTypeFilter == ContentType.image) {
+                          return SliverFillRemaining(
+                            child: ImageGridView(entries: history),
+                          );
+                        }
+
+                        // List mode (text / all)
                         return SliverMainAxisGroup(
                           slivers: [
                             if (provider.hasActiveFilters)
