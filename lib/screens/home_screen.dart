@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/clipboard_provider.dart';
 import '../widgets/clipboard_item.dart';
 import '../widgets/merge_bar.dart';
+import '../widgets/search_bar.dart';
 import 'trash_screen.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -90,9 +91,30 @@ class HomeScreen extends StatelessWidget {
                         ),
                       ],
                     ),
+                    const SliverToBoxAdapter(
+                      child: HistorySearchBar(),
+                    ),
                     Consumer<ClipboardProvider>(
                       builder: (context, provider, _) {
-                        final history = provider.history;
+                        final history = provider.filteredHistory;
+
+                        if (history.isEmpty && provider.hasActiveFilters) {
+                          return SliverFillRemaining(
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.search_off, size: 64,
+                                    color: Theme.of(context).colorScheme.outlineVariant),
+                                  const SizedBox(height: 12),
+                                  Text('没有找到匹配的记录',
+                                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      color: Theme.of(context).colorScheme.outline)),
+                                ],
+                              ),
+                            ),
+                          );
+                        }
 
                         if (history.isEmpty) {
                           return SliverFillRemaining(
@@ -100,75 +122,82 @@ class HomeScreen extends StatelessWidget {
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
-                                    Icons.content_paste_search,
-                                    size: 80,
-                                    color: Theme.of(context).colorScheme.outlineVariant,
-                                  ),
+                                  Icon(Icons.content_paste_search, size: 80,
+                                    color: Theme.of(context).colorScheme.outlineVariant),
                                   const SizedBox(height: 16),
-                                  Text(
-                                    '暂无剪切板记录',
+                                  Text('暂无剪切板记录',
                                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      color: Theme.of(context).colorScheme.outline,
-                                    ),
-                                  ),
+                                      color: Theme.of(context).colorScheme.outline)),
                                   const SizedBox(height: 8),
-                                  Text(
-                                    '复制内容后自动同步',
+                                  Text('复制内容后自动同步',
                                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                      color: Theme.of(context).colorScheme.outlineVariant,
-                                    ),
-                                  ),
+                                      color: Theme.of(context).colorScheme.outlineVariant)),
                                 ],
                               ),
                             ),
                           );
                         }
 
-                        return SliverList(
-                          delegate: SliverChildBuilderDelegate(
-                            (context, index) {
-                              final entry = history[index];
-                              final isSelected = provider.selectedIds.contains(entry.id);
-                              final orderList = provider.selectedIds.toList();
-                              final order = isSelected ? orderList.indexOf(entry.id) + 1 : null;
-
-                              return ClipboardItem(
-                                entry: entry,
-                                isMergeMode: provider.isMergeMode,
-                                isSelected: isSelected,
-                                selectionOrder: order,
-                                onTap: provider.isMergeMode
-                                    ? () => provider.toggleSelection(entry.id)
-                                    : null,
-                                onCopy: () => provider.copyEntry(entry.id),
-                                onPin: () => provider.togglePin(entry.id),
-                                onDelete: () {
-                                  showDialog(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      title: const Text('删除'),
-                                      content: const Text('确定要删除这条记录吗？'),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () => Navigator.pop(ctx),
-                                          child: const Text('取消'),
-                                        ),
-                                        TextButton(
-                                          onPressed: () {
-                                            provider.removeEntry(entry.id);
-                                            Navigator.pop(ctx);
-                                          },
-                                          child: const Text('删除', style: TextStyle(color: Colors.red)),
-                                        ),
-                                      ],
+                        return SliverMainAxisGroup(
+                          slivers: [
+                            if (provider.hasActiveFilters)
+                              SliverToBoxAdapter(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                                  child: Text(
+                                    '${history.length} 条结果',
+                                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: Theme.of(context).colorScheme.outline,
                                     ),
+                                  ),
+                                ),
+                              ),
+                            SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) {
+                                  final entry = history[index];
+                                  final isSelected = provider.selectedIds.contains(entry.id);
+                                  final orderList = provider.selectedIds.toList();
+                                  final order = isSelected ? orderList.indexOf(entry.id) + 1 : null;
+
+                                  return ClipboardItem(
+                                    entry: entry,
+                                    isMergeMode: provider.isMergeMode,
+                                    isSelected: isSelected,
+                                    selectionOrder: order,
+                                    onTap: provider.isMergeMode
+                                        ? () => provider.toggleSelection(entry.id)
+                                        : null,
+                                    onCopy: () => provider.copyEntry(entry.id),
+                                    onPin: () => provider.togglePin(entry.id),
+                                    onDelete: () {
+                                      showDialog(
+                                        context: context,
+                                        builder: (ctx) => AlertDialog(
+                                          title: const Text('删除'),
+                                          content: const Text('确定要删除这条记录吗？'),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () => Navigator.pop(ctx),
+                                              child: const Text('取消'),
+                                            ),
+                                            TextButton(
+                                              onPressed: () {
+                                                provider.removeEntry(entry.id);
+                                                Navigator.pop(ctx);
+                                              },
+                                              child: const Text('删除', style: TextStyle(color: Colors.red)),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
                                   );
                                 },
-                              );
-                            },
-                            childCount: history.length,
-                          ),
+                                childCount: history.length,
+                              ),
+                            ),
+                          ],
                         );
                       },
                     ),
