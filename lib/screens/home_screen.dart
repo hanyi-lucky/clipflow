@@ -165,6 +165,7 @@ class HomeScreen extends StatelessWidget {
                                     isMergeMode: provider.isMergeMode,
                                     isSelected: isSelected,
                                     selectionOrder: order,
+                                    searchQuery: provider.searchQuery,
                                     onTap: provider.isMergeMode
                                         ? () => provider.toggleSelection(entry.id)
                                         : null,

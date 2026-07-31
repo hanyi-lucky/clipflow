@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/clipboard_entry.dart';
 
-class ClipboardItem extends StatelessWidget {
+class ClipboardItem extends StatefulWidget {
   final ClipboardEntry entry;
   final bool isMergeMode;
   final bool isSelected;
@@ -10,6 +10,7 @@ class ClipboardItem extends StatelessWidget {
   final VoidCallback? onCopy;
   final VoidCallback? onPin;
   final VoidCallback? onDelete;
+  final String? searchQuery;
 
   const ClipboardItem({
     super.key,
@@ -21,7 +22,15 @@ class ClipboardItem extends StatelessWidget {
     this.onCopy,
     this.onPin,
     this.onDelete,
+    this.searchQuery,
   });
+
+  @override
+  State<ClipboardItem> createState() => _ClipboardItemState();
+}
+
+class _ClipboardItemState extends State<ClipboardItem> {
+  bool _isExpanded = false;
 
   String _formatTime(DateTime time) {
     final now = DateTime.now();
@@ -34,27 +43,122 @@ class ClipboardItem extends StatelessWidget {
 
   IconData _getDeviceIcon(String platform) {
     switch (platform.toLowerCase()) {
-      case 'macos':
-        return Icons.laptop_mac;
-      case 'windows':
-        return Icons.laptop;
-      case 'android':
-        return Icons.phone_android;
-      case 'ios':
-        return Icons.phone_iphone;
-      default:
-        return Icons.device_unknown;
+      case 'macos': return Icons.laptop_mac;
+      case 'windows': return Icons.laptop;
+      case 'android': return Icons.phone_android;
+      case 'ios': return Icons.phone_iphone;
+      default: return Icons.device_unknown;
     }
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final content = widget.entry.content;
+    final query = widget.searchQuery?.toLowerCase();
+
+    // Build text spans with optional highlight
+    TextSpan buildHighlightedText() {
+      if (query == null || query.isEmpty) {
+        return TextSpan(
+          text: content,
+          style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+        );
+      }
+
+      final spans = <TextSpan>[];
+      final lowerContent = content.toLowerCase();
+      int start = 0;
+
+      while (true) {
+        final index = lowerContent.indexOf(query, start);
+        if (index == -1) {
+          if (start < content.length) {
+            spans.add(TextSpan(
+              text: content.substring(start),
+              style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+            ));
+          }
+          break;
+        }
+        if (index > start) {
+          spans.add(TextSpan(
+            text: content.substring(start, index),
+            style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+          ));
+        }
+        spans.add(TextSpan(
+          text: content.substring(index, index + query.length),
+          style: theme.textTheme.bodyMedium?.copyWith(
+            height: 1.5,
+            backgroundColor: theme.colorScheme.primary.withOpacity(0.25),
+            color: theme.colorScheme.primary,
+          ),
+        ));
+        start = index + query.length;
+      }
+
+      return TextSpan(children: spans);
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withOpacity(0.05)
+            : Colors.black.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Check if content exceeds 3 lines
+          final textSpan = buildHighlightedText();
+          final textPainter = TextPainter(
+            text: textSpan,
+            maxLines: 3,
+            textDirection: TextDirection.ltr,
+            textScaler: MediaQuery.textScalerOf(context),
+          )..layout(maxWidth: constraints.maxWidth);
+
+          final isOverflow = textPainter.didExceedMaxLines;
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              RichText(
+                text: textSpan,
+                maxLines: _isExpanded ? null : 3,
+                overflow: _isExpanded ? TextOverflow.visible : TextOverflow.ellipsis,
+              ),
+              if (isOverflow)
+                GestureDetector(
+                  onTap: () => setState(() => _isExpanded = !_isExpanded),
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      _isExpanded ? '折叠 ▲' : '展开 ▼',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
 
     return Card(
       child: InkWell(
-        onTap: onTap,
+        onTap: widget.onTap,
         borderRadius: BorderRadius.circular(14),
         child: Padding(
           padding: const EdgeInsets.all(14),
@@ -63,15 +167,15 @@ class ClipboardItem extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  if (isMergeMode)
+                  if (widget.isMergeMode)
                     Checkbox(
-                      value: isSelected,
-                      onChanged: (_) => onTap?.call(),
+                      value: widget.isSelected,
+                      onChanged: (_) => widget.onTap?.call(),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(4),
                       ),
                     )
-                  else if (selectionOrder != null)
+                  else if (widget.selectionOrder != null)
                     Container(
                       width: 22,
                       height: 22,
@@ -82,27 +186,27 @@ class ClipboardItem extends StatelessWidget {
                       ),
                       child: Center(
                         child: Text(
-                          '$selectionOrder',
+                          '${widget.selectionOrder}',
                           style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
                         ),
                       ),
                     ),
                   Icon(
-                    _getDeviceIcon(entry.sourcePlatform),
+                    _getDeviceIcon(widget.entry.sourcePlatform),
                     size: 16,
                     color: theme.colorScheme.primary,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '${entry.sourceDeviceName} · ${_formatTime(entry.timestamp)}',
+                      '${widget.entry.sourceDeviceName} · ${_formatTime(widget.entry.timestamp)}',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.outline,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (entry.isPinned)
+                  if (widget.entry.isPinned)
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
@@ -121,45 +225,28 @@ class ClipboardItem extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? Colors.white.withOpacity(0.05)
-                      : Colors.black.withOpacity(0.03),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  entry.content,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    height: 1.5,
-                  ),
-                ),
-              ),
-              if (!isMergeMode) ...[
+              _buildContent(context),
+              if (!widget.isMergeMode) ...[
                 const SizedBox(height: 8),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     _ActionChip(
-                      icon: entry.isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                      label: entry.isPinned ? '取消置顶' : '置顶',
-                      onTap: onPin,
+                      icon: widget.entry.isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+                      label: widget.entry.isPinned ? '取消置顶' : '置顶',
+                      onTap: widget.onPin,
                     ),
                     const SizedBox(width: 4),
                     _ActionChip(
                       icon: Icons.copy_rounded,
                       label: '复制',
-                      onTap: onCopy,
+                      onTap: widget.onCopy,
                     ),
                     const SizedBox(width: 4),
                     _ActionChip(
                       icon: Icons.delete_outline_rounded,
                       label: '删除',
-                      onTap: onDelete,
+                      onTap: widget.onDelete,
                       isDestructive: true,
                     ),
                   ],
@@ -201,10 +288,7 @@ class _ActionChip extends StatelessWidget {
           children: [
             Icon(icon, size: 14, color: color),
             const SizedBox(width: 3),
-            Text(
-              label,
-              style: TextStyle(fontSize: 12, color: color),
-            ),
+            Text(label, style: TextStyle(fontSize: 12, color: color)),
           ],
         ),
       ),
