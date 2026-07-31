@@ -168,6 +168,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     required String deviceName,
     required Uint8List encryptionKey,
   }) async {
+    clearFilters();
     _storage = storage;
     _cloudRepo = cloudRepo;
 
