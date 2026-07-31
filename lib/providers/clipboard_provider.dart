@@ -71,6 +71,10 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   bool _isMergeMode = false;
   final Set<String> _selectedIds = {};
   String _mergeSeparator = '\n';
+  // Search/filter state
+  String _searchQuery = '';
+  ContentType? _activeTypeFilter;
+  String? _activeDeviceFilter;
   Timer? _uploadDebounce;
   Timer? _syncTimer;
   Timer? _nextSyncTimer;
@@ -85,6 +89,47 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   Set<String> get selectedIds => Set.unmodifiable(_selectedIds);
   String get mergeSeparator => _mergeSeparator;
   bool get serverConnected => _serverConnected;
+
+  bool get hasActiveFilters =>
+      _searchQuery.isNotEmpty || _activeTypeFilter != null || _activeDeviceFilter != null;
+
+  List<ClipboardEntry> get filteredHistory {
+    var results = _historyService.entries;
+
+    // Type filter
+    if (_activeTypeFilter != null) {
+      results = results.where((e) => e.type == _activeTypeFilter).toList();
+    }
+
+    // Device filter
+    if (_activeDeviceFilter != null) {
+      results = results.where((e) => e.sourceDeviceName == _activeDeviceFilter).toList();
+    }
+
+    // Keyword search (fuzzy, case-insensitive)
+    if (_searchQuery.isNotEmpty) {
+      final query = _searchQuery.toLowerCase();
+      results = results.where((e) {
+        switch (e.type) {
+          case ContentType.text:
+            return e.content.toLowerCase().contains(query);
+          case ContentType.image:
+            return false;
+          case ContentType.file:
+            return false; // v1.4: match by fileName
+        }
+      }).toList();
+    }
+
+    return results;
+  }
+
+  List<String> get availableDevices {
+    return _historyService.entries
+        .map((e) => e.sourceDeviceName)
+        .toSet()
+        .toList();
+  }
 
   // Proxy getters to ClipboardMonitor
   String get monitorSyncStatus => _monitor?.syncStatus ?? 'idle';
@@ -644,6 +689,28 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
   void setSeparator(String separator) {
     _mergeSeparator = separator;
+    notifyListeners();
+  }
+
+  void setSearchQuery(String query) {
+    _searchQuery = query;
+    notifyListeners();
+  }
+
+  void setTypeFilter(ContentType? type) {
+    _activeTypeFilter = type;
+    notifyListeners();
+  }
+
+  void setDeviceFilter(String? device) {
+    _activeDeviceFilter = device;
+    notifyListeners();
+  }
+
+  void clearFilters() {
+    _searchQuery = '';
+    _activeTypeFilter = null;
+    _activeDeviceFilter = null;
     notifyListeners();
   }
 
