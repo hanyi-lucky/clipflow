@@ -87,7 +87,7 @@
 | ClipboardProvider Hybrid | clipboard_provider_hybrid_sync_test.dart | 6 |
 | Widget Smoke Test | widget_test.dart | 4 |
 
-> 下一阶段：v1.1 发布准备（Android 签名、macOS 公证）。详见 `docs/version-roadmap.md`。
+> v1.1 已完成（Android 正式签名、服务器非 root 运行）。下一阶段：v1.2 体验优化。详见 `docs/version-roadmap.md`。
 
 ---
 
