@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/clipboard_entry.dart';
 import '../providers/clipboard_provider.dart';
@@ -8,13 +9,75 @@ import '../widgets/merge_bar.dart';
 import '../widgets/search_bar.dart';
 import 'trash_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  /// 上一次返回键处理时，是否处于搜索状态
+  /// 用于实现"搜索态 → 正常态 → 确认退出"的过渡
+  bool _wasInSearch = false;
+
+  /// 处理侧滑返回：逐步退出状态
+  void _handleBack(BuildContext context, ClipboardProvider provider) {
+    if (provider.isMergeMode) {
+      // 优先级 1：退出合并模式
+      provider.exitMergeMode();
+      _wasInSearch = false;
+    } else if (provider.hasActiveFilters) {
+      // 优先级 2：关闭键盘（保留搜索文本，等下次返回再清空）
+      FocusManager.instance.primaryFocus?.unfocus();
+      _wasInSearch = true;
+    } else if (_wasInSearch) {
+      // 刚从搜索态退出：清空搜索，进入正常态
+      provider.clearFilters();
+      FocusManager.instance.primaryFocus?.unfocus();
+      _wasInSearch = false;
+    } else {
+      // 优先级 3：确认退出 App
+      _showExitDialog(context);
+    }
+  }
+
+  void _showExitDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('退出'),
+        content: const Text('确定要退出 ClipFlow 吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              SystemNavigator.pop();
+            },
+            child: const Text('退出', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
+    return Consumer<ClipboardProvider>(
+      builder: (context, provider, _) {
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, result) {
+            if (!didPop) {
+              _handleBack(context, provider);
+            }
+          },
+          child: Scaffold(
+            body: Stack(
               children: [
                 CustomScrollView(
                   slivers: [
@@ -241,8 +304,11 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ],
-      ),
-      bottomNavigationBar: const MergeBar(),
+            ),
+            bottomNavigationBar: const MergeBar(),
+          ),
+        );
+      },
     );
   }
 }

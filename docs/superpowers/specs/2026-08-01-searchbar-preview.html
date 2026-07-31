@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ClipFlow 搜索栏 v2 预览</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 40px; color: #e0e0e0; }
+  .preview-grid { display: flex; flex-wrap: wrap; gap: 40px; justify-content: center; }
+  .phone-frame {
+    width: 360px; background: #16213e; border-radius: 24px; border: 3px solid #2a2a4a;
+    overflow: hidden; display: flex; flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  .phone-label { font-size: 13px; color: #888; font-weight: 600; margin-bottom: 8px; letter-spacing: 0.5px; }
+  .app-bar {
+    background: #0f3460; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .app-bar h1 { font-size: 18px; color: #e94560; font-weight: 700; }
+  .app-bar-icons { display: flex; gap: 12px; }
+  .app-bar-icons span { font-size: 18px; }
+
+  /* 搜索栏 - 单行布局 */
+  .search-row {
+    padding: 10px 16px; display: flex; align-items: center; gap: 8px;
+    background: #16213e;
+  }
+  .search-box {
+    flex: 1; min-width: 0;
+    background: #1a1a3e; border-radius: 24px;
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .search-box .icon { font-size: 18px; color: #555; flex-shrink: 0; }
+  .search-box input {
+    flex: 1; min-width: 0; background: none; border: none; outline: none;
+    color: #ccc; font-size: 14px;
+  }
+  .search-box input::placeholder { color: #444; }
+  .search-box .clear { font-size: 16px; color: #555; cursor: pointer; flex-shrink: 0; }
+
+  /* 筛选 chips */
+  .chips { display: flex; gap: 6px; flex-shrink: 0; }
+  .chip {
+    background: #1a1a3e; border-radius: 16px;
+    padding: 8px 10px; font-size: 12px; color: #888;
+    display: flex; align-items: center; gap: 4px;
+    white-space: nowrap; cursor: pointer;
+    border: 1px solid #2a2a4a;
+  }
+  .chip.active { background: #e94560; color: white; border-color: #e94560; }
+  .chip .arrow { font-size: 10px; }
+  .chip .chip-icon { font-size: 14px; }
+
+  /* 结果计数 */
+  .result-count { padding: 4px 16px; font-size: 11px; color: #555; }
+
+  /* 列表 */
+  .content-area { flex: 1; overflow-y: auto; padding: 4px 12px 16px; }
+  .clip-item {
+    background: #16213e; border-radius: 10px; padding: 12px; margin-bottom: 8px; border: 1px solid #2a2a4a;
+  }
+  .clip-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 11px; color: #888; }
+  .clip-content { font-size: 13px; color: #ccc; line-height: 1.5; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; -webkit-line-clamp: 3; }
+  .highlight { background: rgba(233,69,96,0.3); color: #ff8a9e; border-radius: 2px; padding: 0 1px; }
+
+  .section-title { width: 100%; text-align: center; font-size: 20px; font-weight: 700; color: #e0e0e0; margin-bottom: 8px; margin-top: 20px; }
+  .section-desc { width: 100%; text-align: center; font-size: 13px; color: #666; margin-bottom: 16px; }
+
+  /* 返回手势状态图 */
+  .flow-diagram {
+    width: 100%; background: #16213e; border-radius: 16px; padding: 24px; margin-top: 20px;
+    border: 1px solid #2a2a4a;
+  }
+  .flow-title { font-size: 16px; font-weight: 600; color: #e0e0e0; margin-bottom: 16px; text-align: center; }
+  .flow-steps { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
+  .flow-step {
+    background: #0f3460; border-radius: 10px; padding: 10px 14px; text-align: center;
+    font-size: 12px; color: #ccc; min-width: 100px;
+  }
+  .flow-step.active { background: #e94560; color: white; }
+  .flow-arrow { color: #555; font-size: 18px; }
+  .flow-label { font-size: 11px; color: #666; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="preview-grid">
+
+  <!-- ========== 正常态 ========== -->
+  <div>
+    <div class="phone-label">① 正常态 — 搜索框 + 筛选同一行</div>
+    <div class="phone-frame">
+      <div class="app-bar">
+        <h1>ClipFlow 🟢</h1>
+        <div class="app-bar-icons"><span>🔀</span><span>🔄</span><span>⚙️</span></div>
+      </div>
+      <div class="search-row">
+        <div class="search-box">
+          <span class="icon">🔍</span>
+          <input placeholder="搜索历史记录" />
+        </div>
+        <div class="chips">
+          <div class="chip"><span class="chip-icon">📂</span> 全部 <span class="arrow">▼</span></div>
+          <div class="chip"><span class="chip-icon">💻</span> 设备 <span class="arrow">▼</span></div>
+        </div>
+      </div>
+      <div class="content-area">
+        <div class="clip-item">
+          <div class="clip-header">💻 MacBook Pro · 3分钟前</div>
+          <div class="clip-content">你好世界，这是一段测试文本。ClipFlow 是一个跨平台剪切板同步工具。</div>
+        </div>
+        <div class="clip-item">
+          <div class="clip-header">📱 Pixel 7 · 15分钟前</div>
+          <div class="clip-content">https://github.com/hanyi-lucky/clipflow</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 搜索态（有内容） ========== -->
+  <div>
+    <div class="phone-label">② 搜索态 — 输入关键词 + 筛选同一行</div>
+    <div class="phone-frame">
+      <div class="app-bar">
+        <h1>ClipFlow 🟢</h1>
+        <div class="app-bar-icons"><span>🔀</span><span>🔄</span><span>⚙️</span></div>
+      </div>
+      <div class="search-row">
+        <div class="search-box">
+          <span class="icon">🔍</span>
+          <input value="clipflow" />
+          <span class="clear">✕</span>
+        </div>
+        <div class="chips">
+          <div class="chip"><span class="chip-icon">📂</span> 全部 <span class="arrow">▼</span></div>
+          <div class="chip"><span class="chip-icon">💻</span> 设备 <span class="arrow">▼</span></div>
+        </div>
+      </div>
+      <div class="result-count">2 条结果</div>
+      <div class="content-area">
+        <div class="clip-item">
+          <div class="clip-header">💻 MacBook Pro · 3分钟前</div>
+          <div class="clip-content">你好世界，这是一段测试文本。<span class="highlight">ClipFlow</span> 是一个跨平台剪切板同步工具。</div>
+        </div>
+        <div class="clip-item">
+          <div class="clip-header">📱 Pixel 7 · 15分钟前</div>
+          <div class="clip-content">https://github.com/hanyi-lucky/<span class="highlight">clipflow</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 筛选态（设备已选） ========== -->
+  <div>
+    <div class="phone-label">③ 筛选态 — 设备 chip 高亮</div>
+    <div class="phone-frame">
+      <div class="app-bar">
+        <h1>ClipFlow 🟢</h1>
+        <div class="app-bar-icons"><span>🔀</span><span>🔄</span><span>⚙️</span></div>
+      </div>
+      <div class="search-row">
+        <div class="search-box">
+          <span class="icon">🔍</span>
+          <input placeholder="搜索历史记录" />
+        </div>
+        <div class="chips">
+          <div class="chip active"><span class="chip-icon">📝</span> 文本 <span class="arrow">▼</span></div>
+          <div class="chip"><span class="chip-icon">💻</span> MacBook <span class="arrow">▼</span></div>
+        </div>
+      </div>
+      <div class="result-count">3 条结果</div>
+      <div class="content-area">
+        <div class="clip-item">
+          <div class="clip-header">💻 MacBook Pro · 3分钟前</div>
+          <div class="clip-content">你好世界，这是一段测试文本。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 宽屏（桌面端） ========== -->
+  <div>
+    <div class="phone-label">④ 桌面端 — 宽屏自适应</div>
+    <div class="phone-frame" style="width: 600px;">
+      <div class="app-bar">
+        <h1>ClipFlow 🟢</h1>
+        <div class="app-bar-icons"><span>🔀</span><span>🔄</span><span>⚙️</span></div>
+      </div>
+      <div class="search-row">
+        <div class="search-box">
+          <span class="icon">🔍</span>
+          <input placeholder="搜索历史记录" />
+        </div>
+        <div class="chips">
+          <div class="chip"><span class="chip-icon">📂</span> 全部类型 <span class="arrow">▼</span></div>
+          <div class="chip"><span class="chip-icon">💻</span> 全部设备 <span class="arrow">▼</span></div>
+        </div>
+      </div>
+      <div class="content-area">
+        <div class="clip-item">
+          <div class="clip-header">💻 MacBook Pro · 3分钟前</div>
+          <div class="clip-content">你好世界，这是一段测试文本。ClipFlow 是一个跨平台剪切板同步工具，支持端到端加密。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ========== 返回手势流程 ========== -->
+<div class="flow-diagram">
+  <div class="flow-title">📱 手机侧滑返回 — 逐步退出状态</div>
+  <div class="flow-steps">
+    <div class="flow-step active">🔀 合并模式</div>
+    <div class="flow-arrow">← 侧滑</div>
+    <div class="flow-step active">🔍 搜索态</div>
+    <div class="flow-arrow">← 侧滑</div>
+    <div class="flow-step">📋 正常态</div>
+    <div class="flow-arrow">← 侧滑</div>
+    <div class="flow-step">💬 确认退出</div>
+  </div>
+  <div style="text-align:center; margin-top:12px; font-size:12px; color:#666;">
+    侧滑逐步退回上一状态，而非直接退出 App
+  </div>
+</div>
+
+</body>
+</html>

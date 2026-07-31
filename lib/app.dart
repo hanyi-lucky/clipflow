@@ -37,8 +37,7 @@ class ClipFlowApp extends StatelessWidget {
               margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
             ),
             inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: Colors.grey.shade50,
+              filled: false,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
                 borderSide: BorderSide(color: Colors.grey.shade300),
@@ -83,8 +82,7 @@ class ClipFlowApp extends StatelessWidget {
               margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
             ),
             inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: const Color(0xFF2A2A3C),
+              filled: false,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
                 borderSide: const BorderSide(color: Color(0xFF3A3A4C)),
