@@ -42,18 +42,29 @@ class HomeScreen extends StatelessWidget {
                           Consumer<ClipboardProvider>(
                             builder: (context, provider, _) {
                               final status = provider.syncStatus;
-                              return Container(
-                                width: 8,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  color: status.color,
-                                  shape: BoxShape.circle,
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: status.color.withOpacity(0.5),
-                                      blurRadius: 4,
+                              final canRetry = status == SyncStatus.error || status == SyncStatus.disconnected;
+                              return Tooltip(
+                                message: status.label,
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(8),
+                                  onTap: canRetry ? () => provider.refresh() : null,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(4),
+                                    child: Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        color: status.color,
+                                        shape: BoxShape.circle,
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: status.color.withOpacity(0.5),
+                                            blurRadius: 4,
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                  ],
+                                  ),
                                 ),
                               );
                             },

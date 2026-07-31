@@ -43,20 +43,26 @@ class CloudBaseService {
     }
   }
 
-  /// 发送 HTTP 请求
+  /// 发送 HTTP 请求（10 秒超时，防止阻塞同步循环）
   Future<http.Response> _sendRequest(String method, Uri uri, {Map<String, String>? headers, Object? body}) async {
+    Future<http.Response> request;
     switch (method) {
       case 'GET':
-        return http.get(uri, headers: headers);
+        request = http.get(uri, headers: headers);
+        break;
       case 'POST':
-        return http.post(uri, headers: headers, body: body);
+        request = http.post(uri, headers: headers, body: body);
+        break;
       case 'PATCH':
-        return http.patch(uri, headers: headers, body: body);
+        request = http.patch(uri, headers: headers, body: body);
+        break;
       case 'DELETE':
-        return http.delete(uri, headers: headers);
+        request = http.delete(uri, headers: headers);
+        break;
       default:
         throw Exception('Unsupported method: $method');
     }
+    return request.timeout(const Duration(seconds: 10));
   }
 
   /// 调用 API（token 失效时自动重新登录并重试）

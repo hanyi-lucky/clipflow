@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, SocketException;
 import 'dart:ui' show AppExitResponse, ViewFocusEvent;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -527,7 +527,12 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       _consecutiveFailures++;
       _errorMessage = e.toString();
       _serverConnected = false;
-      _setStatus(SyncStatus.error);
+      // 区分网络不可达（灰点）和服务端错误（红点）
+      if (e is SocketException || e is TimeoutException) {
+        _setStatus(SyncStatus.disconnected);
+      } else {
+        _setStatus(SyncStatus.error);
+      }
     }
     _scheduleNextSync();
   }

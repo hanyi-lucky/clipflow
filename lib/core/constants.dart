@@ -6,6 +6,4 @@ class AppConstants {
   static const int pbkdf2Iterations = 100000;
   static const int aesKeyLength = 32; // 256 bits
   static const int ivLength = 12;
-  static const int maxRetries = 3;
-  static const Duration retryDelay = Duration(seconds: 1);
 }
