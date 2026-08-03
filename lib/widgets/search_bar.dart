@@ -228,6 +228,7 @@ class _FilterChip extends StatelessWidget {
       color: isSelected
           ? cs.primaryContainer
           : cs.surfaceContainerHighest.withOpacity(0.5),
+      surfaceTintColor: Colors.transparent,
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
         borderRadius: BorderRadius.circular(20),

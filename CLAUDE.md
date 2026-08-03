@@ -225,6 +225,30 @@ POST /api/auth { userId } → 获取 token
 token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
 ```
 
+### 5. 前端跨平台样式一致性
+
+**原则：三端（Android / macOS / Windows）使用完全相同的代码，不写平台分支，不做平台区分。**
+
+**为什么这样做：** Flutter 的 `InputDecorationTheme` 等全局主题属性通过 `merge` 机制向子树传播，不同平台的渲染引擎对 `InputBorder.none` 的合成行为不一致，导致同一份代码在 Mac 上显示边框、Android 上正常。热重载也无法完全刷新主题继承。
+
+**具体规则：**
+
+1. **不在全局 `ThemeData` 中设置 `inputDecorationTheme` 的边框。** 需要边框的 TextField（如解锁密码框）在自己的 `InputDecoration` 中显式声明 `OutlineInputBorder`；不需要边框的 TextField（如搜索框）显式声明 `InputBorder.none` + `filled: false`
+2. **UI 样式/布局层禁止 `Platform.isXXX` / `kIsWeb` 分支。** 同一份 Widget 树 = 同一份渲染结果。功能层的平台适配不受此限制（如 Android MethodChannel 剪切板监听、设备名称映射）
+3. **自定义 Material 组件设 `surfaceTintColor: Colors.transparent`。** 防止 Material 3 默认 tint 在不同平台上的合成差异
+4. **组件级颜色优先用 `ColorScheme` token**（`cs.surfaceContainerHighest`、`cs.onSurfaceVariant` 等）。应用级品牌色和固定设计值可硬编码（如 `Color(0xFF5B6CF0)`），但组件内部不得硬编码会被暗色模式影响的颜色
+5. **样式修改后必须重启完整应用测试三端**，热重载不能可靠刷新主题继承
+
+**新增 TextField 时的检查清单：**
+- 是否显式声明了 `border`？（不声明会拿到 Flutter 默认 underline）
+- 是否设置了 `filled`？（不设置会继承全局主题的 filled 值）
+- 用 `grep -rn "TextField" lib/` 确认项目中所有 TextField 的边框样式是否统一
+
+**⚠️ 不要做的事：**
+- 不要在 `app.dart` 的 `inputDecorationTheme` 中设置 `border: OutlineInputBorder(...)` 然后期望子组件用 `InputBorder.none` 覆盖——Flutter 的 merge 在桌面端不可靠
+- 不要为不同平台写不同的 Widget 树
+- 不要新增未声明边框的 TextField——会拿到 Flutter 默认下划线，破坏三端一致性
+
 ## 入口与路由
 
 - `lib/main.dart` — 应用入口。用 `MultiProvider` 包裹组件树启动 App。

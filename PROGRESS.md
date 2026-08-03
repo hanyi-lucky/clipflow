@@ -104,8 +104,8 @@
 
 ### v1.2 待修复问题
 
-1. **搜索框样式不一致（Mac vs Android）**：macOS 端搜索框和筛选 chips 的视觉效果与 Android 端不同步，需要逐平台调试确认
-2. **侧滑返回未恢复初始状态**：搜索框获焦（光标闪烁+键盘弹出）时侧滑返回，弹出"确认退出"对话框；点击取消后焦点仍在搜索框、键盘重新弹出。预期行为：侧滑应先关闭键盘并取消焦点，回到无搜索、无焦点的初始状态，再按一次才弹退出确认
+1. **搜索框样式不一致（Mac vs Android）**：✅ 已修复。根因：全局 `inputDecorationTheme` 的 `OutlineInputBorder` 通过 Flutter merge 机制泄漏到搜索框。修复：移除 `app.dart` 中全局 `inputDecorationTheme` 的边框定义，各 TextField 显式声明自己的边框样式。同步在 CLAUDE.md 新增"前端跨平台样式一致性"规则。
+2. **侧滑返回未恢复初始状态**：🔧 部分修复。已实现：搜索框获焦时侧滑先关闭键盘 → 再滑清空搜索 → 再滑弹退出确认。**未解决问题：** 退出弹窗关闭后（点"取消"或侧滑），再次侧滑应重新弹出退出确认，但实际 App 直接退出。已排查确认 `WillPopScope` 能触发、`_handleBack` 逻辑正确，疑似 `showDialog` 在 `WillPopScope` 回调中执行时 Navigator 正在处理 pop 事件导致 dialog 无法 push。尝试过 `addPostFrameCallback` 延迟弹窗、`PopScope(canPop: false)` 阻止弹窗被返回关闭，均未解决。需在新会话中继续排查。
 
 ---
 

@@ -277,6 +277,20 @@ class _UnlockScreenState extends State<UnlockScreen> {
                           labelText: '主密码',
                           prefixIcon: const Icon(Icons.lock_outline_rounded),
                           errorText: _error,
+                          filled: true,
+                          fillColor: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Theme.of(context).colorScheme.outline.withOpacity(0.3)),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Theme.of(context).colorScheme.outline.withOpacity(0.3)),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: Theme.of(context).colorScheme.primary, width: 2),
+                          ),
                         ),
                         onSubmitted: (_) => _unlock(),
                       ),

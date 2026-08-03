@@ -17,64 +17,76 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  /// 上一次返回键处理时，是否处于搜索状态
-  /// 用于实现"搜索态 → 正常态 → 确认退出"的过渡
+  /// 侧滑返回状态标记：已经执行过"关闭键盘"操作
   bool _wasInSearch = false;
+  /// 退出确认弹窗是否正在显示
+  bool _isDialogShowing = false;
 
   /// 处理侧滑返回：逐步退出状态
   void _handleBack(BuildContext context, ClipboardProvider provider) {
+    if (_isDialogShowing) {
+      // 弹窗正在显示 → 不做任何操作（弹窗自身的 WillPopScope 处理关闭）
+      return;
+    }
     if (provider.isMergeMode) {
-      // 优先级 1：退出合并模式
       provider.exitMergeMode();
-      _wasInSearch = false;
-    } else if (provider.hasActiveFilters) {
-      // 优先级 2：关闭键盘（保留搜索文本，等下次返回再清空）
+    } else if (FocusManager.instance.primaryFocus != null && !_wasInSearch) {
       FocusManager.instance.primaryFocus?.unfocus();
       _wasInSearch = true;
-    } else if (_wasInSearch) {
-      // 刚从搜索态退出：清空搜索，进入正常态
+    } else if (_wasInSearch && provider.hasActiveFilters) {
       provider.clearFilters();
-      FocusManager.instance.primaryFocus?.unfocus();
+    } else if (_wasInSearch) {
       _wasInSearch = false;
+      _showExitDialog(context);
+    } else if (provider.hasActiveFilters) {
+      provider.clearFilters();
     } else {
-      // 优先级 3：确认退出 App
       _showExitDialog(context);
     }
   }
 
   void _showExitDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('退出'),
-        content: const Text('确定要退出 ClipFlow 吗？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+    _isDialogShowing = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            title: const Text('退出'),
+            content: const Text('确定要退出 ClipFlow 吗？'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  _isDialogShowing = false;
+                  Navigator.pop(ctx);
+                },
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  SystemNavigator.pop();
+                },
+                child: const Text('退出', style: TextStyle(color: Colors.red)),
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              SystemNavigator.pop();
-            },
-            child: const Text('退出', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
+        ),
+      );
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Consumer<ClipboardProvider>(
       builder: (context, provider, _) {
-        return PopScope(
-          canPop: false,
-          onPopInvokedWithResult: (didPop, result) {
-            if (!didPop) {
-              _handleBack(context, provider);
-            }
+        return WillPopScope(
+          onWillPop: () async {
+            _handleBack(context, provider);
+            return false;
           },
           child: Scaffold(
             body: Stack(
