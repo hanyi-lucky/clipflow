@@ -99,13 +99,13 @@
 | 图片网格框架 | ✅ | v1.3 填充，当前显示空状态 |
 | 网络状态检测 | ✅ | HTTP 10s timeout，断网灰点/服务错误红点 |
 | 状态点交互 | ✅ | Tooltip + 点击重试 |
-| 侧滑返回状态管理 | ✅ | 合并模式 → 搜索态 → 正常态 → 确认退出 |
+| 侧滑返回状态管理 | ✅ | 系统默认行为，侧滑返回直接退出 App（前台服务继续运行） |
 | 搜索栏 UI 优化 | 🔧 进行中 | 单行布局、圆角 16、彻底透明输入框 |
 
 ### v1.2 待修复问题
 
 1. **搜索框样式不一致（Mac vs Android）**：✅ 已修复。根因：全局 `inputDecorationTheme` 的 `OutlineInputBorder` 通过 Flutter merge 机制泄漏到搜索框。修复：移除 `app.dart` 中全局 `inputDecorationTheme` 的边框定义，各 TextField 显式声明自己的边框样式。同步在 CLAUDE.md 新增"前端跨平台样式一致性"规则。
-2. **侧滑返回未恢复初始状态**：🔧 部分修复。已实现：搜索框获焦时侧滑先关闭键盘 → 再滑清空搜索 → 再滑弹退出确认。**未解决问题：** 退出弹窗关闭后（点"取消"或侧滑），再次侧滑应重新弹出退出确认，但实际 App 直接退出。已排查确认 `WillPopScope` 能触发、`_handleBack` 逻辑正确，疑似 `showDialog` 在 `WillPopScope` 回调中执行时 Navigator 正在处理 pop 事件导致 dialog 无法 push。尝试过 `addPostFrameCallback` 延迟弹窗、`PopScope(canPop: false)` 阻止弹窗被返回关闭，均未解决。需在新会话中继续排查。
+2. **侧滑返回退出逻辑**：✅ 已修复。根因：`WillPopScope`（已废弃）和 `PopScope` 在 Android 14+ 预测性返回手势下均不可靠，`showDialog` 创建的独立路由与返回手势存在不可调和的冲突。修复方案：移除所有返回拦截逻辑（`PopScope`、`WillPopScope`、`WidgetsBindingObserver`、退出确认弹窗），改为系统默认行为——侧滑返回直接退出 App，前台服务继续运行。用户通过清理后台来彻底退出。
 
 ---
 
