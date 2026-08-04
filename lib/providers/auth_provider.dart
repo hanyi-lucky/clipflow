@@ -49,7 +49,6 @@ class AuthProvider extends ChangeNotifier {
 
     try {
       await _authService.signInAnonymously(userId: userId);
-      await _registerCurrentDevice();
     } on Exception catch (e) {
       _error = e.toString();
       _isLoading = false;
@@ -61,7 +60,7 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _registerCurrentDevice() async {
+  Future<void> registerCurrentDevice() async {
     if (_storage == null) return;
 
     String deviceId = _storage!.deviceId ?? const Uuid().v4();

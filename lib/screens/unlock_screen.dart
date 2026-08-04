@@ -19,6 +19,7 @@ class UnlockScreen extends StatefulWidget {
 class _UnlockScreenState extends State<UnlockScreen> {
   final _passwordController = TextEditingController();
   final _encryption = EncryptionService();
+  LocalStorage? _storage;
   bool _isFirstTime = true;
   bool _initialized = false;
   bool _authSuccess = false;
@@ -36,7 +37,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
   Future<void> _init() async {
     try {
       final auth = context.read<AuthProvider>();
-      final storage = await LocalStorage.create();
+      _storage ??= await LocalStorage.create();
+      final storage = _storage!;
       await auth.initialize(storage);
 
       // 连接检查（不登录，登录在解锁时根据密码派生 userId）
@@ -75,7 +77,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
       final passwordHash = sha256.convert(utf8.encode('clipflow:$password')).toString();
       final userId = 'user_${passwordHash.substring(0, 16)}';
 
-      final storage = await LocalStorage.create();
+      final storage = _storage ?? await LocalStorage.create();
       final auth = context.read<AuthProvider>();
 
       // 使用密码派生的 userId 登录
@@ -84,8 +86,12 @@ class _UnlockScreenState extends State<UnlockScreen> {
       final cloudRepo = auth.cloudRepo;
       List<int> salt;
 
-      // 1. 先尝试从云端下载 salt
-      final cloudSalt = await cloudRepo.getSalt();
+      // 并行执行：下载 salt + 注册设备（不互相依赖）
+      final results = await Future.wait([
+        cloudRepo.getSalt(),
+        auth.registerCurrentDevice(),
+      ]);
+      final cloudSalt = results[0] as String?;
 
       if (cloudSalt != null) {
         // 云端已有 salt → 所有设备共享同一 salt
@@ -105,7 +111,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
         await cloudRepo.setSalt(bytesToHex(salt));
       }
 
-      final key = await _encryption.deriveKey(password, salt);
+      final key = await _encryption.deriveKeyIsolate(password, salt);
       final clipboardProvider = context.read<ClipboardProvider>();
 
       await clipboardProvider.initialize(

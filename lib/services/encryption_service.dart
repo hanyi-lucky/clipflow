@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:pointycastle/export.dart';
 import '../core/constants.dart';
 import '../core/exceptions.dart';
@@ -30,6 +30,20 @@ class EncryptedData {
   }
 }
 
+/// PBKDF2 密钥派生（在 isolate 中执行）
+/// 必须是顶层函数，compute() 要求闭包可序列化
+Uint8List _deriveKeyInBackground(Map<String, dynamic> params) {
+  final password = params['password'] as String;
+  final salt = params['salt'] as List<int>;
+  final derivator = PBKDF2KeyDerivator(HMac(SHA256Digest(), 64));
+  derivator.init(Pbkdf2Parameters(
+    Uint8List.fromList(salt),
+    AppConstants.pbkdf2Iterations,
+    AppConstants.aesKeyLength,
+  ));
+  return derivator.process(Uint8List.fromList(utf8.encode(password)));
+}
+
 class EncryptionService {
   Future<Uint8List> deriveKey(String password, List<int> salt) async {
     final derivator = PBKDF2KeyDerivator(HMac(SHA256Digest(), 64));
@@ -39,6 +53,14 @@ class EncryptionService {
       AppConstants.aesKeyLength,
     ));
     return derivator.process(Uint8List.fromList(utf8.encode(password)));
+  }
+
+  /// 使用 compute isolate 派生密钥，不阻塞 UI 线程
+  Future<Uint8List> deriveKeyIsolate(String password, List<int> salt) async {
+    return compute(_deriveKeyInBackground, {
+      'password': password,
+      'salt': salt,
+    });
   }
 
   Future<EncryptedData> encrypt(String plaintext, Uint8List key) async {

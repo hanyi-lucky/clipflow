@@ -4,7 +4,6 @@ import 'dart:io' show Platform, SocketException;
 import 'dart:ui' show AppExitResponse, ViewFocusEvent;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
@@ -184,9 +183,6 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       key: encryptionKey,
     );
 
-    // 从服务器加载历史记录（带有正确的设备来源信息）
-    await _loadHistoryFromServer();
-
     _monitor = ClipboardMonitor(onChanged: _onClipboardChanged, storage: storage);
     _monitor!.setSyncService(_syncService!);
     _monitor!.onContentSynced = _addSyncedToHistory;
@@ -211,6 +207,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     }
 
     notifyListeners();
+
+    // 后台异步加载历史，不阻塞解锁流程
+    _loadHistoryFromServer().then((_) {
+      notifyListeners();
+    }).catchError((e) {
+      debugPrint('[CLIP-PROVIDER] Background history load failed: $e');
+    });
   }
 
   /// 从服务器加载历史记录，确保设备来源信息正确

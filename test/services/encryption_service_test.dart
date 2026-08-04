@@ -85,4 +85,21 @@ void main() {
 
     expect(decrypted, equals(plaintext));
   });
+
+  test('deriveKeyIsolate should produce same key as deriveKey', () async {
+    final keySync = await service.deriveKey(testPassword, testSalt);
+    final keyIsolate = await service.deriveKeyIsolate(testPassword, testSalt);
+    expect(keyIsolate, equals(keySync));
+  });
+
+  test('deriveKeyIsolate should produce 32-byte key', () async {
+    final key = await service.deriveKeyIsolate(testPassword, testSalt);
+    expect(key.length, equals(32));
+  });
+
+  test('deriveKeyIsolate with different passwords should produce different keys', () async {
+    final key1 = await service.deriveKeyIsolate(testPassword, testSalt);
+    final key2 = await service.deriveKeyIsolate('different-password', testSalt);
+    expect(key1, isNot(equals(key2)));
+  });
 }

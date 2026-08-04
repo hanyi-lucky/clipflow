@@ -47,3 +47,11 @@ app.*.map.json
 
 # Release binaries
 /releases/
+
+# Agent configuration (local development tools)
+.agents/
+.codex/
+AGENTS.md
+
+# Android build reports
+/android/build/
