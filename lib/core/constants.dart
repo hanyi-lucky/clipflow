@@ -14,4 +14,9 @@ class AppConstants {
   static const int thumbJpgQuality = 75;
   static const int maxImageBytes = 5 * 1024 * 1024;
   static const int stableHashDimension = 128; // 稳定像素哈希的降采样尺寸
+
+  // 文件同步
+  static const int maxFileBytes = 50 * 1024 * 1024; // 明文上限
+  static const int fileChunkSize = 1024 * 1024; // 流式加解密/哈希 IO 块
+  static const int localFileCacheMaxBytes = 1536 * 1024 * 1024; // 1.5GB
 }

@@ -1,5 +1,103 @@
 import 'package:flutter/material.dart';
 import '../models/clipboard_entry.dart';
+import '../models/file_download_progress.dart';
+
+const Set<String> _pdfExtensions = {'pdf'};
+const Set<String> _docExtensions = {
+  'doc', 'docx', 'rtf', 'odt', 'pages', 'txt', 'md', 'text',
+};
+const Set<String> _sheetExtensions = {
+  'xls', 'xlsx', 'csv', 'ods', 'numbers',
+};
+const Set<String> _slideExtensions = {
+  'ppt', 'pptx', 'odp', 'key',
+};
+const Set<String> _archiveExtensions = {
+  'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz', 'iso',
+};
+const Set<String> _audioExtensions = {
+  'mp3', 'wav', 'aac', 'flac', 'm4a', 'ogg', 'opus', 'wma',
+};
+const Set<String> _videoExtensions = {
+  'mp4', 'mov', 'mkv', 'avi', 'webm', 'flv', 'wmv', 'm4v', 'mpg', 'mpeg',
+};
+const Set<String> _codeExtensions = {
+  'dart', 'js', 'ts', 'py', 'java', 'c', 'cpp', 'h', 'hpp', 'swift', 'kt',
+  'rb', 'go', 'rs', 'html', 'css', 'json', 'xml', 'yaml', 'yml', 'sh', 'bat',
+  'ps1', 'sql', 'php', 'vue', 'jsx', 'tsx', 'lua', 'r',
+};
+const Set<String> _imageExtensions = {
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'heif', 'svg', 'tiff',
+  'ico',
+};
+
+/// 按扩展名/MIME 映射文件类型图标，未知类型回退默认文件图标。
+IconData fileTypeIcon(String? fileName, String? mimeType) {
+  final name = fileName ?? '';
+  final dot = name.lastIndexOf('.');
+  final ext = dot >= 0 && dot < name.length - 1
+      ? name.substring(dot + 1).toLowerCase()
+      : '';
+  final mime = mimeType?.toLowerCase() ?? '';
+
+  if (_pdfExtensions.contains(ext) || mime.contains('pdf')) {
+    return Icons.picture_as_pdf_outlined;
+  }
+  if (_docExtensions.contains(ext) ||
+      mime.startsWith('text/') ||
+      mime.contains('msword') ||
+      mime.contains('wordprocessingml')) {
+    return Icons.description_outlined;
+  }
+  if (_sheetExtensions.contains(ext) ||
+      mime.contains('spreadsheetml') ||
+      mime.contains('ms-excel') ||
+      mime.contains('text/csv')) {
+    return Icons.table_chart_outlined;
+  }
+  if (_slideExtensions.contains(ext) ||
+      mime.contains('presentationml') ||
+      mime.contains('ms-powerpoint')) {
+    return Icons.slideshow_outlined;
+  }
+  if (_archiveExtensions.contains(ext) ||
+      mime.contains('zip') ||
+      mime.contains('x-rar') ||
+      mime.contains('x-7z') ||
+      mime.contains('x-tar') ||
+      mime.contains('x-gzip') ||
+      mime.contains('x-bzip')) {
+    return Icons.folder_zip_outlined;
+  }
+  if (_audioExtensions.contains(ext) || mime.startsWith('audio/')) {
+    return Icons.audio_file_outlined;
+  }
+  if (_videoExtensions.contains(ext) || mime.startsWith('video/')) {
+    return Icons.video_file_outlined;
+  }
+  if (_codeExtensions.contains(ext) ||
+      mime.contains('javascript') ||
+      mime.contains('application/json') ||
+      mime.contains('xml')) {
+    return Icons.code_rounded;
+  }
+  if (_imageExtensions.contains(ext) || mime.startsWith('image/')) {
+    return Icons.image_outlined;
+  }
+  return Icons.insert_drive_file_outlined;
+}
+
+String formatFileSize(int? bytes) {
+  if (bytes == null || bytes < 0) return '未知大小';
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) {
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+}
 
 class ClipboardItem extends StatefulWidget {
   final ClipboardEntry entry;
@@ -11,6 +109,9 @@ class ClipboardItem extends StatefulWidget {
   final VoidCallback? onPin;
   final VoidCallback? onDelete;
   final String? searchQuery;
+  final FileDownloadProgress? fileDownloadProgress;
+  final VoidCallback? onCancelDownload;
+  final VoidCallback? onRetryDownload;
 
   const ClipboardItem({
     super.key,
@@ -23,6 +124,9 @@ class ClipboardItem extends StatefulWidget {
     this.onPin,
     this.onDelete,
     this.searchQuery,
+    this.fileDownloadProgress,
+    this.onCancelDownload,
+    this.onRetryDownload,
   });
 
   @override
@@ -56,6 +160,24 @@ class _ClipboardItemState extends State<ClipboardItem> {
     final isDark = theme.brightness == Brightness.dark;
     final content = widget.entry.content;
     final query = widget.searchQuery?.toLowerCase();
+    // 超长文本行只渲染前 500 字符预览，展开态才渲染完整内容（已受 50000 上限约束）
+    final previewContent = content.length > 500
+        ? content.substring(0, 500)
+        : content;
+    final displayContent = _isExpanded ? content : previewContent;
+    final previewTruncated = !_isExpanded && content.length > 500;
+
+    // 文件行：图标 + 文件名/大小/MIME + 下载进度，不进入图片网格
+    if (widget.entry.type == ContentType.file) {
+      return _FileEntryView(
+        fileName: widget.entry.fileName,
+        fileSize: widget.entry.fileSize,
+        mimeType: widget.entry.mimeType,
+        fileDownloadProgress: widget.fileDownloadProgress,
+        onCancelDownload: widget.onCancelDownload,
+        onRetryDownload: widget.onRetryDownload,
+      );
+    }
 
     // 图片行：缩略图块 + 尺寸角标，不参与文本高亮
     if (widget.entry.type == ContentType.image) {
@@ -113,21 +235,21 @@ class _ClipboardItemState extends State<ClipboardItem> {
     TextSpan buildHighlightedText() {
       if (query == null || query.isEmpty) {
         return TextSpan(
-          text: content,
+          text: displayContent,
           style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
         );
       }
 
       final spans = <TextSpan>[];
-      final lowerContent = content.toLowerCase();
+      final lowerContent = displayContent.toLowerCase();
       int start = 0;
 
       while (true) {
         final index = lowerContent.indexOf(query, start);
         if (index == -1) {
-          if (start < content.length) {
+          if (start < displayContent.length) {
             spans.add(TextSpan(
-              text: content.substring(start),
+              text: displayContent.substring(start),
               style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
             ));
           }
@@ -135,12 +257,12 @@ class _ClipboardItemState extends State<ClipboardItem> {
         }
         if (index > start) {
           spans.add(TextSpan(
-            text: content.substring(start, index),
+            text: displayContent.substring(start, index),
             style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
           ));
         }
         spans.add(TextSpan(
-          text: content.substring(index, index + query.length),
+          text: displayContent.substring(index, index + query.length),
           style: theme.textTheme.bodyMedium?.copyWith(
             height: 1.5,
             backgroundColor: theme.colorScheme.primary.withOpacity(0.25),
@@ -183,7 +305,7 @@ class _ClipboardItemState extends State<ClipboardItem> {
                 maxLines: _isExpanded ? null : 3,
                 overflow: _isExpanded ? TextOverflow.visible : TextOverflow.ellipsis,
               ),
-              if (isOverflow)
+              if (isOverflow || previewTruncated)
                 GestureDetector(
                   onTap: () => setState(() => _isExpanded = !_isExpanded),
                   child: Padding(
@@ -322,6 +444,258 @@ class _ClipboardItemState extends State<ClipboardItem> {
         ),
       ),
     );
+  }
+}
+
+class _FileEntryView extends StatelessWidget {
+  final String? fileName;
+  final int? fileSize;
+  final String? mimeType;
+  final FileDownloadProgress? fileDownloadProgress;
+  final VoidCallback? onCancelDownload;
+  final VoidCallback? onRetryDownload;
+
+  const _FileEntryView({
+    this.fileName,
+    this.fileSize,
+    this.mimeType,
+    this.fileDownloadProgress,
+    this.onCancelDownload,
+    this.onRetryDownload,
+  });
+
+  bool _hasVisibleProgress(FileDownloadProgress? progress) {
+    if (progress == null) return false;
+    switch (progress.status) {
+      case FileTransferStatus.downloading:
+      case FileTransferStatus.processing:
+      case FileTransferStatus.failed:
+      case FileTransferStatus.cancelled:
+        return true;
+      case FileTransferStatus.pending:
+      case FileTransferStatus.completed:
+        return false;
+    }
+  }
+
+  String _fileMetaLabel() {
+    final mime = mimeType?.trim() ?? '';
+    if (mime.isNotEmpty) return mime;
+    final name = fileName ?? '';
+    final dot = name.lastIndexOf('.');
+    if (dot >= 0 && dot < name.length - 1) {
+      return '${name.substring(dot + 1).toUpperCase()} 文件';
+    }
+    return '文件';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final progress = fileDownloadProgress;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.05)
+            : Colors.black.withValues(alpha: 0.03),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  fileTypeIcon(fileName, mimeType),
+                  size: 22,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      fileName ?? '未命名文件',
+                      style: theme.textTheme.titleSmall,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _fileMetaLabel(),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.outline,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                formatFileSize(fileSize),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.outline,
+                ),
+              ),
+            ],
+          ),
+          if (_hasVisibleProgress(progress)) ...[
+            const SizedBox(height: 10),
+            _FileProgressSection(
+              progress: progress!,
+              onCancelDownload: onCancelDownload,
+              onRetryDownload: onRetryDownload,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _FileProgressSection extends StatelessWidget {
+  final FileDownloadProgress progress;
+  final VoidCallback? onCancelDownload;
+  final VoidCallback? onRetryDownload;
+
+  const _FileProgressSection({
+    required this.progress,
+    this.onCancelDownload,
+    this.onRetryDownload,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    switch (progress.status) {
+      case FileTransferStatus.downloading:
+        final total = progress.totalBytes;
+        final value = (total != null && total > 0)
+            ? (progress.receivedBytes / total).clamp(0.0, 1.0).toDouble()
+            : null;
+        return Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  LinearProgressIndicator(
+                    value: value,
+                    minHeight: 4,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '下载中 ${formatFileSize(progress.receivedBytes)} / '
+                    '${formatFileSize(total)}',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (onCancelDownload != null)
+              IconButton(
+                onPressed: onCancelDownload,
+                tooltip: '取消下载',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  Icons.close_rounded,
+                  size: 18,
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+          ],
+        );
+      case FileTransferStatus.processing:
+        return Row(
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              '处理中',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+          ],
+        );
+      case FileTransferStatus.failed:
+        return Row(
+          children: [
+            Expanded(
+              child: Text(
+                progress.error ?? '下载失败',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(color: cs.error),
+              ),
+            ),
+            if (onRetryDownload != null)
+              IconButton(
+                onPressed: onRetryDownload,
+                tooltip: '重试下载',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  Icons.refresh_rounded,
+                  size: 18,
+                  color: cs.primary,
+                ),
+              ),
+          ],
+        );
+      case FileTransferStatus.cancelled:
+        return Row(
+          children: [
+            Expanded(
+              child: Text(
+                progress.error ?? '已取消',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+            ),
+            if (onRetryDownload != null)
+              IconButton(
+                onPressed: onRetryDownload,
+                tooltip: '重试下载',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  Icons.refresh_rounded,
+                  size: 18,
+                  color: cs.primary,
+                ),
+              ),
+          ],
+        );
+      case FileTransferStatus.pending:
+      case FileTransferStatus.completed:
+        return const SizedBox.shrink();
+    }
   }
 }
 

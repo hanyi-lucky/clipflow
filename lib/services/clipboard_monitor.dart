@@ -5,13 +5,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:crypto/crypto.dart';
 import '../core/constants.dart';
+import '../models/clipboard_file.dart';
 import '../models/clipboard_image.dart';
 import '../repositories/local_storage.dart';
+import '../services/file_clipboard_service.dart';
 import '../services/image_clipboard_service.dart';
 import '../services/sync_service.dart';
 
 typedef ClipboardChangeCallback = void Function(String content);
 typedef ImageClipboardChangeCallback = void Function(ClipboardImage image);
+typedef FileClipboardChangeCallback = void Function(List<ClipboardFile> files);
 
 class ClipboardMonitor extends ChangeNotifier {
   Timer? _pollTimer;
@@ -20,12 +23,16 @@ class ClipboardMonitor extends ChangeNotifier {
   bool _isPaused = false;
   final ClipboardChangeCallback onChanged;
   final ImageClipboardService _imageClipboardService = ImageClipboardService();
+  final FileClipboardService _fileClipboardService = FileClipboardService();
   MethodChannel? _androidChannel;
   LocalStorage? _storage;
 
   // New sync state
   static const int _maxIgnoreHashes = 10;
   final Set<String> _ignoreHashes = {};
+  static const int _maxIgnoreFileHashes = 16;
+  final Set<String> _ignoreFileHashes = {};
+  final Map<String, String> _lastFileSignatures = {};
   DateTime? _lastSyncTime;
   bool _autoSyncOnResume = true;
   bool _notificationSync = true;
@@ -35,7 +42,13 @@ class ClipboardMonitor extends ChangeNotifier {
   /// 微信/QQ/Finder 复制图片文件时剪贴板常只含 file-url + 文本占位，
   /// 这些占位不是真实文本内容，命中则跳过上传。
   static const Set<String> _placeholderTexts = {
-    '[文件]', '[图片]', '[照片]', '[表情]', '[语音]', '[视频]', '[链接]',
+    '[文件]',
+    '[图片]',
+    '[照片]',
+    '[表情]',
+    '[语音]',
+    '[视频]',
+    '[链接]',
   };
 
   // SyncService reference (set externally)
@@ -46,6 +59,9 @@ class ClipboardMonitor extends ChangeNotifier {
 
   /// Callback when a clipboard image is detected (provider compresses/uploads)
   void Function(ClipboardImage image)? onImageChanged;
+
+  /// Callback when clipboard file metadata is detected (provider uploads).
+  void Function(List<ClipboardFile> files)? onFilesChanged;
 
   ClipboardMonitor({required this.onChanged, LocalStorage? storage}) {
     _storage = storage;
@@ -61,6 +77,7 @@ class ClipboardMonitor extends ChangeNotifier {
   String get lastHash => _lastHash;
   DateTime? get lastSyncTime => _lastSyncTime;
   Set<String> get ignoreHashes => Set.unmodifiable(_ignoreHashes);
+  Set<String> get ignoreFileHashes => Set.unmodifiable(_ignoreFileHashes);
   String get syncStatus => _syncStatus;
   bool get isSyncing => _isSyncing;
 
@@ -84,6 +101,7 @@ class ClipboardMonitor extends ChangeNotifier {
   void loadState() {
     _loadSyncState();
     _loadIgnoreHashes();
+    _loadFileState();
   }
 
   // -- Existing API (unchanged) --
@@ -131,22 +149,33 @@ class ClipboardMonitor extends ChangeNotifier {
   Future<void> syncClipboard({
     String? preReadContent,
     ClipboardImage? preReadImage,
+    List<ClipboardFile>? preReadFiles,
   }) async {
     if (_isSyncing) return;
     _isSyncing = true;
     _syncStatus = 'syncing';
     notifyListeners();
-    debugPrint('[SYNC] syncClipboard started, _syncService=${_syncService != null ? "set" : "NULL"}');
+    debugPrint(
+      '[SYNC] syncClipboard started, _syncService=${_syncService != null ? "set" : "NULL"}',
+    );
 
     try {
       // 原生传入图片：交给 provider 压缩上传
       if (preReadImage != null) {
-        debugPrint('[SYNC] Using pre-read image: ${preReadImage.bytes.length} bytes');
+        debugPrint(
+          '[SYNC] Using pre-read image: ${preReadImage.bytes.length} bytes',
+        );
         final hash = sha256.convert(preReadImage.bytes).toString();
         if (!_consumeIgnoredImageHash(hash)) {
           _lastImageHash = hash;
           onImageChanged?.call(preReadImage);
         }
+        _syncStatus = 'idle';
+        return;
+      }
+
+      if (preReadFiles != null && preReadFiles.isNotEmpty) {
+        _handleFiles(preReadFiles);
         _syncStatus = 'idle';
         return;
       }
@@ -160,7 +189,9 @@ class ClipboardMonitor extends ChangeNotifier {
         if (await _imageClipboardService.hasImage()) {
           final image = await _imageClipboardService.getImage();
           if (image != null && image.bytes.isNotEmpty) {
-            debugPrint('[SYNC] Clipboard image detected: ${image.bytes.length} bytes');
+            debugPrint(
+              '[SYNC] Clipboard image detected: ${image.bytes.length} bytes',
+            );
             final hash = sha256.convert(image.bytes).toString();
             if (!_consumeIgnoredImageHash(hash)) {
               _lastImageHash = hash;
@@ -174,8 +205,19 @@ class ClipboardMonitor extends ChangeNotifier {
           _syncStatus = 'idle';
           return;
         }
+        // 文件分支：图片之后、文本之前（文件复制常带文本占位）
+        if (await _fileClipboardService.hasFiles()) {
+          final files = await _fileClipboardService.getFiles();
+          if (files != null && files.isNotEmpty) {
+            _handleFiles(files);
+          }
+          _syncStatus = 'idle';
+          return;
+        }
         final content = await Clipboard.getData(Clipboard.kTextPlain);
-        debugPrint('[SYNC] Clipboard content: ${content?.text?.length ?? 0} chars');
+        debugPrint(
+          '[SYNC] Clipboard content: ${content?.text?.length ?? 0} chars',
+        );
         text = content?.text;
       }
 
@@ -259,6 +301,55 @@ class ClipboardMonitor extends ChangeNotifier {
     addIgnoreHash(hash);
   }
 
+  /// 标记文件已写入剪切板（下载写回/历史复制）：登记内容哈希与
+  /// 同剪贴板签名，供检测路径抑制回声。
+  void markFileAsWritten(String hash, List<ClipboardFile> files) {
+    _ignoreFileHashes.add(hash);
+    while (_ignoreFileHashes.length > _maxIgnoreFileHashes) {
+      _ignoreFileHashes.remove(_ignoreFileHashes.first);
+    }
+    _saveFileState();
+    for (final file in files) {
+      recordFileSignature(file);
+    }
+  }
+
+  /// 文件签名（path+size+lastModified）是否已在内存中记录并命中。
+  bool isFileSignatureHandled(ClipboardFile file) {
+    if (file.path == null || file.path!.isEmpty) return false;
+    final signature = _fileSignature(file);
+    return signature.isNotEmpty && _lastFileSignatures[file.path] == signature;
+  }
+
+  /// 仅在上传/写入成功后记录文件签名，防止同一次复制被重复上传。
+  void recordFileSignature(ClipboardFile file) {
+    if (file.path == null || file.path!.isEmpty) return;
+    _lastFileSignatures[file.path!] = _fileSignature(file);
+    _trimFileSignatures();
+  }
+
+  /// 上传失败时清除签名，允许同路径同大小同 mtime 的文件再次上传。
+  void clearFileSignature(ClipboardFile file) {
+    if (file.path == null || file.path!.isEmpty) return;
+    _lastFileSignatures.remove(file.path);
+  }
+
+  void addIgnoreFileHash(String hash) {
+    _ignoreFileHashes.add(hash);
+    while (_ignoreFileHashes.length > _maxIgnoreFileHashes) {
+      _ignoreFileHashes.remove(_ignoreFileHashes.first);
+    }
+    _saveFileState();
+  }
+
+  bool consumeIgnoredFileHash(String hash) {
+    if (_ignoreFileHashes.remove(hash)) {
+      _saveFileState();
+      return true;
+    }
+    return false;
+  }
+
   /// 检测图片字节哈希是否命中忽略表；命中则消费并更新本地基线。
   bool _consumeIgnoredImageHash(String hash) {
     if (_ignoreHashes.contains(hash)) {
@@ -274,7 +365,9 @@ class ClipboardMonitor extends ChangeNotifier {
   Future<bool> checkNotificationPermission() async {
     if (!Platform.isAndroid) return true;
     try {
-      final result = await _androidChannel?.invokeMethod<bool>('checkNotificationPermission');
+      final result = await _androidChannel?.invokeMethod<bool>(
+        'checkNotificationPermission',
+      );
       return result ?? false;
     } catch (e) {
       debugPrint('[CLIP-MON] checkNotificationPermission ERROR: $e');
@@ -286,7 +379,9 @@ class ClipboardMonitor extends ChangeNotifier {
   Future<bool> checkBatteryOptimization() async {
     if (!Platform.isAndroid) return true;
     try {
-      final result = await _androidChannel?.invokeMethod<bool>('checkBatteryOptimization');
+      final result = await _androidChannel?.invokeMethod<bool>(
+        'checkBatteryOptimization',
+      );
       return result ?? false;
     } catch (e) {
       debugPrint('[CLIP-MON] checkBatteryOptimization ERROR: $e');
@@ -298,7 +393,10 @@ class ClipboardMonitor extends ChangeNotifier {
 
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(AppConstants.pollInterval, (_) => _checkClipboard());
+    _pollTimer = Timer.periodic(
+      AppConstants.pollInterval,
+      (_) => _checkClipboard(),
+    );
   }
 
   void _stopPolling() {
@@ -323,6 +421,15 @@ class ClipboardMonitor extends ChangeNotifier {
             _lastImageHash = hash;
             onImageChanged?.call(image);
           }
+        }
+        return;
+      }
+
+      // 文件分支：图片之后、文本之前（Finder/资源管理器复制文件时常带文本占位）
+      if (await _fileClipboardService.hasFiles()) {
+        final files = await _fileClipboardService.getFiles();
+        if (files != null && files.isNotEmpty) {
+          _handleFiles(files);
         }
         return;
       }
@@ -363,6 +470,22 @@ class ClipboardMonitor extends ChangeNotifier {
 
   Future<dynamic> _handleAndroidMethodCall(MethodCall call) async {
     switch (call.method) {
+      case 'onClipboardFilesChanged':
+        final args = call.arguments;
+        if (args is List && _isPaused == false) {
+          final files = <ClipboardFile>[];
+          for (final raw in args) {
+            if (raw is Map) {
+              files.add(
+                ClipboardFile.fromMap(raw.map((k, v) => MapEntry('$k', v))),
+              );
+            }
+          }
+          if (files.isNotEmpty) {
+            _handleFiles(files);
+          }
+        }
+        break;
       case 'onClipboardImageChanged':
         final args = call.arguments;
         if (args is Map) {
@@ -386,12 +509,14 @@ class ClipboardMonitor extends ChangeNotifier {
             }
             if (hash != _lastImageHash) {
               _lastImageHash = hash;
-              onImageChanged?.call(ClipboardImage(
-                bytes: bytes,
-                format: args['format'] as String? ?? 'png',
-                width: args['width'] as int? ?? 0,
-                height: args['height'] as int? ?? 0,
-              ));
+              onImageChanged?.call(
+                ClipboardImage(
+                  bytes: bytes,
+                  format: args['format'] as String? ?? 'png',
+                  width: args['width'] as int? ?? 0,
+                  height: args['height'] as int? ?? 0,
+                ),
+              );
             }
           }
         }
@@ -452,6 +577,45 @@ class ClipboardMonitor extends ChangeNotifier {
     final hashes = _storage!.monitorIgnoreHashes;
     _ignoreHashes.clear();
     _ignoreHashes.addAll(hashes.take(_maxIgnoreHashes));
+  }
+
+  void _handleFiles(List<ClipboardFile> files) {
+    if (files.isEmpty || files.first.path == null) return;
+    final first = files.first;
+    if (isFileSignatureHandled(first)) return;
+    if (first.errorCode != null) {
+      debugPrint('[CLIP-MON] File metadata error: ${first.errorCode}');
+      return;
+    }
+    if (first.size != null && first.size! > AppConstants.maxFileBytes) {
+      debugPrint('[CLIP-MON] File too large: ${first.size} bytes');
+      return;
+    }
+    onFilesChanged?.call(files);
+  }
+
+  String _fileSignature(ClipboardFile file) =>
+      '${file.path}|${file.size}|${file.lastModified}';
+
+  void _trimFileSignatures() {
+    while (_lastFileSignatures.length > _maxIgnoreFileHashes) {
+      final first = _lastFileSignatures.keys.first;
+      _lastFileSignatures.remove(first);
+    }
+  }
+
+  void _loadFileState() {
+    if (_storage == null) return;
+    final hashes = _storage!.monitorIgnoreFileHashes;
+    _ignoreFileHashes.clear();
+    _ignoreFileHashes.addAll(hashes.take(_maxIgnoreFileHashes));
+    // 文件签名只存内存：不恢复旧持久化签名，避免历史失败签名继续抑制上传。
+    _lastFileSignatures.clear();
+    _trimFileSignatures();
+  }
+
+  void _saveFileState() {
+    _storage?.setMonitorIgnoreFileHashes(_ignoreFileHashes.toList());
   }
 
   @override

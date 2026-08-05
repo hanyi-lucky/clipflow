@@ -9,34 +9,59 @@ TEST_PORT="${SMOKE_PORT:-3210}"
 BASE="http://127.0.0.1:${TEST_PORT}/api"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DB="${SCRIPT_DIR}/clipflow.db"
+FILE_DIR="${SCRIPT_DIR}/.smoke-files"
+MAX_FILE_BYTES=2097152
+USER_FILE_QUOTA_BYTES=3145728
+GLOBAL_FILE_QUOTA_BYTES=6291456
 SERVER_PID=""
 BIG_PAYLOAD="${SCRIPT_DIR}/.smoke-oversize-payload.json"
+FILE1="${SCRIPT_DIR}/.smoke-file-1.bin"
+FILE1_DL="${SCRIPT_DIR}/.smoke-file-1.download"
+FILE_REAL="${SCRIPT_DIR}/.smoke-file-real.bin"
+FILE_REAL_DL="${SCRIPT_DIR}/.smoke-file-real.download"
+BIG1="${SCRIPT_DIR}/.smoke-file-big-1.bin"
+MISMATCH1="${SCRIPT_DIR}/.smoke-file-mismatch-1.bin"
+MISMATCH_BODY="${SCRIPT_DIR}/.smoke-mismatch-body.json"
 
 cleanup() {
-  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-  fi
+  stop_server
   rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
-  rm -f "${BIG_PAYLOAD}"
+  rm -f "${BIG_PAYLOAD}" "${FILE1}" "${FILE1_DL}" "${FILE_REAL}" "${FILE_REAL_DL}" "${BIG1}" \
+    "${MISMATCH1}" "${MISMATCH_BODY}"
+  rm -rf "${FILE_DIR}"
 }
 trap cleanup EXIT
 
-echo "==> 启动测试服务器 (PORT=${TEST_PORT})"
-PORT="${TEST_PORT}" node "${SCRIPT_DIR}/index.js" &
-SERVER_PID=$!
-
-ready=0
-for _ in $(seq 1 30); do
-  if curl -fsS "${BASE}/ping" >/dev/null 2>&1; then
-    ready=1
-    break
+stop_server() {
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
   fi
-  sleep 0.3
-done
-if [ "$ready" != "1" ]; then
-  echo "FAIL: server did not start" >&2
-  exit 1
-fi
+}
+
+start_server() {
+  echo "==> 启动测试服务器 (PORT=${TEST_PORT})"
+  PORT="${TEST_PORT}" FILE_DIR="${FILE_DIR}" MAX_FILE_BYTES="${MAX_FILE_BYTES}" \
+    USER_FILE_QUOTA_BYTES="${USER_FILE_QUOTA_BYTES}" GLOBAL_FILE_QUOTA_BYTES="${GLOBAL_FILE_QUOTA_BYTES}" \
+    node "${SCRIPT_DIR}/index.js" &
+  SERVER_PID=$!
+
+  ready=0
+  for _ in $(seq 1 30); do
+    if curl -fsS "${BASE}/ping" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 0.3
+  done
+  if [ "$ready" != "1" ]; then
+    echo "FAIL: server did not start" >&2
+    exit 1
+  fi
+}
+
+start_server
 
 echo "==> 1. auth"
 TOKEN=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
@@ -176,5 +201,276 @@ if [ "$BIG_CODE" != "413" ]; then
   exit 1
 fi
 echo "    ok"
+
+echo "==> 10. 文件上传（200KB 随机密文，元数据走 header）"
+b64url() { node -e 'process.stdout.write(Buffer.from(process.argv[1], "utf8").toString("base64url"))' "$1"; }
+B64_NAME=$(b64url "report.pdf")
+B64_MIME=$(b64url "application/pdf")
+B64_DEVICE=$(b64url "smoke-device")
+B64_DEVICE_NAME=$(b64url "Smoke Mac")
+B64_PLATFORM=$(b64url "macos")
+B64_MARKER=$(b64url "FILE_MARKER_CIPHER")
+FILE1_ID="smoke-history-file-1"
+node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(200 * 1024))' "${FILE1}"
+FILE1_SIZE=$(wc -c < "${FILE1}" | tr -d ' ')
+curl -fsS -X POST "${BASE}/file" -H "$AUTH" -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: ${FILE1_ID}" \
+  -H "x-clipflow-hash: HASH_FILE_1" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: ${FILE1_SIZE}" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-source-device: ${B64_DEVICE}" \
+  -H "x-clipflow-source-device-name: ${B64_DEVICE_NAME}" \
+  -H "x-clipflow-source-platform: ${B64_PLATFORM}" \
+  -H "x-clipflow-timestamp: 1700000005000" \
+  -H "x-clipflow-marker: ${B64_MARKER}" \
+  --data-binary "@${FILE1}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.id!=="smoke-history-file-1"){console.error("FAIL file upload: "+s);process.exit(1)}
+  console.log("    ok (id="+j.id+")");
+})'
+
+echo "==> 11. /api/clipboard：file 行返回元数据 + marker，history_id 一致"
+curl -fsS "${BASE}/clipboard" -H "$AUTH" | FILE1_SIZE="${FILE1_SIZE}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const d=j.data;
+  if(j.code!=="SUCCESS"||!d){console.error("FAIL clipboard: "+s);process.exit(1)}
+  if(d.type!=="file"){console.error("FAIL clipboard type: "+d.type);process.exit(1)}
+  if(d.file_name!=="report.pdf"){console.error("FAIL file_name: "+d.file_name);process.exit(1)}
+  if(d.file_size!==Number(process.env.FILE1_SIZE)){console.error("FAIL file_size: "+d.file_size);process.exit(1)}
+  if(d.mime_type!=="application/pdf"){console.error("FAIL mime_type: "+d.mime_type);process.exit(1)}
+  if(!d.file_key){console.error("FAIL file_key missing");process.exit(1)}
+  if(!d.content){console.error("FAIL marker content empty");process.exit(1)}
+  if(d.history_id!=="smoke-history-file-1"){console.error("FAIL history_id: "+d.history_id);process.exit(1)}
+  console.log("    ok");
+})'
+
+echo "==> 12. /api/history：file 行 content 为空、元数据与 hash 存在"
+FILE1_KEY=$(curl -fsS "${BASE}/history?limit=100" -H "$AUTH" | FILE1_SIZE="${FILE1_SIZE}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const r=j.data.records.find(x=>x.id==="smoke-history-file-1");
+  if(!r){console.error("FAIL file history row missing");process.exit(1)}
+  if(r.type!=="file"){console.error("FAIL type: "+r.type);process.exit(1)}
+  if(r.content!==""){console.error("FAIL file content not stripped");process.exit(1)}
+  if(r.file_name!=="report.pdf"||r.file_size!==Number(process.env.FILE1_SIZE)||r.mime_type!=="application/pdf"){console.error("FAIL file metadata");process.exit(1)}
+  if(!r.file_key||!r.hash){console.error("FAIL file_key/hash missing");process.exit(1)}
+  process.stdout.write(r.file_key);
+})')
+echo "    ok (file_key=${FILE1_KEY})"
+
+echo "==> 13. /api/file/:id/content 与上传字节级一致"
+curl -fsS "${BASE}/file/${FILE1_ID}/content" -H "$AUTH" -o "${FILE1_DL}"
+if ! cmp -s "${FILE1}" "${FILE1_DL}"; then
+  echo "FAIL: downloaded file differs" >&2
+  exit 1
+fi
+echo "    ok (bytes=$(wc -c < "${FILE1_DL}" | tr -d ' '))"
+
+echo "==> 14. 无 token 访问文件端点应 401"
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' "${BASE}/file/${FILE1_ID}/content")
+if [ "$CODE" != "401" ]; then
+  echo "FAIL: expect 401 got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok"
+
+echo "==> 14b. 真实客户端形态：声明明文 204800 字节、发送密文 204830 字节应 200 且 file_size 记录明文"
+REAL_ID="smoke-history-file-real-1"
+node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(204830))' "${FILE_REAL}"
+REAL_DECLARED=204800
+curl -fsS -X POST "${BASE}/file" -H "$AUTH" -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: ${REAL_ID}" \
+  -H "x-clipflow-hash: HASH_FILE_REAL" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: ${REAL_DECLARED}" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-source-device: ${B64_DEVICE}" \
+  -H "x-clipflow-source-device-name: ${B64_DEVICE_NAME}" \
+  -H "x-clipflow-source-platform: ${B64_PLATFORM}" \
+  -H "x-clipflow-timestamp: 1700000005500" \
+  -H "x-clipflow-marker: ${B64_MARKER}" \
+  --data-binary "@${FILE_REAL}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.id!=="smoke-history-file-real-1"){console.error("FAIL real upload: "+s);process.exit(1)}
+  console.log("    ok (id="+j.id+")");
+})'
+curl -fsS "${BASE}/history?limit=100" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const r=j.data.records.find(x=>x.id==="smoke-history-file-real-1");
+  if(!r){console.error("FAIL real history row missing");process.exit(1)}
+  if(r.file_size!==204800){console.error("FAIL real file_size should be plaintext 204800, got "+r.file_size);process.exit(1)}
+  console.log("    ok (file_size=204800 plaintext)");
+})'
+curl -fsS "${BASE}/file/${REAL_ID}/content" -H "$AUTH" -o "${FILE_REAL_DL}"
+if ! cmp -s "${FILE_REAL}" "${FILE_REAL_DL}"; then
+  echo "FAIL: real downloaded file differs" >&2
+  exit 1
+fi
+echo "    ok (ciphertext byte-exact, bytes=$(wc -c < "${FILE_REAL_DL}" | tr -d ' '))"
+
+echo "==> 15. 声明 file-size 超过 MAX_FILE_BYTES 应 413"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/file" -H "$AUTH" -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: smoke-history-file-oversize" \
+  -H "x-clipflow-hash: HASH_FILE_OVERSIZE" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: 3145728" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-marker: ${B64_MARKER}" \
+  --data-binary "@${FILE1}" || true)
+if [ "$CODE" != "413" ]; then
+  echo "FAIL: expect 413 got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok"
+
+echo "==> 15b. 声明 file-size 为 1 但实际发送 1.6MB：应 400 FILE_SIZE_MISMATCH，且不上库、不落盘"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(1600000, 9))' "${MISMATCH1}"
+MISMATCH_CODE=$(curl -s -o "${MISMATCH_BODY}" -w '%{http_code}' -X POST "${BASE}/file" \
+  -H "$AUTH" -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: smoke-history-file-mismatch-1" \
+  -H "x-clipflow-hash: HASH_FILE_MISMATCH" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: 1" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-marker: ${B64_MARKER}" \
+  --data-binary "@${MISMATCH1}" || true)
+if [ "$MISMATCH_CODE" != "400" ]; then
+  echo "FAIL: expect 400 got ${MISMATCH_CODE}" >&2
+  exit 1
+fi
+node -e '
+const fs = require("fs");
+const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (body.code !== "ERROR" || !String(body.message || "").includes("FILE_SIZE_MISMATCH")) {
+  console.error("FAIL mismatch response: " + fs.readFileSync(process.argv[1], "utf8"));
+  process.exit(1);
+}
+console.log("    ok (400 " + body.message + ")");
+' "${MISMATCH_BODY}"
+curl -fsS "${BASE}/history?limit=100" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.data.records.some(x=>x.id==="smoke-history-file-mismatch-1")){console.error("FAIL mismatch row exists in history");process.exit(1)}
+  console.log("    ok (no history row)");
+})'
+if [ -n "$(find "${FILE_DIR}" -name '*.part' -type f 2>/dev/null)" ]; then
+  echo "FAIL: leftover .part after mismatch upload" >&2
+  exit 1
+fi
+MISMATCH_DISK_COUNT=$(find "${FILE_DIR}/user_smoke_v13" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$MISMATCH_DISK_COUNT" != "2" ]; then
+  echo "FAIL: expect the two existing referenced files on disk, got ${MISMATCH_DISK_COUNT}" >&2
+  exit 1
+fi
+echo "    ok (no new file on disk, referenced files intact)"
+
+echo "==> 16. 用户文件配额：连续上传两个 1.6MB 文件，第二个应 507"
+BIG1_ID="smoke-history-file-big-1"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(1600000, 7))' "${BIG1}"
+BIG1_SIZE=$(wc -c < "${BIG1}" | tr -d ' ')
+curl -fsS -X POST "${BASE}/file" -H "$AUTH" -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: ${BIG1_ID}" \
+  -H "x-clipflow-hash: HASH_FILE_BIG_1" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: ${BIG1_SIZE}" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-source-device: ${B64_DEVICE}" \
+  -H "x-clipflow-source-device-name: ${B64_DEVICE_NAME}" \
+  -H "x-clipflow-source-platform: ${B64_PLATFORM}" \
+  -H "x-clipflow-timestamp: 1700000006000" \
+  -H "x-clipflow-marker: ${B64_MARKER}" \
+  --data-binary "@${BIG1}" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/file" -H "$AUTH" -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: smoke-history-file-big-2" \
+  -H "x-clipflow-hash: HASH_FILE_BIG_2" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: ${BIG1_SIZE}" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-source-device: ${B64_DEVICE}" \
+  -H "x-clipflow-source-device-name: ${B64_DEVICE_NAME}" \
+  -H "x-clipflow-source-platform: ${B64_PLATFORM}" \
+  -H "x-clipflow-timestamp: 1700000007000" \
+  -H "x-clipflow-marker: ${B64_MARKER}" \
+  --data-binary "@${BIG1}" || true)
+if [ "$CODE" != "507" ]; then
+  echo "FAIL: expect 507 got ${CODE}" >&2
+  exit 1
+fi
+BIG1_KEY=$(curl -fsS "${BASE}/history?limit=100" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const r=j.data.records.find(x=>x.id==="smoke-history-file-big-1");
+  if(!r||!r.file_key){console.error("FAIL big1 file_key missing");process.exit(1)}
+  process.stdout.write(r.file_key);
+})')
+echo "    ok (quota rejected, big1 key=${BIG1_KEY})"
+
+echo "==> 17. 磁盘清理：删除 history 行后重启触发 prune"
+stop_server
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const info = db.prepare("DELETE FROM history WHERE id = ?").run(process.argv[3]);
+if (info.changes !== 1) {
+  console.error("FAIL: history row not deleted");
+  process.exit(1);
+}
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${BIG1_ID}"
+start_server
+if [ -f "${FILE_DIR}/user_smoke_v13/${BIG1_KEY}" ]; then
+  echo "FAIL: orphan file still on disk: ${BIG1_KEY}" >&2
+  exit 1
+fi
+if [ ! -f "${FILE_DIR}/user_smoke_v13/${FILE1_KEY}" ]; then
+  echo "FAIL: referenced file missing after prune" >&2
+  exit 1
+fi
+echo "    ok (orphan removed, referenced file kept)"
+
+echo "==> 18. 倾倒垃圾桶：软删 file 行 → DELETE /api/history/trash 清空记录并删除磁盘文件"
+curl -fsS -X DELETE "${BASE}/history/${FILE1_ID}" -H "$AUTH" >/dev/null
+curl -fsS -X DELETE "${BASE}/history/trash" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL trash delete: "+s);process.exit(1)}
+  if(typeof j.deleted!=="number"||j.deleted<1){console.error("FAIL deleted count: "+s);process.exit(1)}
+  console.log("    ok (deleted="+j.deleted+")");
+})'
+curl -fsS "${BASE}/history/trash" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const records=j.data&&j.data.records||[];
+  if(j.code!=="SUCCESS"||records.length!==0){console.error("FAIL trash not empty after dump: "+s);process.exit(1)}
+  console.log("    ok (trash empty)");
+})'
+if [ -f "${FILE_DIR}/user_smoke_v13/${FILE1_KEY}" ]; then
+  echo "FAIL: trash file still on disk: ${FILE1_KEY}" >&2
+  exit 1
+fi
+echo "    ok (disk file removed)"
 
 echo "SMOKE TEST PASSED"

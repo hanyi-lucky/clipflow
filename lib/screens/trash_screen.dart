@@ -1,6 +1,9 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/clipboard_entry.dart';
 import '../providers/clipboard_provider.dart';
+import '../widgets/clipboard_item.dart';
 
 class TrashScreen extends StatefulWidget {
   const TrashScreen({super.key});
@@ -55,11 +58,129 @@ class _TrashScreenState extends State<TrashScreen> {
   }
 
   String _getContentPreview(String content) {
-    // 内容是加密的 base64，显示为"加密内容"
-    if (content.length > 50 && RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(content)) {
-      return '加密内容';
-    }
     return content.length > 100 ? '${content.substring(0, 100)}...' : content;
+  }
+
+  Widget _buildTrashPreview(Map<String, dynamic> entry, ThemeData theme) {
+    if (entry['type'] == ContentType.file.name) {
+      final fileName = entry['file_name'] as String? ?? '未命名文件';
+      final fileSize = (entry['file_size'] as num?)?.toInt();
+      final mimeType = entry['mime_type'] as String?;
+      final metaLabel = (mimeType?.trim().isNotEmpty ?? false)
+          ? mimeType!
+          : '文件';
+      return Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              fileTypeIcon(fileName, mimeType),
+              size: 22,
+              color: theme.colorScheme.primary,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  fileName,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  metaLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.outline,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            formatFileSize(fileSize),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (entry['type'] == ContentType.image.name) {
+      final thumb = entry['imageThumbBytes'] as Uint8List?;
+      final width = entry['imageWidth'] as int?;
+      final height = entry['imageHeight'] as int?;
+      return Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: thumb != null
+                ? Image.memory(
+                    thumb,
+                    width: 72,
+                    height: 72,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) =>
+                        _imagePlaceholder(theme),
+                  )
+                : _imagePlaceholder(theme),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('图片', style: theme.textTheme.titleSmall),
+                if (width != null && height != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    '$width × $height',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Text(
+      _getContentPreview(entry['content'] as String? ?? ''),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: theme.textTheme.bodyMedium?.copyWith(
+        height: 1.5,
+        color: theme.colorScheme.outline,
+      ),
+    );
+  }
+
+  Widget _imagePlaceholder(ThemeData theme) {
+    return Container(
+      width: 72,
+      height: 72,
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Icon(
+        Icons.image_outlined,
+        size: 32,
+        color: theme.colorScheme.outlineVariant,
+      ),
+    );
   }
 
   @override
@@ -71,7 +192,12 @@ class _TrashScreenState extends State<TrashScreen> {
         title: const Text('垃圾箱'),
         centerTitle: true,
         actions: [
-          if (_trashEntries.isNotEmpty)
+          if (_trashEntries.isNotEmpty) ...[
+            IconButton(
+              icon: const Icon(Icons.delete_sweep),
+              onPressed: _emptyTrash,
+              tooltip: '倾倒垃圾桶',
+            ),
             IconButton(
               icon: const Icon(Icons.refresh_rounded),
               onPressed: () {
@@ -80,122 +206,167 @@ class _TrashScreenState extends State<TrashScreen> {
               },
               tooltip: '刷新',
             ),
+          ],
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : _trashEntries.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.delete_sweep_outlined,
-                        size: 80,
-                        color: theme.colorScheme.outlineVariant,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        '垃圾箱为空',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          color: theme.colorScheme.outline,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        '删除的记录将保留 24 小时',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.outlineVariant,
-                        ),
-                      ),
-                    ],
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.delete_sweep_outlined,
+                    size: 80,
+                    color: theme.colorScheme.outlineVariant,
                   ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  itemCount: _trashEntries.length,
-                  itemBuilder: (context, index) {
-                    final entry = _trashEntries[index];
-                    final deletedAt = entry['deleted_at'] as int? ?? 0;
-                    final content = entry['content'] as String? ?? '';
+                  const SizedBox(height: 16),
+                  Text(
+                    '垃圾箱为空',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '删除的记录将保留 24 小时',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.outlineVariant,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              itemCount: _trashEntries.length,
+              itemBuilder: (context, index) {
+                final entry = _trashEntries[index];
+                final deletedAt = entry['deleted_at'] as int? ?? 0;
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                return Card(
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
                           children: [
-                            Row(
-                              children: [
-                                Icon(
-                                  Icons.delete_outline,
-                                  size: 16,
-                                  color: theme.colorScheme.error,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _formatDeletedTime(deletedAt),
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.outline,
-                                    ),
-                                  ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: theme.colorScheme.surfaceContainerHighest,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Text(
-                                    _formatRemainingTime(deletedAt),
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.outline,
-                                      fontSize: 11,
-                                    ),
-                                  ),
-                                ),
-                              ],
+                            Icon(
+                              Icons.delete_outline,
+                              size: 16,
+                              color: theme.colorScheme.error,
                             ),
-                            const SizedBox(height: 10),
-                            Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: theme.brightness == Brightness.dark
-                                    ? Colors.white.withOpacity(0.05)
-                                    : Colors.black.withOpacity(0.03),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                            const SizedBox(width: 8),
+                            Expanded(
                               child: Text(
-                                _getContentPreview(content),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  height: 1.5,
+                                _formatDeletedTime(deletedAt),
+                                style: theme.textTheme.bodySmall?.copyWith(
                                   color: theme.colorScheme.outline,
                                 ),
                               ),
                             ),
-                            const SizedBox(height: 8),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                _TrashActionChip(
-                                  icon: Icons.restore_rounded,
-                                  label: '恢复',
-                                  onTap: () => _restoreEntry(entry['id'] as String),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color:
+                                    theme.colorScheme.surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                _formatRemainingTime(deletedAt),
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.outline,
+                                  fontSize: 11,
                                 ),
-                              ],
+                              ),
                             ),
                           ],
                         ),
-                      ),
-                    );
-                  },
-                ),
+                        const SizedBox(height: 10),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: theme.brightness == Brightness.dark
+                                ? Colors.white.withOpacity(0.05)
+                                : Colors.black.withOpacity(0.03),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: _buildTrashPreview(entry, theme),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            _TrashActionChip(
+                              icon: Icons.restore_rounded,
+                              label: '恢复',
+                              onTap: () => _restoreEntry(entry['id'] as String),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
     );
+  }
+
+  Future<void> _emptyTrash() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('倾倒垃圾桶'),
+        content: const Text('确定要永久删除垃圾箱中的所有记录吗？此操作不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('倾倒', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      final provider = context.read<ClipboardProvider>();
+      try {
+        final deleted = await provider.emptyTrash();
+        if (!mounted) return;
+        await _loadTrash();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('已倾倒 $deleted 条记录'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('倾倒失败: $e'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+    }
   }
 
   Future<void> _restoreEntry(String id) async {
@@ -225,10 +396,7 @@ class _TrashScreenState extends State<TrashScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('已恢复'),
-            duration: Duration(seconds: 2),
-          ),
+          const SnackBar(content: Text('已恢复'), duration: Duration(seconds: 2)),
         );
       }
     }
@@ -240,11 +408,7 @@ class _TrashActionChip extends StatelessWidget {
   final String label;
   final VoidCallback? onTap;
 
-  const _TrashActionChip({
-    required this.icon,
-    required this.label,
-    this.onTap,
-  });
+  const _TrashActionChip({required this.icon, required this.label, this.onTap});
 
   @override
   Widget build(BuildContext context) {

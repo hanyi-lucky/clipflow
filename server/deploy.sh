@@ -1,6 +1,7 @@
 #!/bin/bash
 # ClipFlow 服务器部署脚本
 # 在阿里云服务器上执行
+# 部署时需同时上传 server/index.js 与 server/file_store.js 到 /opt/clipflow/
 
 set -e
 
@@ -15,6 +16,11 @@ sudo apt-get install -y nodejs
 echo "Installing dependencies..."
 cd /opt/clipflow
 npm install --production
+
+# 2.5 创建文件存储目录
+echo "Creating file storage directory..."
+sudo mkdir -p /opt/clipflow/data/files
+sudo chown -R clipflow:clipflow /opt/clipflow/data
 
 # 3. 创建 systemd 服务
 echo "Creating systemd service..."
@@ -31,6 +37,7 @@ ExecStart=/usr/bin/node index.js
 Restart=always
 RestartSec=10
 Environment=PORT=3000
+Environment=FILE_DIR=/opt/clipflow/data/files
 
 [Install]
 WantedBy=multi-user.target

@@ -103,7 +103,7 @@
 | Monitor 文本守卫 | clipboard_monitor_test.dart | 8 |
 | 既有文件增量（加密字节/模型/历史） | 其余文件 | ~10 |
 
-> 下一阶段：v1.4 文件同步。详见 `docs/version-roadmap.md`。
+> v1.4 文件同步已完成（2026-08-05），共 212 个测试。详见 `docs/version-roadmap.md`。
 
 ### v1.3 已完成功能
 
@@ -126,6 +126,48 @@
 - 长文本解密失败自动经 `/content` 拉全量重试（历史 + 垃圾箱）
 - 删除持久化：removeEntry 写回本地 + `deletedEntryIds` 集合，刷新/重启不再复活已删条目
 - 历史/垃圾箱请求超时放宽至 20s（其余保持 10s）
+
+### v1.4 已完成功能（2026-08-05）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 文件复制同步 | ✅ | macOS file-url / Windows CF_HDROP / Android URI 预拷贝；检测顺序图片后、文本前 |
+| 服务器文件存储 | ✅ | `POST/GET /api/file` 二进制端点 + 磁盘配额（用户 1GB/全局 4GB）+ 孤儿清理 + 声明大小校验（400 FILE_SIZE_MISMATCH） |
+| 流式加密 | ✅ | 单载荷 AES-256-GCM，与现有 `EncryptedData` 格式互操作（兼容门禁测试） |
+| 文件类型图标/大小/MIME | ✅ | 列表行按扩展名/MIME 映射 Material 图标 |
+| 下载进度条 | ✅ | pending/downloading/processing/completed/failed/cancelled + 真实取消 + 手动重试保留元数据 |
+| 文件筛选 | ✅ | 搜索栏"文件"类型解锁，按 fileName 匹配 |
+| 垃圾箱 file 行 | ✅ | 按文件名/大小/MIME 展示，不尝试解密 |
+| 倾倒垃圾桶 | ✅ | `DELETE /api/history/trash` 一键彻底删除本地、服务器、磁盘文件 |
+| 垃圾箱预览 | ✅ | 文本解密预览、文件行文件名/大小/MIME、图片行缩略图 |
+| 设置兼容性说明 | ✅ | 图片与文件格式兼容性、平台差异、大小限制说明 |
+| Windows 文件通道 | ✅ | 静态交付（标准 DROPFILES 双 NUL 终止），待 Windows 真机验证 |
+
+### v1.4 新增测试（73 个，总 212）
+
+| 模块 | 测试文件 | 说明 |
+|------|---------|------|
+| 文件模型 | clipboard_file_test / clipboard_entry_test | map 解析与 file 字段 round-trip |
+| 文件通道 | file_clipboard_service_test | 防御式类型转换/降级 |
+| 流式加解密 | file_processing_service_test | EncryptedData 互操作、篡改/错 key、跨 chunk |
+| 本地文件缓存 | local_file_store_test | 读写/删除/孤儿/容量 |
+| Sync 文件链路 | sync_service_file_test | uploadFile headers、file: 去重域、元数据下载 |
+| Provider 文件闭环 | clipboard_provider_file_test | 上传/下载/取消/重试互斥/元数据/竞态回归 |
+| UI/监控 | clipboard_item_file_test / clipboard_monitor_test | 文件行渲染、进度状态、检测分支与回声 |
+| 垃圾箱清空/长文本截断 | clipboard_provider_empty_trash_test | emptyTrash 委托 + 50000 截断 |
+| 长文本预览 | clipboard_item_long_text_test | 500 字符预览 + 展开完整内容 |
+
+### v1.4 验收与修复（2026-08-05）
+
+- 修复孤儿清理与下载缓存落盘的并发竞态（图片先入史再落盘 + 进行中下载 ID 保护）。
+- 修复取消不中断下载、取消后自动重试、手动重试丢元数据/并发窗口、服务器声明大小≠实际字节绕过配额。
+- 复测修复：macOS 普通文件（PDF/DOCX）不再被文件图标缩略图误判为图片，优先走文件分支。
+- 复测修复：Android 文件导入 MethodChannel 回调改主线程，修复滚动历史列表闪退（FlutterJNI @UiThread）。
+- 复测修复：v1.3 残留 262.8 万字符乱码文本行改为 isolate 解密 + 50000 截断 + 列表 500 字符预览，消除历史/垃圾箱卡顿。
+- 复测修复：文件签名只在上传成功后记录，失败后同文件可再次复制重试。
+- 复测修复：Windows CF_HDROP 写入改为标准 DROPFILES 双 NUL 终止（静态修复，待 Windows 真机验证）。
+- tester 独立验收 PASS；reviewer 终审 PASS-WITH-RISKS（置信度 8/10）。
+- 发布门禁（未在本机验证）：Windows 真机 CF_HDROP/DROPFILES、macOS/Android 真机文件 E2E、双设备混合回归、50MB 压测。
 
 ### v1.2 已完成功能
 

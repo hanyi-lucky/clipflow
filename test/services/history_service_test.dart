@@ -236,4 +236,67 @@ void main() {
       expect(service.entries.length, equals(2));
     });
   });
+
+  group('file entries', () {
+    ClipboardEntry fileEntry({
+      required String id,
+      required String fileName,
+      required String fileHash,
+    }) {
+      return ClipboardEntry(
+        id: id,
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'Mac',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.file,
+        fileName: fileName,
+        fileSize: 100,
+        mimeType: 'application/octet-stream',
+        fileHash: fileHash,
+      );
+    }
+
+    test('same fileHash deduplicates without trim-based text matching', () {
+      service.addEntry(fileEntry(id: 'file-a', fileName: 'a.txt', fileHash: 'hash-1'));
+      service.addEntry(fileEntry(id: 'file-b', fileName: 'b.txt', fileHash: 'hash-1'));
+
+      expect(service.entries.length, equals(1));
+      expect(service.entries.first.id, equals('file-b'));
+    });
+
+    test('different fileHash file entries coexist', () {
+      service.addEntry(fileEntry(id: 'file-a', fileName: 'a.txt', fileHash: 'hash-a'));
+      service.addEntry(fileEntry(id: 'file-b', fileName: 'b.txt', fileHash: 'hash-b'));
+
+      expect(service.entries.length, equals(2));
+    });
+
+    test('file entries never match text content dedupe path', () {
+      service.addEntry(
+        ClipboardEntry(
+          id: 'text-1',
+          content: 'same',
+          sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac',
+          timestamp: DateTime(2024, 1, 1),
+          type: ContentType.text,
+        ),
+      );
+      service.addEntry(
+        ClipboardEntry(
+          id: 'file-1',
+          content: 'same',
+          sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac',
+          timestamp: DateTime(2024, 1, 2),
+          type: ContentType.file,
+          fileName: 'x.bin',
+          fileHash: 'hash-x',
+        ),
+      );
+
+      expect(service.entries.length, equals(2));
+    });
+  });
 }

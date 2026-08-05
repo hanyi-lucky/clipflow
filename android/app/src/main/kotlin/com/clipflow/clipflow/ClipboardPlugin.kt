@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
@@ -27,6 +29,8 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private lateinit var context: Context
     private var clipboardManager: ClipboardManager? = null
     private var activity: ActivityPluginBinding? = null
+    private var fileImporter: FileClipboardImporter? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(binding.binaryMessenger, "clipflow/clipboard")
@@ -34,11 +38,14 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         context = binding.applicationContext
         clipboardManager = context
             .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        fileImporter = FileClipboardImporter(context, channel)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
         clipboardManager?.removePrimaryClipChangedListener(this)
+        fileImporter?.shutdown()
+        fileImporter = null
     }
 
     // ActivityAware
@@ -181,6 +188,32 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     result.error("CLIP_ERROR", "failed to set image clipboard: ${e.message}", null)
                 }
             }
+            "hasFiles" -> {
+                val clip = clipboardManager?.primaryClip
+                result.success(clip != null && containsFileItems(clip))
+            }
+            "getFiles" -> {
+                val clip = clipboardManager?.primaryClip
+                val importer = fileImporter
+                if (importer == null) {
+                    result.success(emptyList<Map<String, Any>>())
+                    return
+                }
+                importer.getFilesAsync(clip) { files ->
+                    // MethodChannel result 必须在主线程回调，否则 FlutterJNI 抛
+                    // "@UiThread must be executed on the main thread"
+                    mainHandler.post { result.success(files) }
+                }
+            }
+            "setFiles" -> {
+                val paths = when (val args = call.arguments) {
+                    is List<*> -> args.filterIsInstance<String>()
+                    is Map<*, *> -> (args["paths"] as? List<*>)?.filterIsInstance<String>()
+                        ?: emptyList()
+                    else -> emptyList()
+                }
+                result.success(fileImporter?.setFilesFromPaths(paths) == true)
+            }
             else -> result.notImplemented()
         }
     }
@@ -209,6 +242,12 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 return
             }
 
+            // 图片分支之后、文本分支之前：非 image URI 文件交给导入器预拷贝
+            if (containsFileItems(clip)) {
+                fileImporter?.importClipboard(clip)
+                return
+            }
+
             val text = item.text
             if (text != null) {
                 channel.invokeMethod("onClipboardChanged", text.toString())
@@ -229,5 +268,19 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun containsFileItems(clip: ClipData): Boolean {
+        for (i in 0 until clip.itemCount) {
+            val item = clip.getItemAt(i)
+            if (item.uri == null) {
+                continue
+            }
+            val mimeType = clip.description.getMimeType(i) ?: context.contentResolver.getType(item.uri)
+            if (!FileClipboardImporter.isImageMime(mimeType)) {
+                return true
+            }
+        }
+        return false
     }
 }

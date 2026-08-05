@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
@@ -9,6 +10,7 @@ class CloudBaseService {
   String? _token;
   String? _openId;
   String? _userId; // 保存用于自动重新登录
+  final http.Client _streamClient = http.Client();
 
   String? get openId => _openId;
   bool get isLoggedIn => _token != null;
@@ -174,12 +176,87 @@ class CloudBaseService {
     return {...data, '_deletedIds': deletedIds, '_restoredEntries': restoredEntries};
   }
 
+  /// 流式上传文件密文（raw octet-stream）。401 时用 body factory 重放一次。
+  Future<http.StreamedResponse> uploadFileStream(
+    String filePath, {
+    required Map<String, String> headers,
+    Duration timeout = const Duration(seconds: 300),
+  }) async {
+    final uri = Uri.parse('$_baseUrl/file');
+
+    Future<http.StreamedResponse> attempt() async {
+      final request = http.StreamedRequest('POST', uri);
+      headers.forEach((key, value) {
+        request.headers[key] = value;
+      });
+      if (_token != null) {
+        request.headers['Authorization'] = 'Bearer $_token';
+      }
+      final stream = File(filePath).openRead();
+      stream.listen(
+        request.sink.add,
+        onError: (Object error, StackTrace stack) {
+          request.sink.addError(error, stack);
+        },
+        onDone: request.sink.close,
+        cancelOnError: true,
+      );
+      return _streamClient.send(request).timeout(timeout);
+    }
+
+    var response = await attempt();
+    if (response.statusCode == 401 && _userId != null) {
+      await response.stream.drain<void>();
+      await signInAnonymously(userId: _userId);
+      response = await attempt();
+    }
+    return response;
+  }
+
+  /// 流式下载文件密文，返回 `StreamedResponse`（调用方负责消费 body）。
+  Future<http.StreamedResponse> downloadFileStream(
+    String path, {
+    Duration timeout = const Duration(seconds: 300),
+  }) async {
+    final uri = Uri.parse('$_baseUrl$path');
+
+    Future<http.StreamedResponse> attempt() async {
+      final request = http.Request('GET', uri);
+      request.headers['Accept'] = 'application/octet-stream';
+      if (_token != null) {
+        request.headers['Authorization'] = 'Bearer $_token';
+      }
+      return _streamClient.send(request).timeout(timeout);
+    }
+
+    var response = await attempt();
+    if (response.statusCode == 401 && _userId != null) {
+      await response.stream.drain<void>();
+      await signInAnonymously(userId: _userId);
+      response = await attempt();
+    }
+    if (response.statusCode != 200) {
+      final body = await response.stream.bytesToString();
+      throw Exception('HTTP ${response.statusCode}: $body');
+    }
+    return response;
+  }
+
   /// 恢复已删除的历史记录
   Future<void> restoreHistoryEntry(String entryId) async {
     final result = await _callApi('POST', '/history/$entryId/restore');
     if (result['code'] != 'SUCCESS') {
       throw Exception('restoreHistoryEntry failed');
     }
+  }
+
+  /// 倾倒垃圾桶：永久删除当前用户所有软删历史条目，返回删除数量。
+  Future<int> emptyTrash() async {
+    final result = await _callApi('DELETE', '/history/trash');
+    if (result['code'] != 'SUCCESS') {
+      throw Exception('emptyTrash failed: ${result['message']}');
+    }
+    return (result['deleted'] as num?)?.toInt() ?? 0;
   }
 
   /// 获取历史记录完整内容（图片全图密文）

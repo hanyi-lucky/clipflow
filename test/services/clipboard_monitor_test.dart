@@ -2,6 +2,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:clipflow/core/clipboard_channel_constants.dart';
+import 'package:clipflow/models/clipboard_file.dart';
 import 'package:clipflow/models/clipboard_image.dart';
 import 'package:clipflow/services/clipboard_monitor.dart';
 
@@ -18,11 +19,11 @@ void main() {
   void mockClipboardText(String? text) {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-      if (call.method == 'Clipboard.getData') {
-        return <String, dynamic>{'text': text};
-      }
-      return null;
-    });
+          if (call.method == 'Clipboard.getData') {
+            return <String, dynamic>{'text': text};
+          }
+          return null;
+        });
   }
 
   setUp(() {
@@ -33,71 +34,80 @@ void main() {
   });
 
   group('ClipboardMonitor image echo suppression', () {
-    test('syncClipboard skips preReadImage whose hash is in ignoreHashes', () async {
-      final events = <ClipboardImage>[];
-      final monitor = ClipboardMonitor(onChanged: (_) {});
-      monitor.onImageChanged = events.add;
+    test(
+      'syncClipboard skips preReadImage whose hash is in ignoreHashes',
+      () async {
+        final events = <ClipboardImage>[];
+        final monitor = ClipboardMonitor(onChanged: (_) {});
+        monitor.onImageChanged = events.add;
 
-      final bytes = Uint8List.fromList([10, 20, 30, 40]);
-      final hash = sha256.convert(bytes).toString();
-      monitor.addIgnoreHash(hash);
+        final bytes = Uint8List.fromList([10, 20, 30, 40]);
+        final hash = sha256.convert(bytes).toString();
+        monitor.addIgnoreHash(hash);
 
-      await monitor.syncClipboard(
-        preReadImage: ClipboardImage(
-          bytes: bytes,
+        await monitor.syncClipboard(
+          preReadImage: ClipboardImage(
+            bytes: bytes,
+            format: 'png',
+            width: 2,
+            height: 2,
+          ),
+        );
+
+        expect(events, isEmpty);
+        // 忽略条目被消费，不会长期占用
+        expect(monitor.ignoreHashes, isNot(contains(hash)));
+      },
+    );
+
+    test(
+      'syncClipboard with unknown preReadImage triggers onImageChanged once',
+      () async {
+        final events = <ClipboardImage>[];
+        final monitor = ClipboardMonitor(onChanged: (_) {});
+        monitor.onImageChanged = events.add;
+
+        final image = ClipboardImage(
+          bytes: Uint8List.fromList([1, 2, 3]),
           format: 'png',
-          width: 2,
-          height: 2,
-        ),
-      );
+          width: 1,
+          height: 1,
+        );
 
-      expect(events, isEmpty);
-      // 忽略条目被消费，不会长期占用
-      expect(monitor.ignoreHashes, isNot(contains(hash)));
-    });
+        await monitor.syncClipboard(preReadImage: image);
 
-    test('syncClipboard with unknown preReadImage triggers onImageChanged once', () async {
-      final events = <ClipboardImage>[];
-      final monitor = ClipboardMonitor(onChanged: (_) {});
-      monitor.onImageChanged = events.add;
-
-      final image = ClipboardImage(
-        bytes: Uint8List.fromList([1, 2, 3]),
-        format: 'png',
-        width: 1,
-        height: 1,
-      );
-
-      await monitor.syncClipboard(preReadImage: image);
-
-      expect(events, hasLength(1));
-    });
+        expect(events, hasLength(1));
+      },
+    );
   });
 
   group('ClipboardMonitor placeholder/garbage text guard', () {
-    test('hasImage true but getImage null: text branch is not reached', () async {
-      var clipboardReads = 0;
-      mockImageChannel((call) async {
-        if (call.method == AppChannelMethods.hasImage) return true;
-        if (call.method == AppChannelMethods.getImage) return null;
-        return null;
-      });
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-        if (call.method == 'Clipboard.getData') {
-          clipboardReads++;
-          return <String, dynamic>{'text': 'real text'};
-        }
-        return null;
-      });
+    test(
+      'hasImage true but getImage null: text branch is not reached',
+      () async {
+        var clipboardReads = 0;
+        mockImageChannel((call) async {
+          if (call.method == AppChannelMethods.hasImage) return true;
+          if (call.method == AppChannelMethods.getImage) return null;
+          return null;
+        });
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+              if (call.method == 'Clipboard.getData') {
+                clipboardReads++;
+                return <String, dynamic>{'text': 'real text'};
+              }
+              return null;
+            });
 
-      final texts = <String>[];
-      final monitor = ClipboardMonitor(onChanged: texts.add);
-      await monitor.syncClipboard();
+        final texts = <String>[];
+        final monitor = ClipboardMonitor(onChanged: texts.add);
+        await monitor.syncClipboard();
 
-      // 图片存在但读取失败时不得回退到文本分支
-      expect(clipboardReads, 0);
-    });
+        // 图片存在但读取失败时不得回退到文本分支
+        expect(clipboardReads, 0);
+      },
+    );
 
     test('[文件] placeholder text is not forwarded', () async {
       mockImageChannel((call) async {
@@ -164,6 +174,160 @@ void main() {
       );
 
       expect(texts, ['real android text']);
+    });
+  });
+
+  group('ClipboardMonitor file branch', () {
+    test('desktop check detects files after image and before text', () async {
+      var clipboardReads = 0;
+      mockImageChannel((call) async {
+        if (call.method == AppChannelMethods.hasImage) return false;
+        if (call.method == AppChannelMethods.hasFiles) return true;
+        if (call.method == AppChannelMethods.getFiles) {
+          return [
+            {
+              'path': '/tmp/file.txt',
+              'name': 'file.txt',
+              'mimeType': 'text/plain',
+              'size': 12,
+              'lastModified': 1700000000000,
+              'temp': false,
+            },
+          ];
+        }
+        return null;
+      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.getData') {
+              clipboardReads++;
+              return <String, dynamic>{'text': 'placeholder [文件]'};
+            }
+            return null;
+          });
+
+      final events = <List<ClipboardFile>>[];
+      final monitor = ClipboardMonitor(onChanged: (_) {});
+      monitor.onFilesChanged = events.add;
+
+      await monitor.debugCheckClipboard();
+
+      expect(events, hasLength(1));
+      expect(events.first.first.path, '/tmp/file.txt');
+      expect(events.first.first.name, 'file.txt');
+      expect(clipboardReads, 0);
+    });
+
+    test(
+      'recordFileSignature suppresses same signature until clearFileSignature',
+      () async {
+        mockImageChannel((call) async {
+          if (call.method == AppChannelMethods.hasImage) return false;
+          if (call.method == AppChannelMethods.hasFiles) return true;
+          if (call.method == AppChannelMethods.getFiles) {
+            return [
+              {
+                'path': '/tmp/a.bin',
+                'name': 'a.bin',
+                'mimeType': 'application/octet-stream',
+                'size': 5,
+                'lastModified': 1700000000000,
+                'temp': false,
+              },
+            ];
+          }
+          return null;
+        });
+
+        final events = <List<ClipboardFile>>[];
+        final monitor = ClipboardMonitor(onChanged: (_) {});
+        monitor.onFilesChanged = events.add;
+        final file = ClipboardFile(
+          path: '/tmp/a.bin',
+          name: 'a.bin',
+          mimeType: 'application/octet-stream',
+          size: 5,
+          lastModified: 1700000000000,
+        );
+
+        await monitor.debugCheckClipboard();
+        expect(events, hasLength(1));
+
+        monitor.recordFileSignature(file);
+        await monitor.debugCheckClipboard();
+        expect(events, hasLength(1), reason: '已记录签名后同签名被抑制');
+
+        monitor.clearFileSignature(file);
+        await monitor.debugCheckClipboard();
+        expect(events, hasLength(2), reason: '清除签名后可再次触发');
+      },
+    );
+
+    test(
+      'Android onClipboardFilesChanged forwards files with defensive parsing',
+      () async {
+        final events = <List<ClipboardFile>>[];
+        final monitor = ClipboardMonitor(onChanged: (_) {});
+        monitor.onFilesChanged = events.add;
+
+        await monitor.debugHandleAndroidMethodCall(
+          MethodCall('onClipboardFilesChanged', [
+            {
+              'path': '/cache/clipflow_file_uploads/a.txt',
+              'name': 'a.txt',
+              'size': 42,
+              'temp': true,
+            },
+            'garbage',
+          ]),
+        );
+
+        expect(events, hasLength(1));
+        expect(events.first, hasLength(1));
+        expect(events.first.first.temp, isTrue);
+        expect(events.first.first.size, 42);
+      },
+    );
+
+    test('preReadFiles triggers callback without recorded signature', () async {
+      final events = <List<ClipboardFile>>[];
+      final monitor = ClipboardMonitor(onChanged: (_) {});
+      monitor.onFilesChanged = events.add;
+      final files = [
+        ClipboardFile(path: '/tmp/once.txt', name: 'once.txt', size: 1),
+      ];
+
+      await monitor.syncClipboard(preReadFiles: files);
+      await monitor.syncClipboard(preReadFiles: files);
+
+      // 未记录签名时，同一次复制内容每次都会触发回调
+      expect(events, hasLength(2));
+    });
+
+    test('errorCode metadata is skipped without callback', () async {
+      mockImageChannel((call) async {
+        if (call.method == AppChannelMethods.hasImage) return false;
+        if (call.method == AppChannelMethods.hasFiles) return true;
+        if (call.method == AppChannelMethods.getFiles) {
+          return [
+            {
+              'path': '/tmp/big.bin',
+              'name': 'big.bin',
+              'size': 999999,
+              'errorCode': 'FILE_TOO_LARGE',
+            },
+          ];
+        }
+        return null;
+      });
+
+      final events = <List<ClipboardFile>>[];
+      final monitor = ClipboardMonitor(onChanged: (_) {});
+      monitor.onFilesChanged = events.add;
+
+      await monitor.debugCheckClipboard();
+
+      expect(events, isEmpty);
     });
   });
 }

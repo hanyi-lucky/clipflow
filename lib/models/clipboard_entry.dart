@@ -25,6 +25,11 @@ class ClipboardEntry {
   final int? imageHeight;
   final String? imageFormat;
   final String? stableHash; // 图片压缩后明文字节哈希，文本为 null
+  // 文件字段
+  final String? fileName;
+  final int? fileSize;
+  final String? mimeType;
+  final String? fileHash; // 明文文件内容 SHA-256
 
   const ClipboardEntry({
     required this.id,
@@ -42,10 +47,14 @@ class ClipboardEntry {
     this.imageHeight,
     this.imageFormat,
     this.stableHash,
+    this.fileName,
+    this.fileSize,
+    this.mimeType,
+    this.fileHash,
   });
 
   String get contentHash =>
-      stableHash ?? sha256.convert(utf8.encode(content)).toString();
+      fileHash ?? stableHash ?? sha256.convert(utf8.encode(content)).toString();
 
   ClipboardEntry copyWith({
     String? id,
@@ -63,6 +72,10 @@ class ClipboardEntry {
     int? imageHeight,
     String? imageFormat,
     String? stableHash,
+    String? fileName,
+    int? fileSize,
+    String? mimeType,
+    String? fileHash,
   }) {
     return ClipboardEntry(
       id: id ?? this.id,
@@ -81,6 +94,10 @@ class ClipboardEntry {
       imageHeight: imageHeight ?? this.imageHeight,
       imageFormat: imageFormat ?? this.imageFormat,
       stableHash: stableHash ?? this.stableHash,
+      fileName: fileName ?? this.fileName,
+      fileSize: fileSize ?? this.fileSize,
+      mimeType: mimeType ?? this.mimeType,
+      fileHash: fileHash ?? this.fileHash,
     );
   }
 
@@ -98,6 +115,10 @@ class ClipboardEntry {
     if (imageHeight != null) 'imageHeight': imageHeight,
     if (imageFormat != null) 'imageFormat': imageFormat,
     if (stableHash != null) 'hash': stableHash,
+    if (fileName != null) 'fileName': fileName,
+    if (fileSize != null) 'fileSize': fileSize,
+    if (mimeType != null) 'mimeType': mimeType,
+    if (fileHash != null) 'fileHash': fileHash,
   };
 
   factory ClipboardEntry.fromMap(Map<String, dynamic> map) {
@@ -115,6 +136,10 @@ class ClipboardEntry {
       imageHeight: map['imageHeight'] as int?,
       imageFormat: map['imageFormat'] as String?,
       stableHash: map['hash'] as String?,
+      fileName: map['fileName'] as String?,
+      fileSize: map['fileSize'] as int?,
+      mimeType: map['mimeType'] as String?,
+      fileHash: map['fileHash'] as String?,
     );
   }
 

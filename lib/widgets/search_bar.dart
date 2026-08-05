@@ -81,7 +81,11 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
                   padding: const EdgeInsets.symmetric(horizontal: 14),
                   child: Row(
                     children: [
-                      Icon(Icons.search_rounded, size: 20, color: cs.onSurfaceVariant),
+                      Icon(
+                        Icons.search_rounded,
+                        size: 20,
+                        color: cs.onSurfaceVariant,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
                         child: TextField(
@@ -101,20 +105,29 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
                             focusedErrorBorder: InputBorder.none,
                             filled: false,
                             isDense: true,
-                            contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                            contentPadding: const EdgeInsets.symmetric(
+                              vertical: 12,
+                            ),
                           ),
-                          style: theme.textTheme.bodyMedium?.copyWith(fontSize: 15),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            fontSize: 15,
+                          ),
                           onChanged: (value) => provider.setSearchQuery(value),
                         ),
                       ),
-                      if (provider.hasActiveFilters || _controller.text.isNotEmpty)
+                      if (provider.hasActiveFilters ||
+                          _controller.text.isNotEmpty)
                         GestureDetector(
                           onTap: () {
                             _controller.clear();
                             provider.clearFilters();
                             _focusNode.unfocus();
                           },
-                          child: Icon(Icons.close_rounded, size: 18, color: cs.onSurfaceVariant),
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 18,
+                            color: cs.onSurfaceVariant,
+                          ),
                         ),
                     ],
                   ),
@@ -161,7 +174,8 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
           children: [
             Center(
               child: Container(
-                width: 36, height: 4,
+                width: 36,
+                height: 4,
                 decoration: BoxDecoration(
                   color: cs.outlineVariant,
                   borderRadius: BorderRadius.circular(2),
@@ -169,19 +183,30 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
               ),
             ),
             const SizedBox(height: 16),
-            Text('内容类型', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
+            Text(
+              '内容类型',
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
             const SizedBox(height: 12),
             _TypeOption(
               label: '全部',
               icon: Icons.all_inclusive_rounded,
               isSelected: provider.activeTypeFilter == null,
-              onTap: () { provider.setTypeFilter(null); Navigator.pop(context); },
+              onTap: () {
+                provider.setTypeFilter(null);
+                Navigator.pop(context);
+              },
             ),
             _TypeOption(
               label: '文本',
               icon: Icons.text_fields_rounded,
               isSelected: provider.activeTypeFilter == ContentType.text,
-              onTap: () { provider.setTypeFilter(ContentType.text); Navigator.pop(context); },
+              onTap: () {
+                provider.setTypeFilter(ContentType.text);
+                Navigator.pop(context);
+              },
             ),
             _TypeOption(
               label: '图片',
@@ -195,10 +220,11 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
             _TypeOption(
               label: '文件',
               icon: Icons.insert_drive_file_outlined,
-              isSelected: false,
-              enabled: false,
-              trailing: Icon(Icons.lock_outline, size: 16, color: cs.outline),
-              onTap: () {},
+              isSelected: provider.activeTypeFilter == ContentType.file,
+              onTap: () {
+                provider.setTypeFilter(ContentType.file);
+                Navigator.pop(context);
+              },
             ),
           ],
         ),
@@ -250,7 +276,9 @@ class _FilterChip extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: isSelected ? FontWeight.w500 : FontWeight.normal,
-                  color: isSelected ? cs.onPrimaryContainer : cs.onSurfaceVariant,
+                  color: isSelected
+                      ? cs.onPrimaryContainer
+                      : cs.onSurfaceVariant,
                 ),
               ),
               const SizedBox(width: 2),
@@ -271,16 +299,12 @@ class _TypeOption extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool isSelected;
-  final bool enabled;
-  final Widget? trailing;
   final VoidCallback onTap;
 
   const _TypeOption({
     required this.label,
     required this.icon,
     required this.isSelected,
-    this.enabled = true,
-    this.trailing,
     required this.onTap,
   });
 
@@ -291,7 +315,7 @@ class _TypeOption extends StatelessWidget {
 
     return InkWell(
       borderRadius: BorderRadius.circular(10),
-      onTap: enabled ? onTap : null,
+      onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
         child: Row(
@@ -299,28 +323,19 @@ class _TypeOption extends StatelessWidget {
             Icon(
               icon,
               size: 20,
-              color: !enabled
-                  ? cs.outline.withOpacity(0.4)
-                  : isSelected
-                      ? cs.primary
-                      : cs.onSurfaceVariant,
+              color: isSelected ? cs.primary : cs.onSurfaceVariant,
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
                 label,
                 style: theme.textTheme.bodyLarge?.copyWith(
-                  color: !enabled
-                      ? cs.outline.withOpacity(0.4)
-                      : isSelected
-                          ? cs.primary
-                          : null,
+                  color: isSelected ? cs.primary : null,
                   fontWeight: isSelected ? FontWeight.w600 : null,
                 ),
               ),
             ),
-            if (trailing != null) trailing!,
-            if (isSelected && trailing == null)
+            if (isSelected)
               Icon(Icons.check_rounded, size: 20, color: cs.primary),
           ],
         ),

@@ -8,4 +8,9 @@ class AppChannelMethods {
   static const String setImage = 'setImage';
   static const String hasImage = 'hasImage';
   static const String onClipboardImageChanged = 'onClipboardImageChanged';
+
+  static const String hasFiles = 'hasFiles';
+  static const String getFiles = 'getFiles';
+  static const String setFiles = 'setFiles';
+  static const String onClipboardFilesChanged = 'onClipboardFilesChanged';
 }

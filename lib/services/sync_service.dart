@@ -6,6 +6,7 @@ import '../repositories/cloud_repository.dart';
 import '../services/encryption_service.dart';
 import '../core/hex_utils.dart';
 import '../core/exceptions.dart';
+import '../core/constants.dart';
 import '../models/clipboard_entry.dart';
 
 /// 包含从服务器下载的内容及其来源设备信息
@@ -26,6 +27,11 @@ class DownloadResult {
   final int? imageHeight;
   final String? imageFormat;
   final String? id; // 服务器历史行 ID（图片下载条目对齐用，旧行为 null）
+  // 文件元数据（D3：轮询只返回元数据，内容由 Provider 懒下载）
+  final String? fileName;
+  final int? fileSize;
+  final String? mimeType;
+  final String? fileHash;
 
   const DownloadResult({
     required this.content,
@@ -44,6 +50,10 @@ class DownloadResult {
     this.imageHeight,
     this.imageFormat,
     this.id,
+    this.fileName,
+    this.fileSize,
+    this.mimeType,
+    this.fileHash,
   });
 
   /// 创建一个只有同步数据的空结果（无新内容需要下载）
@@ -63,6 +73,7 @@ class DownloadResult {
   }
 
   bool get hasContent => content.isNotEmpty || imageBytes != null;
+  bool get hasFile => type == ContentType.file && (id?.isNotEmpty ?? false);
   bool get hasDeletions => deletedIds.isNotEmpty;
   bool get hasRestorations => restoredEntries.isNotEmpty;
 }
@@ -80,6 +91,13 @@ class ImageUploadResult {
   });
 }
 
+/// 文件上传结果：服务器历史 ID。
+class FileUploadResult {
+  final String historyId;
+
+  const FileUploadResult({required this.historyId});
+}
+
 class SyncService {
   final CloudRepository _repo;
   final EncryptionService _encryption;
@@ -94,11 +112,19 @@ class SyncService {
   String get deviceId => _deviceId;
   String get deviceName => _deviceName;
   String get lastUploadedHash => _lastUploadedHash;
+  DateTime? get lastReceivedTimestamp => _lastReceivedTimestamp;
+  Uint8List get key => _key;
 
   /// 解密内容（供外部加载历史记录时使用）
   Future<String> decryptContent(String encryptedBase64) async {
     final encryptedData = EncryptedData.fromBase64(encryptedBase64);
     return await _encryption.decrypt(encryptedData, _key);
+  }
+
+  /// 使用 isolate 解密文本密文并 utf8 解码，避免超长文本阻塞 UI。
+  Future<String> decryptContentIsolate(String encryptedBase64) async {
+    final bytes = await _encryption.decryptBytesIsolate(_key, encryptedBase64);
+    return utf8.decode(bytes);
   }
 
   /// 标记内容为"已同步"，防止剪切板监听器重复上传刚下载的内容
@@ -110,6 +136,14 @@ class SyncService {
   void markAsDownloadedHash(String hash) {
     _lastUploadedHash = hash;
   }
+
+  /// 用文件内容 SHA-256 标记"已同步"（独立 `file:` 域，与文本/图片隔离）。
+  void markAsDownloadedFileHash(String hash) {
+    _lastUploadedHash = 'file:$hash';
+  }
+
+  /// 文件内容哈希是否已在 `file:` 域中记录（避免重复上传）。
+  bool isFileHashUploaded(String hash) => _lastUploadedHash == 'file:$hash';
 
   /// 标记时间戳为"已接收"，防止重复下载同一条内容
   /// 必须在内容成功处理（写入历史+剪切板）后调用
@@ -212,6 +246,38 @@ class SyncService {
     );
   }
 
+  /// 流式上传文件密文。headers 按蓝图走 `x-clipflow-*`；
+  /// 成功后把 `file:<sha256>` 写入 `_lastUploadedHash` 域。
+  Future<FileUploadResult?> uploadFile({
+    required String encryptedPath,
+    required String fileName,
+    required int fileSize,
+    required String mimeType,
+    required String plaintextHash,
+    required int timestamp,
+  }) async {
+    if (isFileHashUploaded(plaintextHash)) return null;
+
+    final marker = (await _encryption.encrypt('', _key)).toBase64();
+    final historyId = const Uuid().v4();
+
+    await _repo.uploadFile(
+      encryptedPath: encryptedPath,
+      historyId: historyId,
+      plaintextHash: plaintextHash,
+      fileName: fileName,
+      fileSize: fileSize,
+      mimeType: mimeType,
+      marker: marker,
+      sourceDevice: _deviceId,
+      sourceDeviceName: _deviceName,
+      sourcePlatform: _devicePlatform,
+      timestamp: timestamp,
+    );
+    _lastUploadedHash = 'file:$plaintextHash';
+    return FileUploadResult(historyId: historyId);
+  }
+
   Future<DownloadResult?> downloadLatestContent() async {
     final current = await _repo.getCurrentClipboardWithDeletions();
     if (current == null) return null;
@@ -272,10 +338,33 @@ class SyncService {
         );
       }
 
-      final encryptedData = EncryptedData.fromBase64(encryptedBase64);
-      final content = await _encryption.decrypt(encryptedData, _key);
+      if (type == 'file') {
+        // D3：轮询热路径只返回元数据，文件内容走独立下载任务
+        return DownloadResult(
+          content: '',
+          sourceDeviceId: current['source_device'] as String? ?? 'unknown',
+          sourceDeviceName: current['source_device_name'] as String? ?? 'Unknown',
+          sourcePlatform: current['source_platform'] as String? ?? 'unknown',
+          timestamp: timestamp,
+          deletedIds: deletedIds,
+          restoredEntries: restoredRaw,
+          type: ContentType.file,
+          id: current['history_id'] as String?,
+          fileName: current['file_name'] as String?,
+          fileSize: current['file_size'] as int?,
+          mimeType: current['mime_type'] as String?,
+          fileHash: current['hash'] as String?,
+        );
+      }
+
+      final content = await decryptContentIsolate(encryptedBase64);
+      // 超长旧文本（v1.3 图片被当文本上传）与客户端统一 50000 上限，
+      // 避免整段 2.6MB 明文在主 isolate 解密并渲染
+      final cappedContent = content.length > AppConstants.maxContentLength
+          ? content.substring(0, AppConstants.maxContentLength)
+          : content;
       return DownloadResult(
-        content: content,
+        content: cappedContent,
         sourceDeviceId: current['source_device'] as String? ?? 'unknown',
         sourceDeviceName: current['source_device_name'] as String? ?? 'Unknown',
         sourcePlatform: current['source_platform'] as String? ?? 'unknown',

@@ -11,22 +11,28 @@ class EncryptedData {
 
   EncryptedData({required this.ciphertext, required this.iv});
 
-  String toBase64() {
+  /// 序列化为单载荷字节：`[2字节IV长度][IV][密文+tag]`。
+  Uint8List toBytes() {
     final bytes = Uint8List(2 + iv.length + ciphertext.length);
     final ivLen = iv.length;
     bytes[0] = (ivLen >> 8) & 0xFF;
     bytes[1] = ivLen & 0xFF;
     bytes.setAll(2, iv);
     bytes.setAll(2 + ivLen, ciphertext);
-    return base64.encode(bytes);
+    return bytes;
   }
 
-  factory EncryptedData.fromBase64(String encoded) {
-    final bytes = base64.decode(encoded);
+  String toBase64() => base64.encode(toBytes());
+
+  factory EncryptedData.fromBytes(Uint8List bytes) {
     final ivLen = (bytes[0] << 8) | bytes[1];
     final iv = Uint8List.fromList(bytes.sublist(2, 2 + ivLen));
     final ciphertext = Uint8List.fromList(bytes.sublist(2 + ivLen));
     return EncryptedData(ciphertext: ciphertext, iv: iv);
+  }
+
+  factory EncryptedData.fromBase64(String encoded) {
+    return EncryptedData.fromBytes(Uint8List.fromList(base64.decode(encoded)));
   }
 }
 

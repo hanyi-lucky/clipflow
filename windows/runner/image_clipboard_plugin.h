@@ -17,10 +17,11 @@
 
 // Native implementation of the "clipflow/clipboard" MethodChannel on Windows.
 //
-// Implements hasImage / getImage / setImage so the shared Dart image pipeline
-// (ImageClipboardService -> ClipboardMonitor) works on Windows.  All bytes
-// handled here are plain PNG/JPEG; encryption, compression and hashing happen
-// in the Dart layer and are out of scope for this plugin.
+// Implements hasImage / getImage / setImage and hasFiles / getFiles / setFiles
+// so the shared Dart image and file pipelines work on Windows.  All bytes
+// handled here are plain PNG/JPEG; file bytes never cross this channel (only
+// metadata does); encryption, compression and hashing happen in the Dart layer
+// and are out of scope for this plugin.
 class ImageClipboardPlugin {
  public:
   ImageClipboardPlugin();
@@ -52,6 +53,9 @@ class ImageClipboardPlugin {
   bool HasImage();
   std::optional<ImageResult> GetImage();
   SetImageStatus SetImage(const std::vector<uint8_t>& bytes);
+  bool HasFiles();
+  std::vector<std::string> ReadFilePaths();
+  bool WriteFilePaths(const std::vector<std::string>& paths);
 
   Microsoft::WRL::ComPtr<IWICImagingFactory> GetFactory();
   UINT GetPngFormat();

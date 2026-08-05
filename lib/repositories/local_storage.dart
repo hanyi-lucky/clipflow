@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -19,6 +20,8 @@ class LocalStorage {
   static const _keyAutoSyncOnResume = 'auto_sync_on_resume';
   static const _keyNotificationSync = 'notification_sync';
   static const _keyDeletedEntryIds = 'deleted_entry_ids';
+  static const _keyMonitorIgnoreFileHashes = 'monitor_ignore_file_hashes';
+  static const _keyMonitorLastFileSignatures = 'monitor_last_file_signatures';
 
   final SharedPreferences _prefs;
 
@@ -154,5 +157,31 @@ class LocalStorage {
 
   Future<void> setDeletedEntryIds(Set<String> ids) async {
     await _prefs.setStringList(_keyDeletedEntryIds, ids.toList());
+  }
+
+  List<String> get monitorIgnoreFileHashes =>
+      _prefs.getStringList(_keyMonitorIgnoreFileHashes) ?? [];
+
+  Future<void> setMonitorIgnoreFileHashes(List<String> hashes) async {
+    await _prefs.setStringList(_keyMonitorIgnoreFileHashes, hashes);
+  }
+
+  Map<String, String> get monitorLastFileSignatures {
+    final raw = _prefs.getString(_keyMonitorLastFileSignatures);
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      return decoded.map((k, v) => MapEntry('$k', '$v'));
+    } catch (e) {
+      return {};
+    }
+  }
+
+  Future<void> setMonitorLastFileSignatures(Map<String, String> signatures) async {
+    await _prefs.setString(
+      _keyMonitorLastFileSignatures,
+      jsonEncode(signatures),
+    );
   }
 }

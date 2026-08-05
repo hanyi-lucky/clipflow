@@ -138,5 +138,71 @@ void main() {
 
       expect(entry.toMap().containsKey('imageEncryptedBase64'), isFalse);
     });
+
+    test('contentHash prefers fileHash for file entries', () {
+      final entry = ClipboardEntry(
+        id: 'file-1',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'M',
+        timestamp: DateTime.now(),
+        type: ContentType.file,
+        fileName: 'report.pdf',
+        fileSize: 2048,
+        mimeType: 'application/pdf',
+        fileHash: 'file-hash-abc',
+      );
+
+      expect(entry.contentHash, equals('file-hash-abc'));
+    });
+
+    test('toMap and fromMap round-trip file fields', () {
+      final entry = ClipboardEntry(
+        id: 'file-2',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'M',
+        sourcePlatform: 'macos',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.file,
+        fileName: 'archive.zip',
+        fileSize: 4096,
+        mimeType: 'application/zip',
+        fileHash: 'sha-256-of-file',
+      );
+
+      final restored = ClipboardEntry.fromMap(entry.toMap());
+
+      expect(restored.type, equals(ContentType.file));
+      expect(restored.fileName, equals('archive.zip'));
+      expect(restored.fileSize, equals(4096));
+      expect(restored.mimeType, equals('application/zip'));
+      expect(restored.fileHash, equals('sha-256-of-file'));
+      expect(restored.contentHash, equals('sha-256-of-file'));
+    });
+
+    test('copyWith updates file fields', () {
+      final entry = ClipboardEntry(
+        id: 'file-3',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'M',
+        timestamp: DateTime.now(),
+        type: ContentType.file,
+        fileName: 'old.txt',
+      );
+
+      final updated = entry.copyWith(
+        fileName: 'new.txt',
+        fileSize: 100,
+        mimeType: 'text/plain',
+        fileHash: 'new-hash',
+      );
+
+      expect(updated.fileName, 'new.txt');
+      expect(updated.fileSize, 100);
+      expect(updated.mimeType, 'text/plain');
+      expect(updated.fileHash, 'new-hash');
+    });
   });
 }

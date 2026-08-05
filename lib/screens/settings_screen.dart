@@ -25,10 +25,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final settings = context.read<SettingsProvider>();
     await settings.checkPermissions(
       checkNotificationPermission: () async {
-        return await ClipboardProvider.of(context, listen: false).checkNotificationPermission();
+        return await ClipboardProvider.of(
+          context,
+          listen: false,
+        ).checkNotificationPermission();
       },
       checkBatteryOptimization: () async {
-        return await ClipboardProvider.of(context, listen: false).checkBatteryOptimization();
+        return await ClipboardProvider.of(
+          context,
+          listen: false,
+        ).checkBatteryOptimization();
       },
     );
   }
@@ -42,9 +48,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
           return ListView(
             children: [
               _buildSection(context, '外观', [
-                _buildThemeTile(context, settings, ThemeMode.system, '跟随系统', Icons.brightness_auto),
-                _buildThemeTile(context, settings, ThemeMode.light, '浅色模式', Icons.light_mode),
-                _buildThemeTile(context, settings, ThemeMode.dark, '深色模式', Icons.dark_mode),
+                _buildThemeTile(
+                  context,
+                  settings,
+                  ThemeMode.system,
+                  '跟随系统',
+                  Icons.brightness_auto,
+                ),
+                _buildThemeTile(
+                  context,
+                  settings,
+                  ThemeMode.light,
+                  '浅色模式',
+                  Icons.light_mode,
+                ),
+                _buildThemeTile(
+                  context,
+                  settings,
+                  ThemeMode.dark,
+                  '深色模式',
+                  Icons.dark_mode,
+                ),
               ]),
               _buildSection(context, '通用', [
                 SwitchListTile(
@@ -62,13 +86,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       IconButton(
                         icon: const Icon(Icons.remove_circle_outline),
                         onPressed: settings.historyLimit > 10
-                            ? () => settings.setHistoryLimit(settings.historyLimit - 10)
+                            ? () => settings.setHistoryLimit(
+                                settings.historyLimit - 10,
+                              )
                             : null,
                       ),
                       IconButton(
                         icon: const Icon(Icons.add_circle_outline),
                         onPressed: settings.historyLimit < 500
-                            ? () => settings.setHistoryLimit(settings.historyLimit + 10)
+                            ? () => settings.setHistoryLimit(
+                                settings.historyLimit + 10,
+                              )
                             : null,
                       ),
                     ],
@@ -87,9 +115,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           onChanged: (v) async {
                             await settings.setBackgroundSync(v);
                             if (v) {
-                              ClipboardProvider.of(context, listen: false).resumeSync();
+                              ClipboardProvider.of(
+                                context,
+                                listen: false,
+                              ).resumeSync();
                             } else {
-                              ClipboardProvider.of(context, listen: false).stopSync();
+                              ClipboardProvider.of(
+                                context,
+                                listen: false,
+                              ).stopSync();
                             }
                           },
                           secondary: const Icon(Icons.sync_disabled),
@@ -110,9 +144,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           onChanged: (v) async {
                             await settings.setNotificationSync(v);
                             if (v) {
-                              ClipboardProvider.of(context, listen: false).startSyncService();
+                              ClipboardProvider.of(
+                                context,
+                                listen: false,
+                              ).startSyncService();
                             } else {
-                              ClipboardProvider.of(context, listen: false).stopSyncService();
+                              ClipboardProvider.of(
+                                context,
+                                listen: false,
+                              ).stopSyncService();
                             }
                           },
                           secondary: const Icon(Icons.notifications_active),
@@ -130,7 +170,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           title: const Text('通知权限'),
                           trailing: _buildPermissionStatus(
                             settings.notificationPermissionGranted,
-                            onTap: () => settings.requestNotificationPermission(),
+                            onTap: () =>
+                                settings.requestNotificationPermission(),
                           ),
                         ),
                         const Divider(height: 1, indent: 16),
@@ -157,6 +198,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ]),
               ],
+              _buildSection(context, '兼容性', [_buildCompatibilityTile(context)]),
               _buildSection(context, '关于', [
                 const ListTile(
                   title: Text('版本'),
@@ -189,13 +231,115 @@ class _SettingsScreenState extends State<SettingsScreen> {
       leading: Icon(icon),
       title: Text(label),
       trailing: isSelected
-          ? Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary)
+          ? Icon(
+              Icons.check_circle,
+              color: Theme.of(context).colorScheme.primary,
+            )
           : null,
       onTap: () => settings.setThemeMode(mode),
     );
   }
 
-  Widget _buildSection(BuildContext context, String title, List<Widget> children) {
+  Widget _buildCompatibilityTile(BuildContext context) {
+    return ListTile(
+      leading: const Icon(Icons.description_outlined),
+      title: const Text('图片与文件格式兼容性'),
+      onTap: () => _showCompatibilityDialog(context),
+    );
+  }
+
+  Future<void> _showCompatibilityDialog(BuildContext context) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('图片与文件格式兼容性'),
+          surfaceTintColor: Colors.transparent,
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _compatibilityItem(
+                    dialogContext,
+                    '图片',
+                    '支持剪贴板图片 PNG/JPEG/GIF/TIFF/BMP/WebP/HEIC；'
+                        '统一转 PNG/JPEG，长边超 2048 压缩、JPEG q80、'
+                        '含透明转 PNG；单张上限 5MB。',
+                  ),
+                  _compatibilityItem(
+                    dialogContext,
+                    '文件',
+                    'macOS 经 Finder 复制任意文件（file-url）；'
+                        'Android 经文件管理器复制（content://，无需存储权限）；'
+                        'Windows 剪贴板文件（CF_HDROP，待真机验证）；'
+                        '单文件 ≤50MB；一次复制多文件只同步第一个；'
+                        '文件夹同步不支持。',
+                  ),
+                  _compatibilityItem(
+                    dialogContext,
+                    '常见文件格式',
+                    '文本（txt/md/csv/json）、文档（pdf/doc/docx）、'
+                        '表格（xls/xlsx）、演示（ppt/pptx）、'
+                        '压缩（zip/7z/rar/tar/gz）、'
+                        '音视频（mp3/wav/mp4/mov/mkv）、'
+                        '代码（dart/swift/kt/cpp/h/py/js/ts/html/css）等；'
+                        '未识别扩展名按通用文件处理。',
+                  ),
+                  _compatibilityItem(
+                    dialogContext,
+                    '平台差异',
+                    'macOS/Windows 500ms 轮询检测；'
+                        'Android 由前台服务 + 原生剪贴板监听；'
+                        '删除的记录保留 24 小时可恢复，'
+                        '“倾倒垃圾桶”可彻底删除本地/服务器/磁盘数据。',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _compatibilityItem(BuildContext context, String title, String body) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              color: colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            body,
+            style: TextStyle(color: colorScheme.onSurfaceVariant, height: 1.4),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSection(
+    BuildContext context,
+    String title,
+    List<Widget> children,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

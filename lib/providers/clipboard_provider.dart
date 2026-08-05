@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform, SocketException;
+import 'dart:io' show File, Platform, SocketException;
 import 'dart:ui' show AppExitResponse, ViewFocusEvent;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -8,16 +8,21 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/clipboard_entry.dart';
+import '../models/clipboard_file.dart';
 import '../models/clipboard_image.dart';
+import '../models/file_download_progress.dart';
 import '../services/sync_service.dart';
 import '../services/encryption_service.dart';
 import '../services/history_service.dart';
 import '../services/clipboard_monitor.dart';
+import '../services/file_clipboard_service.dart';
+import '../services/file_processing_service.dart';
 import '../services/image_clipboard_service.dart';
 import '../services/image_compression_service.dart';
 import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
 import '../repositories/local_image_store.dart';
+import '../repositories/local_file_store.dart';
 import '../core/constants.dart';
 import '../core/exceptions.dart';
 import 'settings_provider.dart';
@@ -25,23 +30,42 @@ import 'settings_provider.dart';
 /// Mixin providing default no-op implementations for WidgetsBindingObserver.
 /// Only override didChangeAppLifecycleState in ClipboardProvider.
 mixin _DefaultWidgetsBindingObserver implements WidgetsBindingObserver {
-  @override void didChangeAccessibilityFeatures() {}
-  @override void didChangeAppLifecycleState(AppLifecycleState state) {}
-  @override void didChangeLocales(List<Locale>? locales) {}
-  @override void didChangeMetrics() {}
-  @override void didChangePlatformBrightness() {}
-  @override void didChangeTextScaleFactor() {}
-  @override void didChangeViewFocus(ViewFocusEvent event) {}
-  @override void didHaveMemoryPressure() {}
-  @override Future<bool> didPopRoute() async => false;
-  @override Future<bool> didPushRoute(String route) async => false;
-  @override Future<bool> didPushRouteInformation(RouteInformation routeInformation) async => false;
-  @override Future<AppExitResponse> didRequestAppExit() async => AppExitResponse.exit;
-  @override bool handleStartBackGesture(PredictiveBackEvent backEvent) => false;
-  @override void handleUpdateBackGestureProgress(PredictiveBackEvent backEvent) {}
-  @override void handleCommitBackGesture() {}
-  @override void handleCancelBackGesture() {}
-  @override void handleStatusBarTap() {}
+  @override
+  void didChangeAccessibilityFeatures() {}
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {}
+  @override
+  void didChangeLocales(List<Locale>? locales) {}
+  @override
+  void didChangeMetrics() {}
+  @override
+  void didChangePlatformBrightness() {}
+  @override
+  void didChangeTextScaleFactor() {}
+  @override
+  void didChangeViewFocus(ViewFocusEvent event) {}
+  @override
+  void didHaveMemoryPressure() {}
+  @override
+  Future<bool> didPopRoute() async => false;
+  @override
+  Future<bool> didPushRoute(String route) async => false;
+  @override
+  Future<bool> didPushRouteInformation(
+    RouteInformation routeInformation,
+  ) async => false;
+  @override
+  Future<AppExitResponse> didRequestAppExit() async => AppExitResponse.exit;
+  @override
+  bool handleStartBackGesture(PredictiveBackEvent backEvent) => false;
+  @override
+  void handleUpdateBackGestureProgress(PredictiveBackEvent backEvent) {}
+  @override
+  void handleCommitBackGesture() {}
+  @override
+  void handleCancelBackGesture() {}
+  @override
+  void handleStatusBarTap() {}
 }
 
 enum SyncStatus {
@@ -56,19 +80,37 @@ enum SyncStatus {
   const SyncStatus(this.label, this.color);
 }
 
-class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserver {
-  ClipboardProvider({LocalImageStore? imageStore})
-      : _localImageStore = imageStore ?? LocalImageStore();
+class ClipboardProvider extends ChangeNotifier
+    with _DefaultWidgetsBindingObserver {
+  ClipboardProvider({
+    LocalImageStore? imageStore,
+    LocalFileStore? fileStore,
+    FileProcessingService? fileProcessingService,
+    @visibleForTesting
+    Duration retryBaseDelay = const Duration(milliseconds: 500),
+  }) : _localImageStore = imageStore ?? LocalImageStore(),
+       _localFileStore = fileStore ?? LocalFileStore(),
+       _fileProcessingService =
+           fileProcessingService ?? FileProcessingService(),
+       _retryBaseDelay = retryBaseDelay;
 
   /// Convenience method to access ClipboardProvider from the widget tree
   static ClipboardProvider of(BuildContext context, {bool listen = true}) {
     return Provider.of<ClipboardProvider>(context, listen: listen);
   }
-  final HistoryService _historyService = HistoryService(maxEntries: AppConstants.maxHistoryEntries);
+
+  final HistoryService _historyService = HistoryService(
+    maxEntries: AppConstants.maxHistoryEntries,
+  );
   final EncryptionService _encryption = EncryptionService();
   final ImageClipboardService _imageClipboardService = ImageClipboardService();
-  final ImageCompressionService _imageCompressionService = ImageCompressionService();
+  final FileClipboardService _fileClipboardService = FileClipboardService();
+  final ImageCompressionService _imageCompressionService =
+      ImageCompressionService();
   final LocalImageStore _localImageStore;
+  final LocalFileStore _localFileStore;
+  final FileProcessingService _fileProcessingService;
+  final Duration _retryBaseDelay;
 
   ClipboardMonitor? _monitor;
   SyncService? _syncService;
@@ -98,6 +140,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   // 历史落盘节流
   Timer? _saveDebounceTimer;
   bool _savePending = false;
+  // 文件下载任务状态
+  final Map<String, FileDownloadProgress> _fileDownloads = {};
+  final Map<String, DownloadResult> _fileDownloadResults = {};
+  String? _activeFileDownloadId;
+  final Set<String> _pendingFileRetries = {};
+  // 文件上传在途保护：同路径只允许一个上传任务。
+  final Set<String> _pendingFileUploadPaths = {};
 
   List<ClipboardEntry> get history => _historyService.entries;
   SyncStatus get syncStatus => _syncStatus;
@@ -108,7 +157,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   bool get serverConnected => _serverConnected;
 
   bool get hasActiveFilters =>
-      _searchQuery.isNotEmpty || _activeTypeFilter != null || _activeDeviceFilter != null;
+      _searchQuery.isNotEmpty ||
+      _activeTypeFilter != null ||
+      _activeDeviceFilter != null;
 
   ContentType? get activeTypeFilter => _activeTypeFilter;
   String? get activeDeviceFilter => _activeDeviceFilter;
@@ -124,7 +175,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
     // Device filter
     if (_activeDeviceFilter != null) {
-      results = results.where((e) => e.sourceDeviceName == _activeDeviceFilter).toList();
+      results = results
+          .where((e) => e.sourceDeviceName == _activeDeviceFilter)
+          .toList();
     }
 
     // Keyword search (fuzzy, case-insensitive)
@@ -137,7 +190,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           case ContentType.image:
             return false;
           case ContentType.file:
-            return false; // v1.4: match by fileName
+            return (e.fileName ?? '').toLowerCase().contains(query);
         }
       }).toList();
     }
@@ -169,7 +222,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     final entries = _historyService.entries
         .where((e) => _selectedIds.contains(e.id) && e.type == ContentType.text)
         .toList();
-    entries.sort((a, b) => (orderMap[a.id] ?? 0).compareTo(orderMap[b.id] ?? 0));
+    entries.sort(
+      (a, b) => (orderMap[a.id] ?? 0).compareTo(orderMap[b.id] ?? 0),
+    );
     return entries;
   }
 
@@ -204,10 +259,14 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       key: encryptionKey,
     );
 
-    _monitor = ClipboardMonitor(onChanged: _onClipboardChanged, storage: storage);
+    _monitor = ClipboardMonitor(
+      onChanged: _onClipboardChanged,
+      storage: storage,
+    );
     _monitor!.setSyncService(_syncService!);
     _monitor!.onContentSynced = _addSyncedToHistory;
     _monitor!.onImageChanged = _onImageClipboardChanged;
+    _monitor!.onFilesChanged = _onFileClipboardChanged;
     _monitor!.loadState();
     // Forward monitor state changes to UI
     _monitor!.addListener(_onMonitorChanged);
@@ -231,11 +290,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     notifyListeners();
 
     // 后台异步加载历史，不阻塞解锁流程
-    _loadHistoryFromServer().then((_) {
-      notifyListeners();
-    }).catchError((e) {
-      debugPrint('[CLIP-PROVIDER] Background history load failed: $e');
-    });
+    _loadHistoryFromServer()
+        .then((_) {
+          notifyListeners();
+        })
+        .catchError((e) {
+          debugPrint('[CLIP-PROVIDER] Background history load failed: $e');
+        });
   }
 
   /// 从服务器加载历史记录，确保设备来源信息正确
@@ -251,7 +312,8 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
       // 读取持久化的已删 ID 集合；若服务器仍返回这些行，再次尝试删除
       final originalDeletedIds = Set<String>.from(
-          _storage?.deletedEntryIds ?? <String>{});
+        _storage?.deletedEntryIds ?? <String>{},
+      );
       if (originalDeletedIds.isNotEmpty) {
         final stillOnServer = serverEntries
             .where((e) => originalDeletedIds.contains(e['id'] as String))
@@ -291,6 +353,30 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       for (final entry in reversed) {
         final type = entry['type'] as String? ?? 'text';
 
+        // 文件行：只展示元数据，内容经独立下载任务懒取
+        if (type == ContentType.file.name) {
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: entry['id'] as String? ?? const Uuid().v4(),
+              content: '',
+              sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+              sourceDeviceName:
+                  entry['source_device_name'] as String? ?? 'Unknown',
+              sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                entry['timestamp'] as int? ?? 0,
+              ),
+              type: ContentType.file,
+              isPinned: (entry['pinned'] as int?) == 1,
+              fileName: entry['file_name'] as String?,
+              fileSize: (entry['file_size'] as num?)?.toInt(),
+              mimeType: entry['mime_type'] as String?,
+              fileHash: entry['hash'] as String?,
+            ),
+          );
+          continue;
+        }
+
         // 图片行：只解密缩略图，全图惰性加载
         if (type == ContentType.image.name) {
           final thumbBase64 = entry['thumb'] as String? ?? '';
@@ -301,21 +387,26 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           } catch (e) {
             continue;
           }
-          _historyService.addEntry(ClipboardEntry(
-            id: entry['id'] as String? ?? const Uuid().v4(),
-            content: '',
-            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-            sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-            timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-            type: ContentType.image,
-            imageThumbBytes: thumbBytes,
-            imageThumbEncryptedBase64: thumbBase64,
-            imageWidth: entry['width'] as int?,
-            imageHeight: entry['height'] as int?,
-            imageFormat: entry['format'] as String?,
-            stableHash: entry['hash'] as String?,
-          ));
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: entry['id'] as String? ?? const Uuid().v4(),
+              content: '',
+              sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+              sourceDeviceName:
+                  entry['source_device_name'] as String? ?? 'Unknown',
+              sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                entry['timestamp'] as int? ?? 0,
+              ),
+              type: ContentType.image,
+              imageThumbBytes: thumbBytes,
+              imageThumbEncryptedBase64: thumbBase64,
+              imageWidth: entry['width'] as int?,
+              imageHeight: entry['height'] as int?,
+              imageFormat: entry['format'] as String?,
+              stableHash: entry['hash'] as String?,
+            ),
+          );
           continue;
         }
 
@@ -325,22 +416,29 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
         // 先尝试直接解密（大部分短密文能成功，无需网络回补）
         String? decryptedContent;
         try {
-          decryptedContent = await _syncService!.decryptContent(content);
+          decryptedContent = _capContent(
+            await _syncService!.decryptContentIsolate(content),
+          );
         } catch (_) {
           // 直接解密失败，收集待回补
         }
 
         if (decryptedContent != null) {
-          _historyService.addEntry(ClipboardEntry(
-            id: entry['id'] as String? ?? const Uuid().v4(),
-            content: decryptedContent,
-            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-            sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-            timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-            type: ContentType.text,
-            isPinned: (entry['pinned'] as int?) == 1,
-          ));
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: entry['id'] as String? ?? const Uuid().v4(),
+              content: decryptedContent,
+              sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+              sourceDeviceName:
+                  entry['source_device_name'] as String? ?? 'Unknown',
+              sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                entry['timestamp'] as int? ?? 0,
+              ),
+              type: ContentType.text,
+              isPinned: (entry['pinned'] as int?) == 1,
+            ),
+          );
         } else {
           // 收集待回补条目，后续并行拉取
           needsFallback.add(entry);
@@ -363,16 +461,22 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           for (final r in results) {
             if (r.decrypted == null) continue;
             final entry = r.entry;
-            _historyService.addEntry(ClipboardEntry(
-              id: entry['id'] as String? ?? const Uuid().v4(),
-              content: r.decrypted!,
-              sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-              sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-              sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-              timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-              type: ContentType.text,
-              isPinned: (entry['pinned'] as int?) == 1,
-            ));
+            _historyService.addEntry(
+              ClipboardEntry(
+                id: entry['id'] as String? ?? const Uuid().v4(),
+                content: _capContent(r.decrypted!),
+                sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+                sourceDeviceName:
+                    entry['source_device_name'] as String? ?? 'Unknown',
+                sourcePlatform:
+                    entry['source_platform'] as String? ?? 'unknown',
+                timestamp: DateTime.fromMillisecondsSinceEpoch(
+                  entry['timestamp'] as int? ?? 0,
+                ),
+                type: ContentType.text,
+                isPinned: (entry['pinned'] as int?) == 1,
+              ),
+            );
           }
         }
       }
@@ -386,10 +490,14 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       _saveDebounceTimer?.cancel();
       _savePending = false;
       await _storage?.setHistoryJson(_historyService.toJson());
-      // 清理本地全图缓存中已不在历史里的孤儿文件
-      await _localImageStore.cleanupOrphans(
-        _historyService.entries.map((e) => e.id).toSet(),
-      );
+      // 清理本地全图缓存中已不在历史里的孤儿文件；
+      // 进行中的文件下载任务（密文已落盘、历史尚未入史）必须保留，否则会被误删
+      final historyIds = _historyService.entries.map((e) => e.id).toSet();
+      await _localImageStore.cleanupOrphans(historyIds);
+      await _localFileStore.cleanupOrphans({
+        ...historyIds,
+        ..._fileDownloads.keys,
+      });
     } catch (e) {
       _errorMessage = '从服务器加载历史失败: $e';
       notifyListeners();
@@ -405,6 +513,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     }
   }
 
+  /// 统一截断超长文本：超过 50000 字符只保留前 50000，
+  /// 防止超长密文/明文整段存储与渲染阻塞 UI。
+  String _capContent(String value) {
+    if (value.length <= AppConstants.maxContentLength) return value;
+    return value.substring(0, AppConstants.maxContentLength);
+  }
+
   /// 解密文本密文。列表响应中的 content 可能被服务端截断（≤10000 字符），
   /// 直接解密失败时按 id 经 GET /api/history/:id/content 拉全量密文重试一次；
   /// 仍失败返回 null（由调用方决定跳过条目或降级显示）。
@@ -413,7 +528,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     String content,
   ) async {
     try {
-      return await _syncService!.decryptContent(content);
+      return _capContent(await _syncService!.decryptContentIsolate(content));
     } catch (_) {
       // 落入回补路径：可能是列表截断导致的 GCM 认证失败
     }
@@ -422,7 +537,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       final fullEntry = await _cloudRepo!.getHistoryEntryContent(entryId);
       final fullContent = fullEntry?['content'] as String? ?? '';
       if (fullContent.isEmpty) return null;
-      return await _syncService!.decryptContent(fullContent);
+      return _capContent(
+        await _syncService!.decryptContentIsolate(fullContent),
+      );
     } catch (_) {
       return null;
     }
@@ -438,7 +555,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       final fullEntry = await _cloudRepo!.getHistoryEntryContent(entryId);
       final fullContent = fullEntry?['content'] as String? ?? '';
       if (fullContent.isEmpty) return null;
-      return await _syncService!.decryptContent(fullContent);
+      return _capContent(
+        await _syncService!.decryptContentIsolate(fullContent),
+      );
     } catch (_) {
       return null;
     }
@@ -531,15 +650,17 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
   /// Add synced content to local history (called by monitor after upload)
   void _addSyncedToHistory(String content, String serverId) {
-    _historyService.addEntry(ClipboardEntry(
-      id: serverId,
-      content: content,
-      sourceDeviceId: _syncService!.deviceId,
-      sourceDeviceName: _syncService!.deviceName,
-      sourcePlatform: Platform.operatingSystem,
-      timestamp: DateTime.now(),
-      type: ContentType.text,
-    ));
+    _historyService.addEntry(
+      ClipboardEntry(
+        id: serverId,
+        content: content,
+        sourceDeviceId: _syncService!.deviceId,
+        sourceDeviceName: _syncService!.deviceName,
+        sourcePlatform: Platform.operatingSystem,
+        timestamp: DateTime.now(),
+        type: ContentType.text,
+      ),
+    );
     _saveHistory();
     notifyListeners();
   }
@@ -556,6 +677,144 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     _uploadDebounce = Timer(AppConstants.uploadDebounce, () {
       _uploadImage(image);
     });
+  }
+
+  void _onFileClipboardChanged(List<ClipboardFile> files) {
+    _uploadDebounce?.cancel();
+    _uploadDebounce = Timer(AppConstants.uploadDebounce, () {
+      _uploadFile(files);
+    });
+  }
+
+  /// 上传第一个文件（多文件剪贴板其余跳过并 debug 日志）。
+  Future<void> _uploadFile(List<ClipboardFile> files) async {
+    if (_syncService == null || files.isEmpty) return;
+    final file = files.first;
+    if (files.length > 1) {
+      debugPrint(
+        '[CLIP-PROVIDER] Multiple files detected, syncing first only: '
+        '${files.length} total',
+      );
+    }
+    final path = file.path;
+    if (path == null || path.isEmpty) {
+      _setStatus(SyncStatus.connected);
+      return;
+    }
+    if (_pendingFileUploadPaths.contains(path)) return;
+    _setStatus(SyncStatus.syncing);
+
+    _pendingFileUploadPaths.add(path);
+    try {
+      if (file.errorCode != null) {
+        _errorMessage = '文件读取失败（${file.errorCode}），已拒绝上传';
+        _serverConnected = false;
+        _setStatus(SyncStatus.error);
+        return;
+      }
+      if (file.size != null && file.size! > AppConstants.maxFileBytes) {
+        _errorMessage =
+            '文件超过 ${AppConstants.maxFileBytes ~/ (1024 * 1024)}MB，已拒绝上传';
+        _serverConnected = false;
+        _setStatus(SyncStatus.error);
+        return;
+      }
+      final source = File(path);
+      if (!await source.exists()) {
+        _errorMessage = '文件不存在或已被移动，已跳过同步';
+        _serverConnected = false;
+        _setStatus(SyncStatus.error);
+        return;
+      }
+
+      final plaintextHash = await _fileProcessingService.hashFile(path);
+      if (_monitor?.consumeIgnoredFileHash(plaintextHash) ?? false) {
+        // 下载回写/历史复制回声：忽略后不上传
+        _monitor?.recordFileSignature(file);
+        _setStatus(SyncStatus.connected);
+        return;
+      }
+      if (_syncService!.isFileHashUploaded(plaintextHash)) {
+        _monitor?.recordFileSignature(file);
+        _setStatus(SyncStatus.connected);
+        return;
+      }
+
+      final size = file.size ?? await source.length();
+      final encryptedPath = await _localFileStore.newTempPath('.enc');
+      await _fileProcessingService.encryptFile(
+        sourcePath: path,
+        encryptedPath: encryptedPath,
+        key: _syncService!.key,
+      );
+
+      final result = await _syncService!.uploadFile(
+        encryptedPath: encryptedPath,
+        fileName: file.name ?? path.split(Platform.pathSeparator).last,
+        fileSize: size,
+        mimeType: file.mimeType ?? 'application/octet-stream',
+        plaintextHash: plaintextHash,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      );
+      if (result != null) {
+        await _localFileStore.importEncryptedFile(
+          result.historyId,
+          encryptedPath,
+        );
+        _historyService.addEntry(
+          ClipboardEntry(
+            id: result.historyId,
+            content: '',
+            sourceDeviceId: _syncService!.deviceId,
+            sourceDeviceName: _syncService!.deviceName,
+            sourcePlatform: Platform.operatingSystem,
+            timestamp: DateTime.now(),
+            type: ContentType.file,
+            fileName: file.name ?? path.split(Platform.pathSeparator).last,
+            fileSize: size,
+            mimeType: file.mimeType ?? 'application/octet-stream',
+            fileHash: plaintextHash,
+          ),
+        );
+        _saveHistory();
+        notifyListeners();
+        await _localFileStore.enforceCacheLimit(
+          AppConstants.localFileCacheMaxBytes,
+          protectedIds: {result.historyId},
+        );
+        // 上传成功后才记录签名：失败时签名不落地，同文件可重试。
+        _monitor?.recordFileSignature(file);
+      }
+
+      // Android 预拷贝临时文件上传成功后清理
+      if (file.temp) {
+        try {
+          if (await source.exists()) {
+            await source.delete();
+          }
+        } catch (e) {
+          debugPrint('[CLIP-PROVIDER] Temp file cleanup failed: $e');
+        }
+      }
+      try {
+        final tmp = File(encryptedPath);
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      } catch (e) {
+        debugPrint('[CLIP-PROVIDER] Encrypted temp cleanup failed: $e');
+      }
+
+      _serverConnected = true;
+      _setStatus(SyncStatus.connected);
+    } catch (e) {
+      _monitor?.clearFileSignature(file);
+      _errorMessage = e.toString();
+      _serverConnected = false;
+      _setStatus(SyncStatus.error);
+    } finally {
+      _pendingFileUploadPaths.remove(path);
+    }
   }
 
   Future<void> _uploadImage(ClipboardImage image) async {
@@ -586,21 +845,23 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
       // 只有真正上传成功才创建本地历史记录
       if (result != null) {
-        _historyService.addEntry(ClipboardEntry(
-          id: result.historyId,
-          content: '',
-          sourceDeviceId: _syncService!.deviceId,
-          sourceDeviceName: _syncService!.deviceName,
-          sourcePlatform: Platform.operatingSystem,
-          timestamp: DateTime.now(),
-          type: ContentType.image,
-          imageThumbBytes: compressed.thumbBytes,
-          imageThumbEncryptedBase64: result.encryptedThumbBase64,
-          imageWidth: compressed.width,
-          imageHeight: compressed.height,
-          imageFormat: compressed.format,
-          stableHash: imageHash,
-        ));
+        _historyService.addEntry(
+          ClipboardEntry(
+            id: result.historyId,
+            content: '',
+            sourceDeviceId: _syncService!.deviceId,
+            sourceDeviceName: _syncService!.deviceName,
+            sourcePlatform: Platform.operatingSystem,
+            timestamp: DateTime.now(),
+            type: ContentType.image,
+            imageThumbBytes: compressed.thumbBytes,
+            imageThumbEncryptedBase64: result.encryptedThumbBase64,
+            imageWidth: compressed.width,
+            imageHeight: compressed.height,
+            imageFormat: compressed.format,
+            stableHash: imageHash,
+          ),
+        );
         // 全图密文只落本地文件，不写 SharedPreferences
         await _localImageStore.save(result.historyId, result.encryptedBase64);
         _saveHistory();
@@ -636,15 +897,17 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
 
       // 只有真正上传成功才创建本地历史记录（跳过从其他设备同步来的内容）
       if (serverId != null) {
-        _historyService.addEntry(ClipboardEntry(
-          id: serverId,
-          content: truncatedContent,
-          sourceDeviceId: _syncService!.deviceId,
-          sourceDeviceName: _syncService!.deviceName,
-          sourcePlatform: Platform.operatingSystem,
-          timestamp: DateTime.now(),
-          type: ContentType.text,
-        ));
+        _historyService.addEntry(
+          ClipboardEntry(
+            id: serverId,
+            content: truncatedContent,
+            sourceDeviceId: _syncService!.deviceId,
+            sourceDeviceName: _syncService!.deviceName,
+            sourcePlatform: Platform.operatingSystem,
+            timestamp: DateTime.now(),
+            type: ContentType.text,
+          ),
+        );
         _saveHistory();
         notifyListeners();
       }
@@ -672,8 +935,10 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     final delay = _consecutiveFailures == 0
         ? AppConstants.pollInterval
         : Duration(
-            milliseconds: (AppConstants.pollInterval.inMilliseconds * (1 << _consecutiveFailures.clamp(0, 6)))
-                .clamp(500, 30000),
+            milliseconds:
+                (AppConstants.pollInterval.inMilliseconds *
+                        (1 << _consecutiveFailures.clamp(0, 6)))
+                    .clamp(500, 30000),
           );
     _nextSyncTimer = Timer(delay, _syncTick);
   }
@@ -718,9 +983,17 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           // 图片完整写入剪切板并成功入历史后才推进时间戳
           _syncService!.markAsReceived(result.timestamp);
         }
+      } else if (result != null && result.hasFile) {
+        final fileHash = result.fileHash ?? '';
+        if (fileHash.isNotEmpty) {
+          _syncService!.markAsDownloadedFileHash(fileHash);
+        }
+        await _processFileDownload(result);
       } else if (result != null && result.content.isNotEmpty) {
         // 跳过已删除的内容
-        final syncContentHash = sha256.convert(utf8.encode(result.content)).toString();
+        final syncContentHash = sha256
+            .convert(utf8.encode(result.content))
+            .toString();
         if (_recentlyDeletedHashes.contains(syncContentHash)) {
           _syncService!.markAsDownloaded(result.content);
         } else {
@@ -734,15 +1007,17 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           await Future.delayed(const Duration(milliseconds: 50));
           _monitor?.resume();
 
-          _historyService.addEntry(ClipboardEntry(
-            id: const Uuid().v4(),
-            content: result.content,
-            sourceDeviceId: result.sourceDeviceId,
-            sourceDeviceName: result.sourceDeviceName,
-            sourcePlatform: result.sourcePlatform,
-            timestamp: result.timestamp,
-            type: ContentType.text,
-          ));
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: const Uuid().v4(),
+              content: result.content,
+              sourceDeviceId: result.sourceDeviceId,
+              sourceDeviceName: result.sourceDeviceName,
+              sourcePlatform: result.sourcePlatform,
+              timestamp: result.timestamp,
+              type: ContentType.text,
+            ),
+          );
           _saveHistory();
           notifyListeners();
           // 内容处理成功后才标记时间戳，防止处理失败导致该内容被永久跳过
@@ -803,25 +1078,55 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           continue;
         }
 
-        _historyService.addEntry(ClipboardEntry(
-          id: entryId,
-          content: '',
-          sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-          sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-          sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-          timestamp:
-              DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-          type: ContentType.image,
-          imageThumbBytes: thumbBytes,
-          imageThumbEncryptedBase64: thumbBase64,
-          imageWidth: entry['width'] as int?,
-          imageHeight: entry['height'] as int?,
-          imageFormat: entry['format'] as String?,
-          stableHash: hash.isEmpty ? null : hash,
-        ));
+        _historyService.addEntry(
+          ClipboardEntry(
+            id: entryId,
+            content: '',
+            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+            sourceDeviceName:
+                entry['source_device_name'] as String? ?? 'Unknown',
+            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+            timestamp: DateTime.fromMillisecondsSinceEpoch(
+              entry['timestamp'] as int? ?? 0,
+            ),
+            type: ContentType.image,
+            imageThumbBytes: thumbBytes,
+            imageThumbEncryptedBase64: thumbBase64,
+            imageWidth: entry['width'] as int?,
+            imageHeight: entry['height'] as int?,
+            imageFormat: entry['format'] as String?,
+            stableHash: hash.isEmpty ? null : hash,
+          ),
+        );
         if (fullEncrypted != null && fullEncrypted.isNotEmpty) {
           await _localImageStore.save(entryId, fullEncrypted);
         }
+        changed = true;
+        continue;
+      }
+
+      if (type == ContentType.file.name) {
+        final entryId = entry['id'] as String? ?? const Uuid().v4();
+        final hash = entry['hash'] as String? ?? '';
+        if (hash.isNotEmpty && _recentlyDeletedHashes.contains(hash)) continue;
+        _historyService.addEntry(
+          ClipboardEntry(
+            id: entryId,
+            content: '',
+            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+            sourceDeviceName:
+                entry['source_device_name'] as String? ?? 'Unknown',
+            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+            timestamp: DateTime.fromMillisecondsSinceEpoch(
+              entry['timestamp'] as int? ?? 0,
+            ),
+            type: ContentType.file,
+            fileName: entry['file_name'] as String?,
+            fileSize: (entry['file_size'] as num?)?.toInt(),
+            mimeType: entry['mime_type'] as String?,
+            fileHash: hash.isEmpty ? null : hash,
+          ),
+        );
         changed = true;
         continue;
       }
@@ -831,22 +1136,30 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       // 解密内容
       String decryptedContent;
       try {
-        decryptedContent = await _syncService!.decryptContent(content);
+        decryptedContent = _capContent(
+          await _syncService!.decryptContentIsolate(content),
+        );
       } catch (e) {
         continue;
       }
       // 跳过已删除的内容
-      final restoredHash = sha256.convert(utf8.encode(decryptedContent)).toString();
+      final restoredHash = sha256
+          .convert(utf8.encode(decryptedContent))
+          .toString();
       if (_recentlyDeletedHashes.contains(restoredHash)) continue;
-      _historyService.addEntry(ClipboardEntry(
-        id: entry['id'] as String? ?? const Uuid().v4(),
-        content: decryptedContent,
-        sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-        sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-        sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-        timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-        type: ContentType.text,
-      ));
+      _historyService.addEntry(
+        ClipboardEntry(
+          id: entry['id'] as String? ?? const Uuid().v4(),
+          content: decryptedContent,
+          sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+          sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+          sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+          timestamp: DateTime.fromMillisecondsSinceEpoch(
+            entry['timestamp'] as int? ?? 0,
+          ),
+          type: ContentType.text,
+        ),
+      );
       changed = true;
     }
     if (changed) {
@@ -882,32 +1195,322 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
         ? result.id!
         : const Uuid().v4();
 
+    // 已有同 ID 条目（如 refresh 先全量加载），只补缓存，不重复入史
+    final alreadyInHistory = _historyService.entries.any(
+      (e) => e.id == entryId,
+    );
+    if (!alreadyInHistory) {
+      _historyService.addEntry(
+        ClipboardEntry(
+          id: entryId,
+          content: '',
+          sourceDeviceId: result.sourceDeviceId,
+          sourceDeviceName: result.sourceDeviceName,
+          sourcePlatform: result.sourcePlatform,
+          timestamp: result.timestamp,
+          type: ContentType.image,
+          imageThumbBytes: result.imageThumbBytes,
+          imageWidth: result.imageWidth,
+          imageHeight: result.imageHeight,
+          imageFormat: result.imageFormat,
+          stableHash: result.imageHash,
+        ),
+      );
+    }
+
+    // 先入史再落盘：孤儿清理按历史 ID 计算保留集合，
+    // 若清理在落盘期间并发执行，也不会把本条缓存误删
     final encrypted = result.imageEncryptedBase64;
     if (encrypted != null && encrypted.isNotEmpty) {
       await _localImageStore.save(entryId, encrypted);
     }
 
-    // 已有同 ID 条目（如 refresh 先全量加载），只补缓存，不重复入史
-    if (_historyService.entries.any((e) => e.id == entryId)) {
+    if (!alreadyInHistory) {
+      _saveHistory();
+      notifyListeners();
+    }
+  }
+
+  /// 文件下载入口：建立进度任务后串行执行。
+  Future<void> _processFileDownload(DownloadResult result) async {
+    final entryId = (result.id != null && result.id!.isNotEmpty)
+        ? result.id!
+        : const Uuid().v4();
+    if (_fileDownloads.containsKey(entryId)) {
+      final existing = _fileDownloads[entryId]!;
+      if (existing.status == FileTransferStatus.pending ||
+          existing.status == FileTransferStatus.downloading ||
+          existing.status == FileTransferStatus.processing) {
+        return; // 同一 historyId 已有活跃任务
+      }
+      if (existing.status == FileTransferStatus.cancelled) {
+        return; // 取消后仅手动重试，轮询不再自动重启
+      }
+      if (_pendingFileRetries.contains(entryId)) return;
+    }
+    if (_activeFileDownloadId != null) return; // 同一时间只允许一个活跃下载
+
+    _fileDownloadResults[entryId] = result;
+    _fileDownloads[entryId] = FileDownloadProgress(
+      entryId: entryId,
+      fileName: result.fileName ?? 'file',
+      totalBytes: null,
+      status: FileTransferStatus.pending,
+    );
+    notifyListeners();
+    await _runFileDownload(entryId, result);
+  }
+
+  Future<void> _runFileDownload(
+    String entryId,
+    DownloadResult result, {
+    bool isRetry = false,
+  }) async {
+    _activeFileDownloadId = entryId;
+    final progress = _fileDownloads[entryId];
+    if (progress == null) {
+      _activeFileDownloadId = null;
+      return;
+    }
+    if (isRetry) {
+      progress.status = FileTransferStatus.pending;
+      progress.error = null;
+      progress.receivedBytes = 0;
+      progress.totalBytes = null;
+      progress.cancelToken = FileTransferCancelToken();
+      notifyListeners();
+    }
+    if (progress.status == FileTransferStatus.failed ||
+        progress.status == FileTransferStatus.cancelled) {
+      _activeFileDownloadId = null;
       return;
     }
 
-    _historyService.addEntry(ClipboardEntry(
-      id: entryId,
-      content: '',
-      sourceDeviceId: result.sourceDeviceId,
-      sourceDeviceName: result.sourceDeviceName,
-      sourcePlatform: result.sourcePlatform,
-      timestamp: result.timestamp,
-      type: ContentType.image,
-      imageThumbBytes: result.imageThumbBytes,
-      imageWidth: result.imageWidth,
-      imageHeight: result.imageHeight,
-      imageFormat: result.imageFormat,
-      stableHash: result.imageHash,
-    ));
-    _saveHistory();
+    progress.cancelToken ??= FileTransferCancelToken();
+    final cancelToken = progress.cancelToken!;
+    String? decryptedTempPath;
+    try {
+      if (_cloudRepo == null) throw Exception('Cloud repository unavailable');
+      final fileName = result.fileName ?? 'file';
+      progress.fileName = fileName;
+      progress.status = FileTransferStatus.downloading;
+      notifyListeners();
+
+      final response = await _cloudRepo!.downloadFile(entryId);
+      if (progress.status == FileTransferStatus.cancelled) return;
+
+      progress.totalBytes = response.contentLength;
+      notifyListeners();
+      final encryptedPath = await _localFileStore.saveEncryptedFromStream(
+        entryId: entryId,
+        stream: response.stream,
+        onProgress: (received) {
+          progress.receivedBytes = received;
+          notifyListeners();
+        },
+        cancelToken: cancelToken,
+      );
+      if (encryptedPath == null) return; // 取消时 store 已删除 .part
+      if (progress.status == FileTransferStatus.cancelled) return;
+
+      progress.status = FileTransferStatus.processing;
+      notifyListeners();
+      decryptedTempPath = await _localFileStore.newTempPath('_decrypted');
+      final plaintextHash = await _fileProcessingService.decryptFile(
+        encryptedPath: encryptedPath,
+        plaintextPath: decryptedTempPath,
+        key: _syncService!.key,
+      );
+      if (progress.status == FileTransferStatus.cancelled) return;
+
+      progress.decryptedHash = plaintextHash;
+      final plaintextPath = await _localFileStore.movePlaintextIntoCache(
+        entryId,
+        fileName,
+        decryptedTempPath,
+      );
+      if (progress.status == FileTransferStatus.cancelled) return;
+
+      final written = await _fileClipboardService.setFiles([plaintextPath]);
+      if (progress.status == FileTransferStatus.cancelled) return;
+      if (!written) {
+        throw Exception('Native setFiles failed');
+      }
+      final readBack = await _fileClipboardService.getFiles();
+      if (progress.status == FileTransferStatus.cancelled) return;
+      if (readBack != null && readBack.isNotEmpty) {
+        _monitor?.markFileAsWritten(plaintextHash, readBack);
+      }
+      await Future.delayed(const Duration(milliseconds: 50));
+      if (progress.status == FileTransferStatus.cancelled) return;
+
+      _historyService.addEntry(
+        ClipboardEntry(
+          id: entryId,
+          content: '',
+          sourceDeviceId: result.sourceDeviceId,
+          sourceDeviceName: result.sourceDeviceName,
+          sourcePlatform: result.sourcePlatform,
+          timestamp: result.timestamp,
+          type: ContentType.file,
+          fileName: fileName,
+          fileSize: result.fileSize,
+          mimeType: result.mimeType,
+          fileHash: result.fileHash,
+        ),
+      );
+      _saveHistory();
+      notifyListeners();
+
+      // 完整处理成功后才推进时间戳（顺序不可颠倒）
+      _syncService!.markAsReceived(result.timestamp);
+      progress.status = FileTransferStatus.completed;
+      progress.error = null;
+      await _localFileStore.enforceCacheLimit(
+        AppConstants.localFileCacheMaxBytes,
+        protectedIds: {entryId},
+      );
+    } catch (e) {
+      if (progress.status == FileTransferStatus.cancelled) return;
+      progress.error = e.toString();
+      progress.retryCount += 1;
+      if (!_disposed && progress.retryCount < 3) {
+        progress.status = FileTransferStatus.pending;
+        notifyListeners();
+        _activeFileDownloadId = null;
+        _pendingFileRetries.add(entryId);
+        final backoffMs =
+            (_retryBaseDelay.inMilliseconds * (1 << (progress.retryCount - 1)))
+                .clamp(10, 8000);
+        Timer(Duration(milliseconds: backoffMs), () {
+          _pendingFileRetries.remove(entryId);
+          if (_disposed) return;
+          if (progress.status == FileTransferStatus.cancelled) return;
+          if (_activeFileDownloadId != null) return;
+          _runFileDownload(entryId, result, isRetry: true);
+        });
+        return;
+      }
+      progress.status = FileTransferStatus.failed;
+    } finally {
+      if (decryptedTempPath != null) {
+        await _deleteTempFile(decryptedTempPath);
+      }
+      _activeFileDownloadId = null;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _deleteTempFile(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {
+      // 临时文件清理失败不影响主流程
+    }
+  }
+
+  /// 取消下载：置位取消令牌（流式写入在下一个数据块处停止并删除 `.part`），
+  /// 状态置 cancelled，不推进时间戳，本会话内不再自动重试。
+  Future<void> cancelFileDownload(String entryId) async {
+    final progress = _fileDownloads[entryId];
+    if (progress == null) return;
+    if (progress.status == FileTransferStatus.completed ||
+        progress.status == FileTransferStatus.cancelled) {
+      return;
+    }
+    progress.cancelToken?.cancel();
+    progress.status = FileTransferStatus.cancelled;
+    progress.error = '已取消';
+    _pendingFileRetries.remove(entryId);
+    if (_activeFileDownloadId == entryId) {
+      _activeFileDownloadId = null;
+    }
+    await _localFileStore.deleteEntry(entryId);
     notifyListeners();
+  }
+
+  /// 手动重试：仅 failed/cancelled 且无活跃下载时启动，使用原始元数据。
+  Future<void> retryFileDownload(String entryId) async {
+    final progress = _fileDownloads[entryId];
+    if (progress == null) return;
+    if (progress.status != FileTransferStatus.failed &&
+        progress.status != FileTransferStatus.cancelled) {
+      return;
+    }
+    if (_activeFileDownloadId != null) return;
+    final result = _fileDownloadResults[entryId];
+    if (result == null) return;
+
+    _pendingFileRetries.remove(entryId);
+    progress.status = FileTransferStatus.pending;
+    progress.error = null;
+    progress.retryCount = 0;
+    progress.receivedBytes = 0;
+    progress.totalBytes = null;
+    progress.decryptedHash = null;
+    progress.cancelToken = FileTransferCancelToken();
+    notifyListeners();
+    await _runFileDownload(entryId, result, isRetry: true);
+  }
+
+  FileDownloadProgress? fileDownloadProgress(String entryId) {
+    return _fileDownloads[entryId];
+  }
+
+  /// 测试钩子：直接驱动桌面轮询的文件检测分支。
+  @visibleForTesting
+  Future<void> debugFileCheck() => _monitor?.syncClipboard() ?? Future.value();
+
+  @visibleForTesting
+  void monitorAddIgnoreFileHash(String hash) {
+    _monitor?.addIgnoreFileHash(hash);
+  }
+
+  /// 文件条目就绪路径：本地明文存在直接用，否则懒下载+解密，不推进时间戳。
+  Future<String?> ensureFileReady(String entryId) async {
+    final entry = _historyService.entries
+        .where((e) => e.id == entryId)
+        .firstOrNull;
+    if (entry == null || entry.type != ContentType.file) return null;
+    try {
+      final fileName = entry.fileName ?? 'file';
+      final encryptedPath = await _localFileStore.loadEncryptedPath(entryId);
+      if (encryptedPath != null) {
+        final plaintextPath = await _localFileStore.newTempPath('_decrypted');
+        await _fileProcessingService.decryptFile(
+          encryptedPath: encryptedPath,
+          plaintextPath: plaintextPath,
+          key: _syncService!.key,
+        );
+        return _localFileStore.movePlaintextIntoCache(
+          entryId,
+          fileName,
+          plaintextPath,
+        );
+      }
+      if (_cloudRepo == null) return null;
+      final response = await _cloudRepo!.downloadFile(entryId);
+      await _localFileStore.saveEncryptedFromStream(
+        entryId: entryId,
+        stream: response.stream,
+      );
+      final plaintextPath = await _localFileStore.newTempPath('_decrypted');
+      await _fileProcessingService.decryptFile(
+        encryptedPath: (await _localFileStore.loadEncryptedPath(entryId))!,
+        plaintextPath: plaintextPath,
+        key: _syncService!.key,
+      );
+      return _localFileStore.movePlaintextIntoCache(
+        entryId,
+        fileName,
+        plaintextPath,
+      );
+    } catch (e) {
+      return null;
+    }
   }
 
   Future<void> refresh() async {
@@ -922,10 +1525,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       // 下载最新 clipboard
       if (_syncService != null) {
         final result = await _syncService!.downloadLatestContent();
-        if (result != null && result.hasContent) {
+        if (result != null && (result.hasContent || result.hasFile)) {
           if (result.type == ContentType.image) {
             _syncService!.markAsDownloadedHash(result.imageHash ?? '');
             await _processImageDownload(result);
+          } else if (result.hasFile) {
+            _syncService!.markAsDownloadedFileHash(result.fileHash ?? '');
+            await _processFileDownload(result);
           } else {
             _monitor?.pause();
             await Clipboard.setData(ClipboardData(text: result.content));
@@ -978,6 +1584,17 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           _monitor?.markImageAsWritten(readBack.bytes);
         }
       }
+    } else if (entry.type == ContentType.file) {
+      final path = await ensureFileReady(id);
+      if (path != null) {
+        final written = await _fileClipboardService.setFiles([path]);
+        if (written && entry.fileHash != null) {
+          final readBack = await _fileClipboardService.getFiles();
+          if (readBack != null && readBack.isNotEmpty) {
+            _monitor?.markFileAsWritten(entry.fileHash!, readBack);
+          }
+        }
+      }
     } else {
       await Clipboard.setData(ClipboardData(text: entry.content));
     }
@@ -1010,7 +1627,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     notifyListeners();
     try {
       final entry = _historyService.entries.firstWhere((e) => e.id == id);
-      await _cloudRepo?.updateHistoryEntry(id, {'pinned': entry.isPinned ? 1 : 0});
+      await _cloudRepo?.updateHistoryEntry(id, {
+        'pinned': entry.isPinned ? 1 : 0,
+      });
     } catch (e) {
       // 乐观更新，失败不回滚
     }
@@ -1049,6 +1668,8 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       }
       // 同步删除本地全图缓存
       await _localImageStore.delete(id);
+      // 同步删除本地文件密文/明文缓存
+      await _localFileStore.deleteEntry(id);
     } catch (e) {
       // 乐观更新，失败不回滚（集合保留，下次 refresh 会重试删除）
     }
@@ -1069,6 +1690,12 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     }
   }
 
+  /// 倾倒垃圾桶：永久删除服务器端当前用户的所有软删条目，返回删除数量。
+  Future<int> emptyTrash() async {
+    if (_cloudRepo == null) return 0;
+    return await _cloudRepo!.emptyTrash();
+  }
+
   /// 获取垃圾箱条目
   Future<List<Map<String, dynamic>>> getTrashEntries() async {
     if (_cloudRepo == null) return [];
@@ -1081,8 +1708,9 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           final thumbBase64 = entry['thumb'] as String? ?? '';
           if (thumbBase64.isNotEmpty && _syncService != null) {
             try {
-              entry['imageThumbBytes'] =
-                  await _syncService!.decryptImage(thumbBase64);
+              entry['imageThumbBytes'] = await _syncService!.decryptImage(
+                thumbBase64,
+              );
               entry['imageFormat'] = entry['format'];
               entry['imageWidth'] = entry['width'];
               entry['imageHeight'] = entry['height'];
@@ -1090,6 +1718,10 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
               // 垃圾箱缩略图解密失败仅降级为空白预览
             }
           }
+          continue;
+        }
+        if (type == ContentType.file.name) {
+          // 垃圾箱对 file 行不尝试解密 content，按元数据展示
           continue;
         }
         // 解密文本内容：列表密文可能被服务端截断，失败时按 id 回补全量密文

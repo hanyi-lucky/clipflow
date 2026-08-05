@@ -1,6 +1,7 @@
 #include "image_clipboard_plugin.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <objbase.h>
@@ -11,7 +12,9 @@
 #include <flutter/standard_method_codec.h>
 
 #include <cstdint>
+#include <cctype>
 #include <cstring>
+#include <ctime>
 #include <limits>
 #include <map>
 #include <optional>
@@ -495,6 +498,132 @@ std::vector<uint8_t> ParseBytes(const flutter::EncodableValue& value) {
   return {};
 }
 
+// Converts a UTF-8 path to a null-terminated UTF-16 string. Returns an empty
+// vector on conversion failure.
+std::wstring Utf8ToWide(const std::string& input) {
+  if (input.empty()) {
+    return std::wstring();
+  }
+  const int wide_len = ::MultiByteToWideChar(
+      CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+      static_cast<int>(input.size()), nullptr, 0);
+  if (wide_len <= 0) {
+    return std::wstring();
+  }
+  std::wstring out(static_cast<size_t>(wide_len), L'\0');
+  if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+                            static_cast<int>(input.size()), out.data(),
+                            wide_len) <= 0) {
+    return std::wstring();
+  }
+  return out;
+}
+
+// Converts a null-terminated UTF-16 string to UTF-8.
+std::string WideToUtf8(const wchar_t* input, size_t length) {
+  if (input == nullptr || length == 0) {
+    return std::string();
+  }
+  const int utf8_len =
+      ::WideCharToMultiByte(CP_UTF8, 0, input, static_cast<int>(length),
+                            nullptr, 0, nullptr, nullptr);
+  if (utf8_len <= 0) {
+    return std::string();
+  }
+  std::string out(static_cast<size_t>(utf8_len), '\0');
+  if (::WideCharToMultiByte(CP_UTF8, 0, input, static_cast<int>(length),
+                            out.data(), utf8_len, nullptr, nullptr) <= 0) {
+    return std::string();
+  }
+  return out;
+}
+
+// Converts Windows FILETIME (100ns since 1601-01-01) to Unix epoch
+// milliseconds.
+int64_t FileTimeToUnixMs(const FILETIME& file_time) {
+  ULARGE_INTEGER value;
+  value.LowPart = file_time.dwLowDateTime;
+  value.HighPart = file_time.dwHighDateTime;
+  constexpr uint64_t kUnixEpochFileTime = 116444736000000000ULL;
+  constexpr uint64_t kMsPerSecond = 1000ULL;
+  if (value.QuadPart < kUnixEpochFileTime) {
+    return 0;
+  }
+  return static_cast<int64_t>((value.QuadPart - kUnixEpochFileTime) / 10000ULL);
+}
+
+// Best-effort extension -> MIME mapping shared by all three platforms.
+std::string MimeTypeForExtension(const std::string& extension) {
+  std::string ext;
+  ext.reserve(extension.size());
+  for (char c : extension) {
+    ext.push_back(static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c))));
+  }
+  static const std::map<std::string, std::string> table = {
+      {"txt", "text/plain"}, {"md", "text/markdown"}, {"csv", "text/csv"},
+      {"json", "application/json"}, {"xml", "application/xml"},
+      {"pdf", "application/pdf"}, {"zip", "application/zip"},
+      {"gz", "application/gzip"}, {"tar", "application/x-tar"},
+      {"7z", "application/x-7z-compressed"}, {"rar", "application/vnd.rar"},
+      {"doc", "application/msword"},
+      {"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+      {"xls", "application/vnd.ms-excel"},
+      {"xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+      {"ppt", "application/vnd.ms-powerpoint"},
+      {"pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+      {"mp3", "audio/mpeg"}, {"wav", "audio/wav"}, {"flac", "audio/flac"},
+      {"mp4", "video/mp4"}, {"mov", "video/quicktime"},
+      {"mkv", "video/x-matroska"}, {"webm", "video/webm"},
+      {"dart", "text/x-dart"}, {"swift", "text/x-swift"},
+      {"kt", "text/x-kotlin"}, {"cpp", "text/x-c"}, {"h", "text/x-c"},
+      {"py", "text/x-python"}, {"js", "text/javascript"},
+      {"ts", "text/typescript"}, {"html", "text/html"}, {"css", "text/css"},
+  };
+  auto it = table.find(ext);
+  return it == table.end() ? "application/octet-stream" : it->second;
+}
+
+// Extracts the extension (without the dot) of a file name.
+std::string ExtensionFromFileName(const std::string& file_name) {
+  const size_t dot = file_name.find_last_of('.');
+  if (dot == std::string::npos || dot + 1 >= file_name.size()) {
+    return std::string();
+  }
+  return file_name.substr(dot + 1);
+}
+
+// Builds a file metadata map using GetFileAttributesExW. Missing size /
+// lastModified keep their default nullopt representation; the caller adds an
+// errorCode when the attribute query fails.
+flutter::EncodableMap BuildFileMetadata(const std::string& path,
+                                        const std::string& file_name,
+                                        bool include_error_code) {
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("path")] = flutter::EncodableValue(path);
+  map[flutter::EncodableValue("name")] = flutter::EncodableValue(file_name);
+  map[flutter::EncodableValue("mimeType")] =
+      flutter::EncodableValue(MimeTypeForExtension(ExtensionFromFileName(file_name)));
+  map[flutter::EncodableValue("temp")] = flutter::EncodableValue(false);
+
+  std::wstring wide = Utf8ToWide(path);
+  WIN32_FILE_ATTRIBUTE_DATA attributes{};
+  if (!wide.empty() && ::GetFileAttributesExW(wide.c_str(), GetFileExInfoStandard,
+                                              &attributes) != 0) {
+    ULARGE_INTEGER size;
+    size.LowPart = attributes.nFileSizeLow;
+    size.HighPart = attributes.nFileSizeHigh;
+    map[flutter::EncodableValue("size")] =
+        flutter::EncodableValue(static_cast<int64_t>(size.QuadPart));
+    map[flutter::EncodableValue("lastModified")] =
+        flutter::EncodableValue(FileTimeToUnixMs(attributes.ftLastWriteTime));
+  } else if (include_error_code) {
+    map[flutter::EncodableValue("errorCode")] =
+        flutter::EncodableValue(std::string("READ_ERROR"));
+  }
+  return map;
+}
+
 }  // namespace
 
 ImageClipboardPlugin::ImageClipboardPlugin() = default;
@@ -788,6 +917,121 @@ ImageClipboardPlugin::SetImageStatus ImageClipboardPlugin::SetImage(
   return success ? SetImageStatus::kSuccess : SetImageStatus::kClipError;
 }
 
+bool ImageClipboardPlugin::HasFiles() {
+  return ::IsClipboardFormatAvailable(CF_HDROP);
+}
+
+std::vector<std::string> ImageClipboardPlugin::ReadFilePaths() {
+  std::vector<std::string> paths;
+  if (!::OpenClipboard(nullptr)) {
+    return paths;
+  }
+  HANDLE handle = ::GetClipboardData(CF_HDROP);
+  if (handle == nullptr) {
+    ::CloseClipboard();
+    return paths;
+  }
+  HDROP drop = static_cast<HDROP>(handle);
+  const UINT count = ::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+  for (UINT i = 0; i < count; ++i) {
+    const UINT length = ::DragQueryFileW(drop, i, nullptr, 0);
+    if (length == 0) {
+      continue;
+    }
+    std::vector<wchar_t> buffer(static_cast<size_t>(length) + 1, L'\0');
+    if (::DragQueryFileW(drop, i, buffer.data(), length + 1) != 0) {
+      std::string utf8 = WideToUtf8(buffer.data(), length);
+      if (!utf8.empty()) {
+        paths.push_back(std::move(utf8));
+      }
+    }
+  }
+  ::CloseClipboard();
+  return paths;
+}
+
+bool ImageClipboardPlugin::WriteFilePaths(
+    const std::vector<std::string>& paths) {
+  if (paths.empty()) {
+    return false;
+  }
+
+  // Serialize each path as UTF-16 (backslash separators stay native);
+  // every file name is NUL-terminated and the whole list gets one extra
+  // UTF-16 NUL (standard DROPFILES double-null terminator).
+  std::vector<uint8_t> file_list;
+  for (const std::string& path : paths) {
+    std::wstring wide = Utf8ToWide(path);
+    if (wide.empty()) {
+      return false;
+    }
+    const size_t byte_count = wide.size() * sizeof(wchar_t);
+    const size_t old_size = file_list.size();
+    file_list.resize(old_size + byte_count);
+    std::memcpy(file_list.data() + old_size, wide.data(), byte_count);
+    // 每个文件名必须以 UTF-16 NUL 结尾（2 字节）。
+    file_list.push_back(0);
+    file_list.push_back(0);
+  }
+  // 整个文件列表以额外的 UTF-16 NUL 结束（双 NUL 终止符）。
+  file_list.push_back(0);
+  file_list.push_back(0);
+
+  // Standard DROPFILES (shellapi.h): pFiles = offset of file list,
+  // fNC = FALSE, fWide = TRUE for UTF-16 paths.
+  const size_t header_size = sizeof(DROPFILES);
+  if (file_list.size() > (std::numeric_limits<DWORD>::max)() - header_size) {
+    return false;
+  }
+
+  HGLOBAL hdrop = ::GlobalAlloc(GMEM_MOVEABLE, header_size + file_list.size());
+  if (hdrop == nullptr) {
+    return false;
+  }
+  uint8_t* data = static_cast<uint8_t*>(::GlobalLock(hdrop));
+  if (data == nullptr) {
+    ::GlobalFree(hdrop);
+    return false;
+  }
+  DROPFILES header{};
+  header.pFiles = static_cast<DWORD>(header_size);
+  header.fNC = FALSE;
+  header.fWide = TRUE;
+  std::memcpy(data, &header, sizeof(header));
+  std::memcpy(data + header_size, file_list.data(), file_list.size());
+  ::GlobalUnlock(hdrop);
+
+  bool opened = false;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    if (::OpenClipboard(nullptr)) {
+      opened = true;
+      break;
+    }
+    if (attempt < 9) {
+      ::Sleep(10);
+    }
+  }
+  if (!opened) {
+    ::GlobalFree(hdrop);
+    return false;
+  }
+
+  bool success = false;
+  if (::EmptyClipboard()) {
+    HANDLE set_handle = ::SetClipboardData(CF_HDROP, hdrop);
+    // On success the clipboard owns the HGLOBAL; free it only on failure.
+    if (set_handle != nullptr) {
+      success = true;
+    } else {
+      ::GlobalFree(hdrop);
+    }
+  } else {
+    ::GlobalFree(hdrop);
+  }
+  ::CloseClipboard();
+  return success;
+}
+
 void ImageClipboardPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -845,6 +1089,55 @@ void ImageClipboardPlugin::HandleMethodCall(
         result->Error("CLIP_ERROR", "failed to write image to clipboard");
         break;
     }
+    return;
+  }
+  if (method == "hasFiles") {
+    result->Success(flutter::EncodableValue(HasFiles()));
+    return;
+  }
+  if (method == "getFiles") {
+    std::vector<std::string> paths = ReadFilePaths();
+    flutter::EncodableList files;
+    files.reserve(paths.size());
+    for (const std::string& path : paths) {
+      const size_t sep = path.find_last_of("\\/");
+      const std::string file_name =
+          sep == std::string::npos ? path : path.substr(sep + 1);
+      files.push_back(
+          flutter::EncodableValue(BuildFileMetadata(path, file_name, true)));
+    }
+    result->Success(flutter::EncodableValue(std::move(files)));
+    return;
+  }
+  if (method == "setFiles") {
+    const flutter::EncodableValue* arguments = call.arguments();
+    if (arguments == nullptr) {
+      result->Success(flutter::EncodableValue(false));
+      return;
+    }
+    std::vector<std::string> paths;
+    if (std::holds_alternative<flutter::EncodableList>(*arguments)) {
+      for (const flutter::EncodableValue& value :
+           std::get<flutter::EncodableList>(*arguments)) {
+        if (std::holds_alternative<std::string>(value)) {
+          paths.push_back(std::get<std::string>(value));
+        }
+      }
+    } else if (std::holds_alternative<flutter::EncodableMap>(*arguments)) {
+      const flutter::EncodableMap& map =
+          std::get<flutter::EncodableMap>(*arguments);
+      auto it = map.find(flutter::EncodableValue("paths"));
+      if (it != map.end() &&
+          std::holds_alternative<flutter::EncodableList>(it->second)) {
+        for (const flutter::EncodableValue& value :
+             std::get<flutter::EncodableList>(it->second)) {
+          if (std::holds_alternative<std::string>(value)) {
+            paths.push_back(std::get<std::string>(value));
+          }
+        }
+      }
+    }
+    result->Success(flutter::EncodableValue(WriteFilePaths(paths)));
     return;
   }
   result->NotImplemented();

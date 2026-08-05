@@ -56,6 +56,29 @@ class HistoryService {
       }
     }
 
+    // 文件按 ID + fileHash 去重（不走文本 trim；文件内容哈希跨设备稳定）
+    if (entry.type == ContentType.file &&
+        entry.fileHash != null &&
+        entry.fileHash!.isNotEmpty) {
+      final fileHashIndex = _entries.indexWhere(
+        (e) =>
+            e.type == ContentType.file &&
+            e.fileHash != null &&
+            e.fileHash == entry.fileHash,
+      );
+      if (fileHashIndex >= 0) {
+        final existing = _entries[fileHashIndex];
+        final merged =
+            entry.copyWith(isPinned: existing.isPinned || entry.isPinned);
+        _entries[fileHashIndex] = merged;
+        if (fileHashIndex != 0) {
+          final moved = _entries.removeAt(fileHashIndex);
+          _entries.insert(0, moved);
+        }
+        return;
+      }
+    }
+
     // 第三优先：文本按内容去重
     int existingIndex = -1;
     if (entry.type == ContentType.text && entry.content.isNotEmpty) {
