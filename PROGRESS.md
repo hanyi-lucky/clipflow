@@ -1,6 +1,6 @@
 # ClipFlow 开发进度
 
-> 更新时间：2026-07-21
+> 更新时间：2026-08-05
 
 ---
 
@@ -71,7 +71,7 @@
 
 ---
 
-## 测试覆盖（49 个测试）
+## 测试覆盖（当前 130 个测试）
 
 | 模块 | 测试文件 | 数量 |
 |------|---------|------|
@@ -87,7 +87,45 @@
 | ClipboardProvider Hybrid | clipboard_provider_hybrid_sync_test.dart | 6 |
 | Widget Smoke Test | widget_test.dart | 4 |
 
-> v1.1 已完成（Android 正式签名、服务器非 root 运行）。下一阶段：v1.2 体验优化。详见 `docs/version-roadmap.md`。
+### v1.3 新增测试（71 个，含对既有文件的增量）
+
+| 模块 | 测试文件 | 数量 |
+|------|---------|------|
+| ClipboardImage 模型 | clipboard_image_test.dart | 1 |
+| 图片压缩/稳定哈希 | image_compression_service_test.dart | 9 |
+| 图片通道封装 | image_clipboard_service_test.dart | 8 |
+| 同步图片链路 | sync_service_image_test.dart | 10 |
+| 本地密文缓存 | local_image_store_test.dart | 6 |
+| Provider 图片 | clipboard_provider_image_test.dart | 8 |
+| 长文本 /content 回补 | clipboard_provider_content_fallback_test.dart | 5 |
+| 删除持久化 | clipboard_provider_deletion_test.dart | 3 |
+| 图片预览页 | image_preview_screen_test.dart | 3 |
+| Monitor 文本守卫 | clipboard_monitor_test.dart | 8 |
+| 既有文件增量（加密字节/模型/历史） | 其余文件 | ~10 |
+
+> 下一阶段：v1.4 文件同步。详见 `docs/version-roadmap.md`。
+
+### v1.3 已完成功能
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 图片复制同步 | ✅ | macOS/Android 检测剪切板图片（含文件 URL），加密上传/下载，防回声闭环 |
+| 图片压缩 | ✅ | 纯 Dart `image` 包 + compute isolate；2048 长边 / JPEG q80 / alpha 转 PNG |
+| 缩略图预览 | ✅ | 256 缩略图独立加密存库；列表缩略图块 + 尺寸角标 |
+| 图片查看器 | ✅ | 全屏 InteractiveViewer；全图密文本地文件缓存 + 惰性加载 |
+| 图片筛选 | ✅ | 搜索栏"图片"类型筛选解锁（"文件"锁定，v1.4） |
+| 服务器图片字段 | ✅ | clipboard/history 新增 thumb/width/height/format/hash/history_id（无外键、ALTER 兼容） |
+| 历史列表瘦身 | ✅ | 图片行 content 剥离、文本行截断 10000；/history/:id/content 按需取全量 |
+| Windows 图片通道 | ✅ | windows/runner WIC 实现（hasImage/getImage/setImage），待 Windows 真机验证 |
+
+### v1.3 修复（2026-08-05）
+
+- macOS 图片通道运行时注册修复（根因：注册代码位于 `super.applicationDidFinishLaunching` 之后，该调用之后的代码不执行；改为注册先行 + 直接绑定 engine.binaryMessenger，运行时探针实测 hasImage=true）
+- 占位文本防护："[文件]"/"[图片]" 等不再作为文本上传；NUL/乱码（U+FFFD）文本跳过；hasImage 为真但读取失败时不落文本分支（三处路径一致，含 Android 原生回调）
+- 服务器历史列表瘦身：文本行 content 截断 10000 字符（2.98MB → 123KB）；上传不再截断密文（修复明文 3.7万–5万 字符被静默损坏的隐患）；超限返回 413
+- 长文本解密失败自动经 `/content` 拉全量重试（历史 + 垃圾箱）
+- 删除持久化：removeEntry 写回本地 + `deletedEntryIds` 集合，刷新/重启不再复活已删条目
+- 历史/垃圾箱请求超时放宽至 20s（其余保持 10s）
 
 ### v1.2 已完成功能
 
@@ -136,8 +174,13 @@ Node.js Server (Express + SQLite)
 | `lib/providers/clipboard_provider.dart` | 核心调度器：同步循环、历史管理、刷新 |
 | `lib/services/sync_service.dart` | 上传/下载/解密、DownloadResult |
 | `lib/services/clipboard_monitor.dart` | 剪切板监听、上传触发 |
+| `lib/services/image_compression_service.dart` | 图片压缩/缩略图/稳定哈希（isolate） |
+| `lib/services/image_clipboard_service.dart` | 图片通道封装（防御式类型转换） |
+| `lib/screens/image_preview_screen.dart` | 图片全屏查看器 |
+| `lib/repositories/local_image_store.dart` | 全图密文文件缓存 |
 | `windows/runner/resources/app_icon.ico` | Windows 应用图标 |
 | `WINDOWS_SETUP.md` | Windows 开发环境搭建指南 |
+| `server/smoke-test.sh` | 服务器冒烟测试（10 步断言） |
 | `lib/services/history_service.dart` | 内存历史列表、去重、排序 |
 | `lib/services/cloudbase_service.dart` | HTTP API 封装 |
 | `lib/screens/trash_screen.dart` | 垃圾箱页面 |
