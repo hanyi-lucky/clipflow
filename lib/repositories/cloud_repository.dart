@@ -88,4 +88,9 @@ class CloudRepository {
   Future<void> restoreHistoryEntry(String entryId) async {
     await _cloud.restoreHistoryEntry(entryId);
   }
+
+  /// 获取历史记录完整内容（图片全图密文）
+  Future<Map<String, dynamic>?> getHistoryEntryContent(String entryId) async {
+    return await _cloud.getHistoryEntryContent(entryId);
+  }
 }

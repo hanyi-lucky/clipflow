@@ -8,13 +8,18 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/clipboard_entry.dart';
+import '../models/clipboard_image.dart';
 import '../services/sync_service.dart';
 import '../services/encryption_service.dart';
 import '../services/history_service.dart';
 import '../services/clipboard_monitor.dart';
+import '../services/image_clipboard_service.dart';
+import '../services/image_compression_service.dart';
 import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
+import '../repositories/local_image_store.dart';
 import '../core/constants.dart';
+import '../core/exceptions.dart';
 import 'settings_provider.dart';
 
 /// Mixin providing default no-op implementations for WidgetsBindingObserver.
@@ -52,12 +57,18 @@ enum SyncStatus {
 }
 
 class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserver {
+  ClipboardProvider({LocalImageStore? imageStore})
+      : _localImageStore = imageStore ?? LocalImageStore();
+
   /// Convenience method to access ClipboardProvider from the widget tree
   static ClipboardProvider of(BuildContext context, {bool listen = true}) {
     return Provider.of<ClipboardProvider>(context, listen: listen);
   }
   final HistoryService _historyService = HistoryService(maxEntries: AppConstants.maxHistoryEntries);
   final EncryptionService _encryption = EncryptionService();
+  final ImageClipboardService _imageClipboardService = ImageClipboardService();
+  final ImageCompressionService _imageCompressionService = ImageCompressionService();
+  final LocalImageStore _localImageStore;
 
   ClipboardMonitor? _monitor;
   SyncService? _syncService;
@@ -80,6 +91,13 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   final Set<String> _recentlyDeletedHashes = {};
   int _consecutiveFailures = 0;
   bool _serverConnected = false;
+  bool _disposed = false;
+  // 并发保护
+  bool _isLoadingHistory = false;
+  bool _isRefreshing = false;
+  // 历史落盘节流
+  Timer? _saveDebounceTimer;
+  bool _savePending = false;
 
   List<ClipboardEntry> get history => _historyService.entries;
   SyncStatus get syncStatus => _syncStatus;
@@ -147,7 +165,10 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     for (final id in _selectedIds) {
       orderMap[id] = i++;
     }
-    final entries = _historyService.entries.where((e) => _selectedIds.contains(e.id)).toList();
+    // 多选拼接仅文本：图片条目不参与
+    final entries = _historyService.entries
+        .where((e) => _selectedIds.contains(e.id) && e.type == ContentType.text)
+        .toList();
     entries.sort((a, b) => (orderMap[a.id] ?? 0).compareTo(orderMap[b.id] ?? 0));
     return entries;
   }
@@ -186,6 +207,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     _monitor = ClipboardMonitor(onChanged: _onClipboardChanged, storage: storage);
     _monitor!.setSyncService(_syncService!);
     _monitor!.onContentSynced = _addSyncedToHistory;
+    _monitor!.onImageChanged = _onImageClipboardChanged;
     _monitor!.loadState();
     // Forward monitor state changes to UI
     _monitor!.addListener(_onMonitorChanged);
@@ -222,11 +244,38 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   /// 加载后合并本地独有的条目（服务器没有的）。
   Future<void> _loadHistoryFromServer() async {
     if (_cloudRepo == null) return;
+    if (_isLoadingHistory) return; // 防重入
+    _isLoadingHistory = true;
     try {
       final serverEntries = await _cloudRepo!.getHistoryEntries(limit: 200);
 
+      // 读取持久化的已删 ID 集合；若服务器仍返回这些行，再次尝试删除
+      final originalDeletedIds = Set<String>.from(
+          _storage?.deletedEntryIds ?? <String>{});
+      if (originalDeletedIds.isNotEmpty) {
+        final stillOnServer = serverEntries
+            .where((e) => originalDeletedIds.contains(e['id'] as String))
+            .toList();
+        final failedIds = Set<String>.from(originalDeletedIds);
+        for (final entry in stillOnServer) {
+          final eid = entry['id'] as String;
+          try {
+            await _cloudRepo!.deleteHistoryEntry(eid);
+            failedIds.remove(eid);
+          } catch (_) {
+            // 删除失败保留 ID，下次 refresh 重试
+          }
+        }
+        await _storage?.setDeletedEntryIds(failedIds);
+      }
+
+      // 过滤：排除所有在原始已删集合中的条目（无论重删是否成功）
+      final filteredEntries = serverEntries
+          .where((e) => !originalDeletedIds.contains(e['id'] as String))
+          .toList();
+
       // 保存当前本地独有的条目（服务器没有的）
-      final serverIds = serverEntries.map((e) => e['id'] as String).toSet();
+      final serverIds = filteredEntries.map((e) => e['id'] as String).toSet();
       final localOnlyEntries = _historyService.entries
           .where((e) => !serverIds.contains(e.id))
           .toList();
@@ -236,30 +285,96 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       // 反转顺序：从最旧到最新处理
       // 这样当 addEntry 的去重逻辑遇到重复内容时，
       // 最新条目的设备名会覆盖最旧条目的设备名
-      final reversed = serverEntries.reversed.toList();
+      final reversed = filteredEntries.reversed.toList();
+      final needsFallback = <Map<String, dynamic>>[];
 
       for (final entry in reversed) {
-        final content = entry['content'] as String? ?? '';
-        if (content.isEmpty) continue;
+        final type = entry['type'] as String? ?? 'text';
 
-        // 解密内容，失败则跳过该条目
-        String decryptedContent;
-        try {
-          decryptedContent = await _syncService!.decryptContent(content);
-        } catch (e) {
+        // 图片行：只解密缩略图，全图惰性加载
+        if (type == ContentType.image.name) {
+          final thumbBase64 = entry['thumb'] as String? ?? '';
+          if (thumbBase64.isEmpty) continue;
+          Uint8List thumbBytes;
+          try {
+            thumbBytes = await _syncService!.decryptImage(thumbBase64);
+          } catch (e) {
+            continue;
+          }
+          _historyService.addEntry(ClipboardEntry(
+            id: entry['id'] as String? ?? const Uuid().v4(),
+            content: '',
+            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+            sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+            timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+            type: ContentType.image,
+            imageThumbBytes: thumbBytes,
+            imageThumbEncryptedBase64: thumbBase64,
+            imageWidth: entry['width'] as int?,
+            imageHeight: entry['height'] as int?,
+            imageFormat: entry['format'] as String?,
+            stableHash: entry['hash'] as String?,
+          ));
           continue;
         }
 
-        _historyService.addEntry(ClipboardEntry(
-          id: entry['id'] as String? ?? const Uuid().v4(),
-          content: decryptedContent,
-          sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-          sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-          sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-          timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-          type: ContentType.text,
-          isPinned: (entry['pinned'] as int?) == 1,
-        ));
+        final content = entry['content'] as String? ?? '';
+        if (content.isEmpty) continue;
+
+        // 先尝试直接解密（大部分短密文能成功，无需网络回补）
+        String? decryptedContent;
+        try {
+          decryptedContent = await _syncService!.decryptContent(content);
+        } catch (_) {
+          // 直接解密失败，收集待回补
+        }
+
+        if (decryptedContent != null) {
+          _historyService.addEntry(ClipboardEntry(
+            id: entry['id'] as String? ?? const Uuid().v4(),
+            content: decryptedContent,
+            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+            sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+            timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+            type: ContentType.text,
+            isPinned: (entry['pinned'] as int?) == 1,
+          ));
+        } else {
+          // 收集待回补条目，后续并行拉取
+          needsFallback.add(entry);
+        }
+      }
+
+      // 第二阶段：并行回补解密失败的文本条目（/content 拉全量密文）
+      if (needsFallback.isNotEmpty) {
+        const concurrency = 4;
+        for (var i = 0; i < needsFallback.length; i += concurrency) {
+          final batch = needsFallback.skip(i).take(concurrency);
+          final results = await Future.wait(
+            batch.map((entry) async {
+              final entryId = entry['id'] as String?;
+              final content = entry['content'] as String;
+              final result = await _fetchAndDecryptContent(entryId, content);
+              return (entry: entry, decrypted: result);
+            }),
+          );
+          for (final r in results) {
+            if (r.decrypted == null) continue;
+            final entry = r.entry;
+            _historyService.addEntry(ClipboardEntry(
+              id: entry['id'] as String? ?? const Uuid().v4(),
+              content: r.decrypted!,
+              sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+              sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+              sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+              type: ContentType.text,
+              isPinned: (entry['pinned'] as int?) == 1,
+            ));
+          }
+        }
       }
 
       // 合并本地独有的条目（服务器没有的）
@@ -267,7 +382,14 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
         _historyService.addEntry(entry);
       }
 
-      await _saveHistory();
+      // 加载完成是关键操作，立即落盘（绕过节流）
+      _saveDebounceTimer?.cancel();
+      _savePending = false;
+      await _storage?.setHistoryJson(_historyService.toJson());
+      // 清理本地全图缓存中已不在历史里的孤儿文件
+      await _localImageStore.cleanupOrphans(
+        _historyService.entries.map((e) => e.id).toSet(),
+      );
     } catch (e) {
       _errorMessage = '从服务器加载历史失败: $e';
       notifyListeners();
@@ -278,6 +400,47 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           _historyService.fromJson(savedHistory);
         }
       }
+    } finally {
+      _isLoadingHistory = false;
+    }
+  }
+
+  /// 解密文本密文。列表响应中的 content 可能被服务端截断（≤10000 字符），
+  /// 直接解密失败时按 id 经 GET /api/history/:id/content 拉全量密文重试一次；
+  /// 仍失败返回 null（由调用方决定跳过条目或降级显示）。
+  Future<String?> _decryptTextContentWithFallback(
+    String? entryId,
+    String content,
+  ) async {
+    try {
+      return await _syncService!.decryptContent(content);
+    } catch (_) {
+      // 落入回补路径：可能是列表截断导致的 GCM 认证失败
+    }
+    if (entryId == null || _cloudRepo == null) return null;
+    try {
+      final fullEntry = await _cloudRepo!.getHistoryEntryContent(entryId);
+      final fullContent = fullEntry?['content'] as String? ?? '';
+      if (fullContent.isEmpty) return null;
+      return await _syncService!.decryptContent(fullContent);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 从服务器拉取全量密文并解密（用于并行回补，假设直接解密已失败）。
+  Future<String?> _fetchAndDecryptContent(
+    String? entryId,
+    String content,
+  ) async {
+    if (entryId == null || _cloudRepo == null) return null;
+    try {
+      final fullEntry = await _cloudRepo!.getHistoryEntryContent(entryId);
+      final fullContent = fullEntry?['content'] as String? ?? '';
+      if (fullContent.isEmpty) return null;
+      return await _syncService!.decryptContent(fullContent);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -388,6 +551,76 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     });
   }
 
+  void _onImageClipboardChanged(ClipboardImage image) {
+    _uploadDebounce?.cancel();
+    _uploadDebounce = Timer(AppConstants.uploadDebounce, () {
+      _uploadImage(image);
+    });
+  }
+
+  Future<void> _uploadImage(ClipboardImage image) async {
+    if (_syncService == null) return;
+    _setStatus(SyncStatus.syncing);
+
+    try {
+      final compressed = await _imageCompressionService.compress(image.bytes);
+
+      if (compressed.bytes.length > AppConstants.maxImageBytes) {
+        _errorMessage =
+            '图片超过 ${AppConstants.maxImageBytes ~/ (1024 * 1024)}MB，已拒绝上传';
+        _serverConnected = false;
+        _setStatus(SyncStatus.error);
+        return;
+      }
+
+      // 去重键用跨重编码稳定的像素内容哈希（P1 根治回声）
+      final imageHash = compressed.stableHash;
+      final result = await _syncService!.uploadImage(
+        bytes: compressed.bytes,
+        thumbBytes: compressed.thumbBytes,
+        width: compressed.width,
+        height: compressed.height,
+        format: compressed.format,
+        stableHash: imageHash,
+      );
+
+      // 只有真正上传成功才创建本地历史记录
+      if (result != null) {
+        _historyService.addEntry(ClipboardEntry(
+          id: result.historyId,
+          content: '',
+          sourceDeviceId: _syncService!.deviceId,
+          sourceDeviceName: _syncService!.deviceName,
+          sourcePlatform: Platform.operatingSystem,
+          timestamp: DateTime.now(),
+          type: ContentType.image,
+          imageThumbBytes: compressed.thumbBytes,
+          imageThumbEncryptedBase64: result.encryptedThumbBase64,
+          imageWidth: compressed.width,
+          imageHeight: compressed.height,
+          imageFormat: compressed.format,
+          stableHash: imageHash,
+        ));
+        // 全图密文只落本地文件，不写 SharedPreferences
+        await _localImageStore.save(result.historyId, result.encryptedBase64);
+        _saveHistory();
+        notifyListeners();
+      }
+
+      _serverConnected = true;
+      _setStatus(SyncStatus.connected);
+    } on ImageCompressionException catch (e) {
+      // 无法解码的图片跳过，不影响文本路径
+      debugPrint('[CLIP-PROVIDER] Image compression failed: $e');
+      _serverConnected = true;
+      _setStatus(SyncStatus.connected);
+    } catch (e) {
+      _errorMessage = e.toString();
+      _serverConnected = false;
+      _setStatus(SyncStatus.error);
+    }
+  }
+
   Future<void> _uploadContent(String content) async {
     if (_syncService == null) return;
 
@@ -412,7 +645,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
           timestamp: DateTime.now(),
           type: ContentType.text,
         ));
-        await _saveHistory();
+        _saveHistory();
         notifyListeners();
       }
 
@@ -435,6 +668,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   }
 
   void _scheduleNextSync() {
+    if (_disposed) return;
     final delay = _consecutiveFailures == 0
         ? AppConstants.pollInterval
         : Duration(
@@ -445,8 +679,14 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   }
 
   Future<void> _syncTick() async {
+    if (_disposed) return;
     if (_syncService == null || _cloudRepo == null) return;
     if (_syncStatus == SyncStatus.paused) {
+      _scheduleNextSync();
+      return;
+    }
+    // 刷新进行中时跳过本轮，避免与 refresh 并发写历史
+    if (_isRefreshing || _isLoadingHistory) {
       _scheduleNextSync();
       return;
     }
@@ -459,40 +699,26 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
         for (final id in result.deletedIds) {
           _historyService.removeEntry(id);
         }
-        await _saveHistory();
+        _saveHistory();
         notifyListeners();
       }
 
       // 处理恢复同步：将其他设备恢复的条目添加回本地历史
       if (result != null && result.restoredEntries.isNotEmpty) {
-        for (final entry in result.restoredEntries) {
-          final content = entry['content'] as String? ?? '';
-          if (content.isEmpty) continue;
-          // 解密内容
-          String decryptedContent;
-          try {
-            decryptedContent = await _syncService!.decryptContent(content);
-          } catch (e) {
-            continue;
-          }
-          // 跳过已删除的内容
-          final restoredHash = sha256.convert(utf8.encode(decryptedContent)).toString();
-          if (_recentlyDeletedHashes.contains(restoredHash)) continue;
-          _historyService.addEntry(ClipboardEntry(
-            id: entry['id'] as String? ?? const Uuid().v4(),
-            content: decryptedContent,
-            sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-            sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-            sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-            timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-            type: ContentType.text,
-          ));
-        }
-        await _saveHistory();
-        notifyListeners();
+        await _handleRestoredEntries(result.restoredEntries);
       }
 
-      if (result != null && result.content.isNotEmpty) {
+      if (result != null &&
+          result.type == ContentType.image &&
+          result.imageBytes != null) {
+        final imageHash = result.imageHash ?? '';
+        _syncService!.markAsDownloadedHash(imageHash);
+        if (!_recentlyDeletedHashes.contains(imageHash)) {
+          await _processImageDownload(result);
+          // 图片完整写入剪切板并成功入历史后才推进时间戳
+          _syncService!.markAsReceived(result.timestamp);
+        }
+      } else if (result != null && result.content.isNotEmpty) {
         // 跳过已删除的内容
         final syncContentHash = sha256.convert(utf8.encode(result.content)).toString();
         if (_recentlyDeletedHashes.contains(syncContentHash)) {
@@ -517,7 +743,7 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
             timestamp: result.timestamp,
             type: ContentType.text,
           ));
-          await _saveHistory();
+          _saveHistory();
           notifyListeners();
           // 内容处理成功后才标记时间戳，防止处理失败导致该内容被永久跳过
           _syncService!.markAsReceived(result.timestamp);
@@ -529,18 +755,164 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     } catch (e) {
       _consecutiveFailures++;
       _errorMessage = e.toString();
-      _serverConnected = false;
-      // 区分网络不可达（灰点）和服务端错误（红点）
-      if (e is SocketException || e is TimeoutException) {
-        _setStatus(SyncStatus.disconnected);
-      } else {
-        _setStatus(SyncStatus.error);
+      // 连续失败 ≥ 2 次才降级为 disconnected/error，首次失败保持原状态
+      if (_consecutiveFailures >= 2) {
+        _serverConnected = false;
+        if (e is SocketException || e is TimeoutException) {
+          _setStatus(SyncStatus.disconnected);
+        } else {
+          _setStatus(SyncStatus.error);
+        }
       }
     }
     _scheduleNextSync();
   }
 
+  /// 处理恢复同步条目：按 type 分流。
+  ///
+  /// image 行用缩略图密文重建条目（thumb 解密），全图密文按服务器 ID
+  /// 落盘，恢复后全屏查看无需再拉服务器；text 行为保持原逻辑。
+  Future<void> _handleRestoredEntries(
+    List<Map<String, dynamic>> restoredEntries,
+  ) async {
+    var changed = false;
+    for (final entry in restoredEntries) {
+      final type = entry['type'] as String? ?? 'text';
+
+      if (type == ContentType.image.name) {
+        final entryId = entry['id'] as String? ?? const Uuid().v4();
+        final hash = entry['hash'] as String? ?? '';
+        if (hash.isNotEmpty && _recentlyDeletedHashes.contains(hash)) {
+          continue;
+        }
+        final thumbBase64 = entry['thumb'] as String? ?? '';
+        if (thumbBase64.isEmpty) continue;
+        Uint8List thumbBytes;
+        try {
+          thumbBytes = await _syncService!.decryptImage(thumbBase64);
+        } catch (e) {
+          continue;
+        }
+        final fullEncrypted = entry['content'] as String?;
+
+        // 条目已存在（如 refresh 先全量加载），只补全图缓存
+        if (_historyService.entries.any((e) => e.id == entryId)) {
+          if (fullEncrypted != null && fullEncrypted.isNotEmpty) {
+            await _localImageStore.save(entryId, fullEncrypted);
+          }
+          continue;
+        }
+
+        _historyService.addEntry(ClipboardEntry(
+          id: entryId,
+          content: '',
+          sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+          sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+          sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+          timestamp:
+              DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+          type: ContentType.image,
+          imageThumbBytes: thumbBytes,
+          imageThumbEncryptedBase64: thumbBase64,
+          imageWidth: entry['width'] as int?,
+          imageHeight: entry['height'] as int?,
+          imageFormat: entry['format'] as String?,
+          stableHash: hash.isEmpty ? null : hash,
+        ));
+        if (fullEncrypted != null && fullEncrypted.isNotEmpty) {
+          await _localImageStore.save(entryId, fullEncrypted);
+        }
+        changed = true;
+        continue;
+      }
+
+      final content = entry['content'] as String? ?? '';
+      if (content.isEmpty) continue;
+      // 解密内容
+      String decryptedContent;
+      try {
+        decryptedContent = await _syncService!.decryptContent(content);
+      } catch (e) {
+        continue;
+      }
+      // 跳过已删除的内容
+      final restoredHash = sha256.convert(utf8.encode(decryptedContent)).toString();
+      if (_recentlyDeletedHashes.contains(restoredHash)) continue;
+      _historyService.addEntry(ClipboardEntry(
+        id: entry['id'] as String? ?? const Uuid().v4(),
+        content: decryptedContent,
+        sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
+        sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
+        sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
+        timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
+        type: ContentType.text,
+      ));
+      changed = true;
+    }
+    if (changed) {
+      // 恢复是关键操作，立即落盘（绕过节流）
+      _saveDebounceTimer?.cancel();
+      _savePending = false;
+      await _storage?.setHistoryJson(_historyService.toJson());
+      notifyListeners();
+    }
+  }
+
+  /// 处理下载的图片：写剪切板、入历史、全图密文落盘
+  Future<void> _processImageDownload(DownloadResult result) async {
+    final imageBytes = result.imageBytes;
+    if (imageBytes == null) return;
+
+    _monitor?.pause();
+    await _imageClipboardService.setImage(
+      imageBytes,
+      format: result.imageFormat ?? 'png',
+    );
+    // 回读实际写入剪切板的字节并登记循环防护：
+    // macOS/Android 写入时会重编码，回读哈希才是监听器下一次比对的键域
+    final readBack = await _imageClipboardService.getImage();
+    if (readBack != null && readBack.bytes.isNotEmpty) {
+      _monitor?.markImageAsWritten(readBack.bytes);
+    }
+    await Future.delayed(const Duration(milliseconds: 50));
+    _monitor?.resume();
+
+    // 下载条目与服务器历史行 ID 对齐（旧数据无 history_id 时回退 UUID）
+    final entryId = (result.id != null && result.id!.isNotEmpty)
+        ? result.id!
+        : const Uuid().v4();
+
+    final encrypted = result.imageEncryptedBase64;
+    if (encrypted != null && encrypted.isNotEmpty) {
+      await _localImageStore.save(entryId, encrypted);
+    }
+
+    // 已有同 ID 条目（如 refresh 先全量加载），只补缓存，不重复入史
+    if (_historyService.entries.any((e) => e.id == entryId)) {
+      return;
+    }
+
+    _historyService.addEntry(ClipboardEntry(
+      id: entryId,
+      content: '',
+      sourceDeviceId: result.sourceDeviceId,
+      sourceDeviceName: result.sourceDeviceName,
+      sourcePlatform: result.sourcePlatform,
+      timestamp: result.timestamp,
+      type: ContentType.image,
+      imageThumbBytes: result.imageThumbBytes,
+      imageWidth: result.imageWidth,
+      imageHeight: result.imageHeight,
+      imageFormat: result.imageFormat,
+      stableHash: result.imageHash,
+    ));
+    _saveHistory();
+    notifyListeners();
+  }
+
   Future<void> refresh() async {
+    if (_isRefreshing) return; // 防重入
+    _isRefreshing = true;
     _setStatus(SyncStatus.syncing);
     // 暂停 sync loop 防止并发
     _nextSyncTimer?.cancel();
@@ -551,11 +923,16 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
       if (_syncService != null) {
         final result = await _syncService!.downloadLatestContent();
         if (result != null && result.hasContent) {
-          _monitor?.pause();
-          await Clipboard.setData(ClipboardData(text: result.content));
-          await Future.delayed(const Duration(milliseconds: 50));
-          _monitor?.resume();
-          _syncService!.markAsDownloaded(result.content);
+          if (result.type == ContentType.image) {
+            _syncService!.markAsDownloadedHash(result.imageHash ?? '');
+            await _processImageDownload(result);
+          } else {
+            _monitor?.pause();
+            await Clipboard.setData(ClipboardData(text: result.content));
+            await Future.delayed(const Duration(milliseconds: 50));
+            _monitor?.resume();
+            _syncService!.markAsDownloaded(result.content);
+          }
         }
         // 处理删除同步
         if (result != null && result.hasDeletions) {
@@ -565,36 +942,22 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
         }
         // 处理恢复同步
         if (result != null && result.hasRestorations) {
-          for (final entry in result.restoredEntries) {
-            final content = entry['content'] as String? ?? '';
-            if (content.isEmpty) continue;
-            try {
-              final decrypted = await _syncService!.decryptContent(content);
-              _historyService.addEntry(ClipboardEntry(
-                id: entry['id'] as String? ?? const Uuid().v4(),
-                content: decrypted,
-                sourceDeviceId: entry['source_device'] as String? ?? 'unknown',
-                sourceDeviceName: entry['source_device_name'] as String? ?? 'Unknown',
-                sourcePlatform: entry['source_platform'] as String? ?? 'unknown',
-                timestamp: DateTime.fromMillisecondsSinceEpoch(entry['timestamp'] as int? ?? 0),
-                type: ContentType.text,
-              ));
-            } catch (e) {
-              continue;
-            }
-          }
+          await _handleRestoredEntries(result.restoredEntries);
         }
       }
-      await _saveHistory();
+      // 刷新完成是关键操作，立即落盘（绕过节流）
+      _saveDebounceTimer?.cancel();
+      _savePending = false;
+      await _storage?.setHistoryJson(_historyService.toJson());
       _serverConnected = true;
       _setStatus(SyncStatus.connected);
     } catch (e) {
+      // 不无条件置 error/disconnected，保留原状态（避免单次失败砸状态灯）
       _errorMessage = e.toString();
-      _serverConnected = false;
-      _setStatus(SyncStatus.error);
     }
     // 恢复 sync loop
     _consecutiveFailures = 0;
+    _isRefreshing = false;
     _scheduleNextSync();
     notifyListeners();
   }
@@ -602,9 +965,44 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   Future<void> copyEntry(String id) async {
     final entry = _historyService.entries.firstWhere((e) => e.id == id);
     _monitor?.pause();
-    await Clipboard.setData(ClipboardData(text: entry.content));
+    if (entry.type == ContentType.image) {
+      final bytes = await loadFullImageBytes(id);
+      if (bytes != null) {
+        await _imageClipboardService.setImage(
+          bytes,
+          format: entry.imageFormat ?? 'png',
+        );
+        // 同样回读登记防护，避免历史复制图片触发回声
+        final readBack = await _imageClipboardService.getImage();
+        if (readBack != null && readBack.bytes.isNotEmpty) {
+          _monitor?.markImageAsWritten(readBack.bytes);
+        }
+      }
+    } else {
+      await Clipboard.setData(ClipboardData(text: entry.content));
+    }
     await Future.delayed(const Duration(milliseconds: 50));
     _monitor?.resume();
+  }
+
+  /// 加载全图字节：本地缓存优先，未命中则从服务器拉取并缓存
+  Future<Uint8List?> loadFullImageBytes(String entryId) async {
+    if (_syncService == null || _cloudRepo == null) return null;
+    try {
+      final cached = await _localImageStore.load(entryId);
+      if (cached != null && cached.isNotEmpty) {
+        return await _syncService!.decryptImageIsolate(cached);
+      }
+
+      final serverEntry = await _cloudRepo!.getHistoryEntryContent(entryId);
+      final encrypted = serverEntry?['content'] as String?;
+      if (encrypted == null || encrypted.isEmpty) return null;
+
+      await _localImageStore.save(entryId, encrypted);
+      return await _syncService!.decryptImageIsolate(encrypted);
+    } catch (e) {
+      return null;
+    }
   }
 
   Future<void> togglePin(String id) async {
@@ -630,11 +1028,29 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     }
     _historyService.removeEntry(id);
     _selectedIds.remove(id);
+    // 删除是关键操作，立即落盘（绕过节流）
+    _saveDebounceTimer?.cancel();
+    _savePending = false;
+    await _storage?.setHistoryJson(_historyService.toJson());
+    // 持久化已删 ID，防止重启后 _loadHistoryFromServer 把它复活
+    if (_storage != null) {
+      final deletedIds = _storage!.deletedEntryIds;
+      deletedIds.add(id);
+      await _storage!.setDeletedEntryIds(deletedIds);
+    }
     notifyListeners();
     try {
       await _cloudRepo?.deleteHistoryEntry(id);
+      // 服务器确认删除后从持久化集合移除
+      if (_storage != null) {
+        final ids = _storage!.deletedEntryIds;
+        ids.remove(id);
+        await _storage!.setDeletedEntryIds(ids);
+      }
+      // 同步删除本地全图缓存
+      await _localImageStore.delete(id);
     } catch (e) {
-      // 乐观更新，失败不回滚
+      // 乐观更新，失败不回滚（集合保留，下次 refresh 会重试删除）
     }
   }
 
@@ -658,15 +1074,32 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
     if (_cloudRepo == null) return [];
     try {
       final entries = await _cloudRepo!.getTrashEntries();
-      // 解密每条内容
       for (final entry in entries) {
+        final type = entry['type'] as String? ?? 'text';
+        // 图片行：content 已被服务器剥离，用缩略图密文补预览
+        if (type == ContentType.image.name) {
+          final thumbBase64 = entry['thumb'] as String? ?? '';
+          if (thumbBase64.isNotEmpty && _syncService != null) {
+            try {
+              entry['imageThumbBytes'] =
+                  await _syncService!.decryptImage(thumbBase64);
+              entry['imageFormat'] = entry['format'];
+              entry['imageWidth'] = entry['width'];
+              entry['imageHeight'] = entry['height'];
+            } catch (e) {
+              // 垃圾箱缩略图解密失败仅降级为空白预览
+            }
+          }
+          continue;
+        }
+        // 解密文本内容：列表密文可能被服务端截断，失败时按 id 回补全量密文
         final encrypted = entry['content'] as String? ?? '';
         if (encrypted.isNotEmpty && _syncService != null) {
-          try {
-            entry['content'] = await _syncService!.decryptContent(encrypted);
-          } catch (e) {
-            entry['content'] = '[解密失败]';
-          }
+          final decrypted = await _decryptTextContentWithFallback(
+            entry['id'] as String?,
+            encrypted,
+          );
+          entry['content'] = decrypted ?? '[解密失败]';
         }
       }
       return entries;
@@ -737,21 +1170,42 @@ class ClipboardProvider extends ChangeNotifier with _DefaultWidgetsBindingObserv
   }
 
   void _setStatus(SyncStatus status) {
+    if (_disposed) return;
     if (_syncStatus != status) {
       _syncStatus = status;
       notifyListeners();
     }
   }
 
-  Future<void> _saveHistory() async {
+  /// 节流落盘：800ms 内多次变更只写一次 SharedPreferences
+  void _saveHistory() {
+    _savePending = true;
+    _saveDebounceTimer?.cancel();
+    _saveDebounceTimer = Timer(const Duration(milliseconds: 800), () {
+      _flushHistoryNow();
+    });
+  }
+
+  /// 立即落盘（dispose / refresh 结束 / 删除恢复等关键路径调用）
+  Future<void> _flushHistoryNow() async {
+    _saveDebounceTimer?.cancel();
+    if (!_savePending) return;
+    _savePending = false;
     await _storage?.setHistoryJson(_historyService.toJson());
   }
 
   @override
   void dispose() {
+    _disposed = true;
     _uploadDebounce?.cancel();
     _syncTimer?.cancel();
     _nextSyncTimer?.cancel();
+    _saveDebounceTimer?.cancel();
+    // 立即落盘未保存的历史
+    if (_savePending) {
+      _storage?.setHistoryJson(_historyService.toJson());
+      _savePending = false;
+    }
     _monitor?.removeListener(_onMonitorChanged);
     _monitor?.stop();
     _monitor?.dispose();

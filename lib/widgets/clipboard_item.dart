@@ -57,6 +57,58 @@ class _ClipboardItemState extends State<ClipboardItem> {
     final content = widget.entry.content;
     final query = widget.searchQuery?.toLowerCase();
 
+    // 图片行：缩略图块 + 尺寸角标，不参与文本高亮
+    if (widget.entry.type == ContentType.image) {
+      final thumb = widget.entry.imageThumbBytes;
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.05)
+              : Colors.black.withValues(alpha: 0.03),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: thumb != null
+                  ? Image.memory(
+                      thumb,
+                      width: 72,
+                      height: 72,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          _imagePlaceholder(theme),
+                    )
+                  : _imagePlaceholder(theme),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '图片',
+                    style: theme.textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${widget.entry.imageWidth ?? '-'} × '
+                    '${widget.entry.imageHeight ?? '-'}',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     // Build text spans with optional highlight
     TextSpan buildHighlightedText() {
       if (query == null || query.isEmpty) {
@@ -148,6 +200,19 @@ class _ClipboardItemState extends State<ClipboardItem> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _imagePlaceholder(ThemeData theme) {
+    return Container(
+      width: 72,
+      height: 72,
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Icon(
+        Icons.image_outlined,
+        size: 32,
+        color: theme.colorScheme.outlineVariant,
       ),
     );
   }

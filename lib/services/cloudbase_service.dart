@@ -43,8 +43,14 @@ class CloudBaseService {
     }
   }
 
-  /// 发送 HTTP 请求（10 秒超时，防止阻塞同步循环）
-  Future<http.Response> _sendRequest(String method, Uri uri, {Map<String, String>? headers, Object? body}) async {
+  /// 发送 HTTP 请求（默认 10 秒超时，防止阻塞同步循环）
+  Future<http.Response> _sendRequest(
+    String method,
+    Uri uri, {
+    Map<String, String>? headers,
+    Object? body,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
     Future<http.Response> request;
     switch (method) {
       case 'GET':
@@ -62,24 +68,41 @@ class CloudBaseService {
       default:
         throw Exception('Unsupported method: $method');
     }
-    return request.timeout(const Duration(seconds: 10));
+    return request.timeout(timeout);
   }
 
   /// 调用 API（token 失效时自动重新登录并重试）
-  Future<Map<String, dynamic>> _callApi(String method, String path, {Map<String, dynamic>? body}) async {
+  Future<Map<String, dynamic>> _callApi(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
     final uri = Uri.parse('$_baseUrl$path');
     final headers = {
       'Content-Type': 'application/json',
       if (_token != null) 'Authorization': 'Bearer $_token',
     };
 
-    var response = await _sendRequest(method, uri, headers: headers, body: body != null ? jsonEncode(body) : null);
+    var response = await _sendRequest(
+      method,
+      uri,
+      headers: headers,
+      body: body != null ? jsonEncode(body) : null,
+      timeout: timeout,
+    );
 
     // token 失效 → 自动重新登录并重试一次
     if (response.statusCode == 401 && _userId != null) {
       await signInAnonymously(userId: _userId);
       headers['Authorization'] = 'Bearer $_token';
-      response = await _sendRequest(method, uri, headers: headers, body: body != null ? jsonEncode(body) : null);
+      response = await _sendRequest(
+        method,
+        uri,
+        headers: headers,
+        body: body != null ? jsonEncode(body) : null,
+        timeout: timeout,
+      );
     }
 
     if (response.statusCode != 200) {
@@ -159,6 +182,13 @@ class CloudBaseService {
     }
   }
 
+  /// 获取历史记录完整内容（图片全图密文）
+  Future<Map<String, dynamic>?> getHistoryEntryContent(String entryId) async {
+    final result = await _callApi('GET', '/history/$entryId/content');
+    if (result['code'] != 'SUCCESS') return null;
+    return result['data'] as Map<String, dynamic>?;
+  }
+
   /// 查询文档列表（兼容旧接口）
   Future<List<Map<String, dynamic>>> queryDocuments(
     String collection, {
@@ -168,12 +198,21 @@ class CloudBaseService {
     int limit = 100,
   }) async {
     if (collection == 'history') {
-      final result = await _callApi('GET', '/history?limit=$limit');
+      // 历史列表可能包含大体积条目，放宽到 20 秒（其他请求保持 10 秒）
+      final result = await _callApi(
+        'GET',
+        '/history?limit=$limit',
+        timeout: const Duration(seconds: 20),
+      );
       if (result['code'] != 'SUCCESS') return [];
       final records = result['data']['records'] as List? ?? [];
       return records.cast<Map<String, dynamic>>();
     } else if (collection == 'trash') {
-      final result = await _callApi('GET', '/history/trash');
+      final result = await _callApi(
+        'GET',
+        '/history/trash',
+        timeout: const Duration(seconds: 20),
+      );
       if (result['code'] != 'SUCCESS') return [];
       final records = result['data']['records'] as List? ?? [];
       return records.cast<Map<String, dynamic>>();

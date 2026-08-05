@@ -186,10 +186,11 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
             _TypeOption(
               label: '图片',
               icon: Icons.image_outlined,
-              isSelected: false,
-              enabled: false,
-              trailing: Icon(Icons.lock_outline, size: 16, color: cs.outline),
-              onTap: () {},
+              isSelected: provider.activeTypeFilter == ContentType.image,
+              onTap: () {
+                provider.setTypeFilter(ContentType.image);
+                Navigator.pop(context);
+              },
             ),
             _TypeOption(
               label: '文件',

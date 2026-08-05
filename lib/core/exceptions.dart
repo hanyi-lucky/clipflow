@@ -25,3 +25,7 @@ class DecryptionException implements Exception {
   @override
   String toString() => 'DecryptionException: $message';
 }
+
+class ImageCompressionException extends ClipboardException {
+  ImageCompressionException(super.message) : super(code: 'IMAGE_COMPRESS_ERROR');
+}

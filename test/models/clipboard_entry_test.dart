@@ -62,5 +62,81 @@ void main() {
       expect(pinned.id, equals(entry.id));
       expect(pinned.content, equals(entry.content));
     });
+
+    test('contentHash should use stableHash when present', () {
+      final entry = ClipboardEntry(
+        id: '1',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'M',
+        timestamp: DateTime.now(),
+        type: ContentType.image,
+        stableHash: 'stable-hash-123',
+      );
+
+      expect(entry.contentHash, equals('stable-hash-123'));
+    });
+
+    test('toMap and fromMap should round-trip image fields', () {
+      final entry = ClipboardEntry(
+        id: '1',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'M',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.image,
+        imageThumbEncryptedBase64: 'thumb-ciphertext',
+        imageWidth: 1024,
+        imageHeight: 768,
+        imageFormat: 'jpeg',
+        stableHash: 'hash-1',
+      );
+
+      final restored = ClipboardEntry.fromMap(entry.toMap());
+
+      expect(restored.imageThumbEncryptedBase64, equals('thumb-ciphertext'));
+      expect(restored.imageWidth, equals(1024));
+      expect(restored.imageHeight, equals(768));
+      expect(restored.imageFormat, equals('jpeg'));
+      expect(restored.stableHash, equals('hash-1'));
+      expect(restored.type, equals(ContentType.image));
+    });
+
+    test('fromMap should parse old JSON without image fields', () {
+      final map = {
+        'id': '1',
+        'content': 'hello',
+        'sourceDeviceId': 'd1',
+        'sourceDeviceName': 'M',
+        'sourcePlatform': 'macos',
+        'timestamp': DateTime(2024, 1, 1).toIso8601String(),
+        'type': 'text',
+        'isPinned': false,
+      };
+
+      final entry = ClipboardEntry.fromMap(map);
+
+      expect(entry.imageThumbEncryptedBase64, isNull);
+      expect(entry.imageWidth, isNull);
+      expect(entry.imageHeight, isNull);
+      expect(entry.imageFormat, isNull);
+      expect(entry.stableHash, isNull);
+      expect(entry.content, equals('hello'));
+      expect(entry.type, equals(ContentType.text));
+    });
+
+    test('toMap should not serialize full-image ciphertext', () {
+      final entry = ClipboardEntry(
+        id: '1',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'M',
+        timestamp: DateTime.now(),
+        type: ContentType.image,
+        imageEncryptedBase64: 'full-ciphertext',
+      );
+
+      expect(entry.toMap().containsKey('imageEncryptedBase64'), isFalse);
+    });
   });
 }

@@ -41,6 +41,31 @@ void main() {
     expect(service.entries.where((e) => e.content == 'First entry').length, equals(1));
   });
 
+  test('addEntry should not deduplicate image entries with empty content', () {
+    service.addEntry(ClipboardEntry(
+      id: 'img-1',
+      content: '',
+      sourceDeviceId: 'd1',
+      sourceDeviceName: 'Mac',
+      timestamp: DateTime(2024, 1, 1),
+      type: ContentType.image,
+      imageWidth: 10,
+      imageHeight: 10,
+    ));
+    service.addEntry(ClipboardEntry(
+      id: 'img-2',
+      content: '',
+      sourceDeviceId: 'd1',
+      sourceDeviceName: 'Mac',
+      timestamp: DateTime(2024, 1, 2),
+      type: ContentType.image,
+      imageWidth: 20,
+      imageHeight: 20,
+    ));
+
+    expect(service.entries.length, equals(2));
+  });
+
   test('removeEntry should remove by id', () {
     service.addEntry(testEntry1);
     service.addEntry(testEntry2);
@@ -85,5 +110,130 @@ void main() {
 
     expect(restored.entries.length, equals(2));
     expect(restored.entries[0].id, equals(service.entries[0].id));
+  });
+
+  group('image ID dedup', () {
+    test('same ID image entry should be replaced, not duplicated', () {
+      service.addEntry(ClipboardEntry(
+        id: 'img-same',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'Mac',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.image,
+        imageWidth: 100,
+        imageHeight: 100,
+        stableHash: 'hash-a',
+      ));
+      service.addEntry(ClipboardEntry(
+        id: 'img-same',
+        content: '',
+        sourceDeviceId: 'd2',
+        sourceDeviceName: 'Android',
+        timestamp: DateTime(2024, 1, 2),
+        type: ContentType.image,
+        imageWidth: 100,
+        imageHeight: 100,
+        stableHash: 'hash-a',
+      ));
+      expect(service.entries.length, equals(1));
+      expect(service.entries.first.sourceDeviceName, equals('Android'));
+    });
+
+    test('same ID image preserves pinned state from existing entry', () {
+      service.addEntry(ClipboardEntry(
+        id: 'img-pin',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'Mac',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.image,
+        isPinned: true,
+        stableHash: 'hash-pin',
+      ));
+      service.addEntry(ClipboardEntry(
+        id: 'img-pin',
+        content: '',
+        sourceDeviceId: 'd2',
+        sourceDeviceName: 'Android',
+        timestamp: DateTime(2024, 1, 2),
+        type: ContentType.image,
+        isPinned: false,
+        stableHash: 'hash-pin',
+      ));
+      expect(service.entries.length, equals(1));
+      expect(service.entries.first.isPinned, isTrue);
+    });
+  });
+
+  group('image stableHash dedup', () {
+    test('same stableHash image replaces existing entry', () {
+      service.addEntry(ClipboardEntry(
+        id: 'img-old',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'Mac',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.image,
+        imageWidth: 100,
+        imageHeight: 100,
+        stableHash: 'same-hash',
+      ));
+      service.addEntry(ClipboardEntry(
+        id: 'img-new',
+        content: '',
+        sourceDeviceId: 'd2',
+        sourceDeviceName: 'Android',
+        timestamp: DateTime(2024, 1, 2),
+        type: ContentType.image,
+        imageWidth: 100,
+        imageHeight: 100,
+        stableHash: 'same-hash',
+      ));
+      expect(service.entries.length, equals(1));
+      expect(service.entries.first.id, equals('img-new'));
+    });
+
+    test('different stableHash images coexist', () {
+      service.addEntry(ClipboardEntry(
+        id: 'img-a',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'Mac',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.image,
+        stableHash: 'hash-alpha',
+      ));
+      service.addEntry(ClipboardEntry(
+        id: 'img-b',
+        content: '',
+        sourceDeviceId: 'd2',
+        sourceDeviceName: 'Android',
+        timestamp: DateTime(2024, 1, 2),
+        type: ContentType.image,
+        stableHash: 'hash-beta',
+      ));
+      expect(service.entries.length, equals(2));
+    });
+
+    test('different ID images without stableHash coexist', () {
+      service.addEntry(ClipboardEntry(
+        id: 'img-x',
+        content: '',
+        sourceDeviceId: 'd1',
+        sourceDeviceName: 'Mac',
+        timestamp: DateTime(2024, 1, 1),
+        type: ContentType.image,
+      ));
+      service.addEntry(ClipboardEntry(
+        id: 'img-y',
+        content: '',
+        sourceDeviceId: 'd2',
+        sourceDeviceName: 'Android',
+        timestamp: DateTime(2024, 1, 2),
+        type: ContentType.image,
+      ));
+      expect(service.entries.length, equals(2));
+    });
   });
 }

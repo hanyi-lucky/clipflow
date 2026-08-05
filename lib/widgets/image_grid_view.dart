@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/clipboard_entry.dart';
+import '../screens/image_preview_screen.dart';
 
 class ImageGridView extends StatelessWidget {
   final List<ClipboardEntry> entries;
@@ -37,7 +38,7 @@ class ImageGridView extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '图片同步将在 v1.3 支持',
+              '复制图片后自动同步到这里',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.outlineVariant,
               ),
@@ -60,7 +61,7 @@ class ImageGridView extends StatelessWidget {
         return _ImageGridItem(
           entry: entry,
           timeLabel: _formatAbsoluteTime(entry.timestamp),
-          onTap: () => _showPreview(context, entry),
+          onTap: () => _openPreview(context, entry),
         );
       },
     );
@@ -73,50 +74,11 @@ class ImageGridView extends StatelessWidget {
     return 2;
   }
 
-  void _showPreview(BuildContext context, ClipboardEntry entry) {
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.black,
-        insetPadding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 16),
-            // Placeholder for image
-            Container(
-              width: 280,
-              height: 280,
-              decoration: BoxDecoration(
-                color: Colors.white10,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Center(
-                child: Icon(Icons.image, size: 80, color: Colors.white30),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () {
-                    // v1.3: copy image to clipboard
-                    Navigator.pop(ctx);
-                  },
-                  icon: const Icon(Icons.copy, size: 18),
-                  label: const Text('复制'),
-                ),
-                const SizedBox(width: 12),
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('关闭', style: TextStyle(color: Colors.white70)),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-          ],
-        ),
+  void _openPreview(BuildContext context, ClipboardEntry entry) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ImagePreviewScreen(entryId: entry.id),
       ),
     );
   }
@@ -144,14 +106,26 @@ class _ImageGridItem extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              // Placeholder (v1.3: actual thumbnail)
-              Center(
-                child: Icon(
-                  Icons.image,
-                  size: 40,
-                  color: Theme.of(context).colorScheme.outlineVariant,
+              if (entry.imageThumbBytes != null)
+                Image.memory(
+                  entry.imageThumbBytes!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => Center(
+                    child: Icon(
+                      Icons.broken_image_outlined,
+                      size: 40,
+                      color: Theme.of(context).colorScheme.outlineVariant,
+                    ),
+                  ),
+                )
+              else
+                Center(
+                  child: Icon(
+                    Icons.image,
+                    size: 40,
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
                 ),
-              ),
               // Time label
               Positioned(
                 bottom: 0,

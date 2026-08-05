@@ -44,6 +44,18 @@ Uint8List _deriveKeyInBackground(Map<String, dynamic> params) {
   return derivator.process(Uint8List.fromList(utf8.encode(password)));
 }
 
+/// 二进制解密（在 isolate 中执行），供查看器大图解密
+Uint8List _decryptBytesInBackground(Map<String, dynamic> params) {
+  final key = Uint8List.fromList(params['key'] as List<int>);
+  final data = EncryptedData.fromBase64(params['base64'] as String);
+  final cipher = GCMBlockCipher(AESEngine());
+  cipher.init(
+    false,
+    AEADParameters(KeyParameter(key), 128, data.iv, Uint8List(0)),
+  );
+  return cipher.process(data.ciphertext);
+}
+
 class EncryptionService {
   Future<Uint8List> deriveKey(String password, List<int> salt) async {
     final derivator = PBKDF2KeyDerivator(HMac(SHA256Digest(), 64));
@@ -73,6 +85,39 @@ class EncryptionService {
     } catch (e) {
       throw EncryptionException('Encryption failed: $e');
     }
+  }
+
+  /// 加密二进制数据（图片全图/缩略图），打包格式与文本一致
+  Future<EncryptedData> encryptBytes(Uint8List plaintext, Uint8List key) async {
+    try {
+      final iv = generateIv();
+      final cipher = _createCipher(true, key, iv);
+      final ciphertext = cipher.process(plaintext);
+      return EncryptedData(ciphertext: ciphertext, iv: iv);
+    } catch (e) {
+      throw EncryptionException('Encryption failed: $e');
+    }
+  }
+
+  /// 解密二进制数据，返回原始字节
+  Future<Uint8List> decryptBytes(EncryptedData data, Uint8List key) async {
+    try {
+      final cipher = _createCipher(false, key, data.iv);
+      return cipher.process(data.ciphertext);
+    } catch (e) {
+      throw EncryptionException('Decryption failed. Check your master password.');
+    }
+  }
+
+  /// 使用 compute isolate 解密二进制大图，不阻塞 UI 线程
+  Future<Uint8List> decryptBytesIsolate(
+    Uint8List key,
+    String encryptedBase64,
+  ) async {
+    return compute(_decryptBytesInBackground, {
+      'key': key,
+      'base64': encryptedBase64,
+    });
   }
 
   Future<String> decrypt(EncryptedData data, Uint8List key) async {

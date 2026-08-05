@@ -1,19 +1,25 @@
 package com.clipflow.clipflow
 
 import android.Manifest
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.PowerManager
 import androidx.core.app.ActivityCompat
+import androidx.core.content.FileProvider
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
+import java.io.ByteArrayOutputStream
+import java.io.File
 
 class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     ClipboardManager.OnPrimaryClipChangedListener {
@@ -122,6 +128,59 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 // MethodChannel; this handler only acknowledges the call.
                 result.success(true)
             }
+            "hasImage" -> {
+                val clip = clipboardManager?.primaryClip
+                result.success(clip?.description?.hasMimeType("image/*") == true)
+            }
+            "getImage" -> {
+                val clip = clipboardManager?.primaryClip
+                if (clip == null || clip.itemCount == 0 || !clip.description.hasMimeType("image/*")) {
+                    result.success(null)
+                    return
+                }
+                val bitmap = readBitmapFromClip(clip.getItemAt(0))
+                if (bitmap == null) {
+                    result.success(null)
+                    return
+                }
+                val baos = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
+                result.success(
+                    mapOf(
+                        "bytes" to baos.toByteArray(),
+                        "format" to "png",
+                        "width" to bitmap.width,
+                        "height" to bitmap.height
+                    )
+                )
+            }
+            "setImage" -> {
+                val bytes = call.argument<ByteArray>("bytes")
+                if (bytes == null) {
+                    result.error("BAD_ARGS", "bytes is required", null)
+                    return
+                }
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bitmap == null) {
+                    result.error("DECODE_ERROR", "cannot decode image", null)
+                    return
+                }
+                try {
+                    val authority = "${context.packageName}.clipflow.fileprovider"
+                    val dir = File(context.cacheDir, "clipflow_images")
+                    if (!dir.exists()) dir.mkdirs()
+                    val file = File(dir, "clip_${System.currentTimeMillis()}.png")
+                    file.outputStream().use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    }
+                    val uri = FileProvider.getUriForFile(context, authority, file)
+                    val clip = ClipData.newUri(context.contentResolver, "clipflow-image", uri)
+                    clipboardManager?.setPrimaryClip(clip)
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.error("CLIP_ERROR", "failed to set image clipboard: ${e.message}", null)
+                }
+            }
             else -> result.notImplemented()
         }
     }
@@ -129,10 +188,46 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     override fun onPrimaryClipChanged() {
         val clip = clipboardManager?.primaryClip
         if (clip != null && clip.itemCount > 0) {
-            val text = clip.getItemAt(0).text
+            val item = clip.getItemAt(0)
+
+            // 先检测图片（image/* mime），文本分支在其后
+            if (clip.description.hasMimeType("image/*")) {
+                val bitmap = readBitmapFromClip(item)
+                if (bitmap != null) {
+                    val baos = ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
+                    channel.invokeMethod(
+                        "onClipboardImageChanged",
+                        mapOf(
+                            "bytes" to baos.toByteArray(),
+                            "format" to "png",
+                            "width" to bitmap.width,
+                            "height" to bitmap.height
+                        )
+                    )
+                }
+                return
+            }
+
+            val text = item.text
             if (text != null) {
                 channel.invokeMethod("onClipboardChanged", text.toString())
             }
+        }
+    }
+
+    private fun readBitmapFromClip(item: ClipData.Item): Bitmap? {
+        return try {
+            val uri = item.uri
+            if (uri != null) {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream)
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 }

@@ -18,6 +18,7 @@ class LocalStorage {
   static const _keyBackgroundSync = 'background_sync';
   static const _keyAutoSyncOnResume = 'auto_sync_on_resume';
   static const _keyNotificationSync = 'notification_sync';
+  static const _keyDeletedEntryIds = 'deleted_entry_ids';
 
   final SharedPreferences _prefs;
 
@@ -145,5 +146,13 @@ class LocalStorage {
 
   Future<void> setNotificationSync(bool value) async {
     await _prefs.setBool(_keyNotificationSync, value);
+  }
+
+  // Deleted entry IDs (persisted to prevent resurrection after restart)
+  Set<String> get deletedEntryIds =>
+      Set<String>.from(_prefs.getStringList(_keyDeletedEntryIds) ?? []);
+
+  Future<void> setDeletedEntryIds(Set<String> ids) async {
+    await _prefs.setStringList(_keyDeletedEntryIds, ids.toList());
   }
 }

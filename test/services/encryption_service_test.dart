@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:clipflow/services/encryption_service.dart';
+import 'dart:typed_data';
 
 void main() {
   late EncryptionService service;
@@ -101,5 +102,71 @@ void main() {
     final key1 = await service.deriveKeyIsolate(testPassword, testSalt);
     final key2 = await service.deriveKeyIsolate('different-password', testSalt);
     expect(key1, isNot(equals(key2)));
+  });
+
+  group('encryptBytes/decryptBytes (binary)', () {
+    test('should round-trip binary data', () async {
+      final key = await service.deriveKey(testPassword, testSalt);
+      final plaintext = Uint8List.fromList(
+        List.generate(1024, (i) => i % 251),
+      );
+
+      final encrypted = await service.encryptBytes(plaintext, key);
+      final decrypted = await service.decryptBytes(encrypted, key);
+
+      expect(decrypted, equals(plaintext));
+    });
+
+    test('base64 output should parse back with EncryptedData.fromBase64', () async {
+      final key = await service.deriveKey(testPassword, testSalt);
+      final encrypted = await service.encryptBytes(
+        Uint8List.fromList([1, 2, 3, 4]),
+        key,
+      );
+
+      final decoded = EncryptedData.fromBase64(encrypted.toBase64());
+
+      expect(decoded.ciphertext, equals(encrypted.ciphertext));
+      expect(decoded.iv, equals(encrypted.iv));
+    });
+
+    test('should produce different ciphertext each time (random IV)', () async {
+      final key = await service.deriveKey(testPassword, testSalt);
+      final plaintext = Uint8List.fromList([9, 9, 9]);
+
+      final enc1 = await service.encryptBytes(plaintext, key);
+      final enc2 = await service.encryptBytes(plaintext, key);
+
+      expect(enc1.ciphertext, isNot(equals(enc2.ciphertext)));
+    });
+
+    test('decryptBytes with wrong key should throw', () async {
+      final key = await service.deriveKey(testPassword, testSalt);
+      final wrongKey = await service.deriveKey('wrong-password', testSalt);
+      final encrypted = await service.encryptBytes(
+        Uint8List.fromList([1, 2, 3]),
+        key,
+      );
+
+      expect(
+        () async => await service.decryptBytes(encrypted, wrongKey),
+        throwsA(isA<Exception>()),
+      );
+    });
+
+    test('decryptBytesIsolate should decrypt encrypted payload', () async {
+      final key = await service.deriveKey(testPassword, testSalt);
+      final plaintext = Uint8List.fromList(
+        List.generate(65536, (i) => i % 256),
+      );
+      final encrypted = await service.encryptBytes(plaintext, key);
+
+      final decrypted = await service.decryptBytesIsolate(
+        key,
+        encrypted.toBase64(),
+      );
+
+      expect(decrypted, equals(plaintext));
+    });
   });
 }
