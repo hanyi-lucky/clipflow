@@ -7,6 +7,9 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// 列表响应中文本行 content 的截断长度（避免超大文本行撑爆列表响应）
+const HISTORY_LIST_CONTENT_LIMIT = 10000;
+
 // 中间件
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -41,7 +44,12 @@ db.exec(`
     source_device_name TEXT NOT NULL,
     source_platform TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    type TEXT DEFAULT 'text'
+    type TEXT DEFAULT 'text',
+    thumb TEXT,
+    width INTEGER,
+    height INTEGER,
+    format TEXT,
+    history_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS history (
@@ -54,7 +62,12 @@ db.exec(`
     timestamp INTEGER NOT NULL,
     type TEXT DEFAULT 'text',
     pinned INTEGER DEFAULT 0,
-    deleted_at INTEGER DEFAULT NULL
+    deleted_at INTEGER DEFAULT NULL,
+    hash TEXT,
+    thumb TEXT,
+    width INTEGER,
+    height INTEGER,
+    format TEXT
   );
 
   CREATE TABLE IF NOT EXISTS salt (
@@ -72,6 +85,18 @@ db.exec(`
 // 为已有数据库的 history 表添加 deleted_at 列（如果不存在）
 try { db.exec('ALTER TABLE history ADD COLUMN deleted_at INTEGER DEFAULT NULL'); } catch(e) {}
 try { db.exec('ALTER TABLE history ADD COLUMN restored_at INTEGER DEFAULT NULL'); } catch(e) {}
+
+// 为已有数据库补充图片相关列（无外键，兼容升级）
+try { db.exec('ALTER TABLE clipboard ADD COLUMN thumb TEXT'); } catch(e) {}
+try { db.exec('ALTER TABLE clipboard ADD COLUMN width INTEGER'); } catch(e) {}
+try { db.exec('ALTER TABLE clipboard ADD COLUMN height INTEGER'); } catch(e) {}
+try { db.exec('ALTER TABLE clipboard ADD COLUMN format TEXT'); } catch(e) {}
+try { db.exec('ALTER TABLE clipboard ADD COLUMN history_id TEXT'); } catch(e) {}
+try { db.exec('ALTER TABLE history ADD COLUMN hash TEXT'); } catch(e) {}
+try { db.exec('ALTER TABLE history ADD COLUMN thumb TEXT'); } catch(e) {}
+try { db.exec('ALTER TABLE history ADD COLUMN width INTEGER'); } catch(e) {}
+try { db.exec('ALTER TABLE history ADD COLUMN height INTEGER'); } catch(e) {}
+try { db.exec('ALTER TABLE history ADD COLUMN format TEXT'); } catch(e) {}
 
 // 认证中间件（token 从数据库读取，重启不丢失）
 function authenticate(req, res, next) {
@@ -154,28 +179,39 @@ app.get('/api/clipboard', authenticate, (req, res) => {
 
 // 上传剪切板内容
 app.post('/api/clipboard', authenticate, (req, res) => {
-  const { content, hash, sourceDevice, sourceDeviceName, sourcePlatform, timestamp, type } = req.body;
+  const {
+    content, hash, sourceDevice, sourceDeviceName, sourcePlatform,
+    timestamp, type, thumb, width, height, format,
+  } = req.body;
 
   if (!content || !hash) {
     return res.json({ code: 'ERROR', message: 'content and hash are required' });
   }
 
+  // 密文原样存储，不做静默截断：列表体积由「列表响应截断 + 客户端 /content 回补」控制；
+  // 超过 express.json 50mb 上限的请求由末尾全局错误中间件返回显式 413，绝不静默损坏合法数据
+  const storedContent = content;
+
   const id = uuidv4();
+  const historyId = req.body.historyId || uuidv4();
 
   // 删除该用户旧的 clipboard 记录，防止无限膨胀
   db.prepare('DELETE FROM clipboard WHERE user_id = ?').run(req.userId);
 
   // 插入新记录
-  db.prepare(`INSERT INTO clipboard (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    id, req.userId, content, hash, sourceDevice || 'unknown', sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text'
+  db.prepare(`INSERT INTO clipboard (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type, thumb, width, height, format, history_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, req.userId, storedContent, hash, sourceDevice || 'unknown', sourceDeviceName || 'Unknown',
+    sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text',
+    thumb || null, width || null, height || null, format || null, historyId
   );
 
   // 同时写入历史记录（使用客户端提供的 ID，确保客户端和服务器 ID 一致）
-  const historyId = req.body.historyId || uuidv4();
-  db.prepare(`INSERT OR REPLACE INTO history (id, user_id, content, source_device, source_device_name, source_platform, timestamp, type)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    historyId, req.userId, content, sourceDevice || 'unknown', sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(), type || 'text'
+  db.prepare(`INSERT OR REPLACE INTO history (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type, thumb, width, height, format)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    historyId, req.userId, storedContent, hash || null, sourceDevice || 'unknown',
+    sourceDeviceName || 'Unknown', sourcePlatform || 'unknown', timestamp || Date.now(),
+    type || 'text', thumb || null, width || null, height || null, format || null
   );
 
   // 清理旧历史记录（保留最近100条）
@@ -191,7 +227,14 @@ app.post('/api/clipboard', authenticate, (req, res) => {
 // 获取历史记录（排除已删除）
 app.get('/api/history', authenticate, (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
-  const rows = db.prepare('SELECT * FROM history WHERE user_id = ? AND deleted_at IS NULL ORDER BY timestamp DESC LIMIT ?')
+  const rows = db.prepare(`SELECT id,
+      CASE
+        WHEN type = 'image' THEN ''
+        ELSE substr(content, 1, ${HISTORY_LIST_CONTENT_LIMIT})
+      END AS content,
+      source_device, source_device_name, source_platform, timestamp, type, pinned,
+      deleted_at, restored_at, hash, thumb, width, height, format
+    FROM history WHERE user_id = ? AND deleted_at IS NULL ORDER BY timestamp DESC LIMIT ?`)
     .all(req.userId, limit);
 
   res.json({
@@ -217,12 +260,31 @@ app.delete('/api/history/:id', authenticate, (req, res) => {
 
 // 获取垃圾箱（已删除条目）
 app.get('/api/history/trash', authenticate, (req, res) => {
-  const rows = db.prepare('SELECT * FROM history WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC')
+  const rows = db.prepare(`SELECT id,
+      CASE
+        WHEN type = 'image' THEN ''
+        ELSE substr(content, 1, ${HISTORY_LIST_CONTENT_LIMIT})
+      END AS content,
+      source_device, source_device_name, source_platform, timestamp, type, pinned,
+      deleted_at, restored_at, hash, thumb, width, height, format
+    FROM history WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
     .all(req.userId);
   res.json({
     code: 'SUCCESS',
     data: { records: rows }
   });
+});
+
+// 获取历史记录完整内容（图片全图密文，按 user_id 作用域防止越权）
+app.get('/api/history/:id/content', authenticate, (req, res) => {
+  const row = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.userId);
+
+  if (!row) {
+    return res.json({ code: 'NOT_FOUND' });
+  }
+
+  res.json({ code: 'SUCCESS', data: row });
 });
 
 // 恢复已删除条目
@@ -292,6 +354,11 @@ app.post('/api/salt', authenticate, (req, res) => {
 // 全局错误处理中间件
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
+  // body-parser 超过 50mb 上限时抛出 PayloadTooLargeError（status=413, type='entity.too.large'），
+  // 显式透传 413；其余错误保持 500，不向客户端暴露内部细节
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    return res.status(413).json({ code: 'ERROR', message: 'Payload too large' });
+  }
   res.status(500).json({ code: 'ERROR', message: 'Internal server error' });
 });
 
