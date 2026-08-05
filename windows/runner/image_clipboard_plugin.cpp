@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <objbase.h>
@@ -545,7 +546,6 @@ int64_t FileTimeToUnixMs(const FILETIME& file_time) {
   value.LowPart = file_time.dwLowDateTime;
   value.HighPart = file_time.dwHighDateTime;
   constexpr uint64_t kUnixEpochFileTime = 116444736000000000ULL;
-  constexpr uint64_t kMsPerSecond = 1000ULL;
   if (value.QuadPart < kUnixEpochFileTime) {
     return 0;
   }
@@ -969,11 +969,11 @@ bool ImageClipboardPlugin::WriteFilePaths(
     const size_t old_size = file_list.size();
     file_list.resize(old_size + byte_count);
     std::memcpy(file_list.data() + old_size, wide.data(), byte_count);
-    // 每个文件名必须以 UTF-16 NUL 结尾（2 字节）。
+    // Every file name must end with a UTF-16 NUL (2 bytes).
     file_list.push_back(0);
     file_list.push_back(0);
   }
-  // 整个文件列表以额外的 UTF-16 NUL 结束（双 NUL 终止符）。
+  // The whole list ends with one extra UTF-16 NUL (double-NUL terminator).
   file_list.push_back(0);
   file_list.push_back(0);
 
