@@ -75,7 +75,9 @@ class AuthProvider extends ChangeNotifier {
 
     // 使用 DeviceIdentityService 获取准确的设备名
     String? deviceName = _storage!.deviceName;
-    if (deviceName == null || deviceName.isEmpty) {
+    if (deviceName == null ||
+        deviceName.isEmpty ||
+        isLegacyDefaultDeviceName(deviceName)) {
       final identity = await loadDeviceIdentity();
       var suggested = identity.suggestedName;
       try {

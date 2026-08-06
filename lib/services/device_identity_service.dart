@@ -9,6 +9,20 @@ class DeviceIdentity {
   String get suggestedName => buildDefaultDeviceName(platform: platform, model: model);
 }
 
+/// v1.4 及更早版本的默认设备名：命中说明用户没有自定义过名称，
+/// 升级后应自动替换为「平台 · 机型」。
+const Set<String> kLegacyDefaultDeviceNames = {
+  'Mac',
+  'Windows PC',
+  'Android Phone',
+  'iOS Device',
+  'Unknown Device',
+};
+
+bool isLegacyDefaultDeviceName(String name) {
+  return kLegacyDefaultDeviceNames.contains(name.trim());
+}
+
 /// 生成默认设备名
 /// 规则：model 先 trim，空则回退默认名
 String buildDefaultDeviceName({required String platform, String? model}) {

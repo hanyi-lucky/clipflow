@@ -134,4 +134,20 @@ void main() {
       );
     });
   });
+
+  group('isLegacyDefaultDeviceName', () {
+    test('legacy defaults are detected', () {
+      expect(isLegacyDefaultDeviceName('Mac'), isTrue);
+      expect(isLegacyDefaultDeviceName('Windows PC'), isTrue);
+      expect(isLegacyDefaultDeviceName('Android Phone'), isTrue);
+      expect(isLegacyDefaultDeviceName('iOS Device'), isTrue);
+      expect(isLegacyDefaultDeviceName('Unknown Device'), isTrue);
+    });
+
+    test('custom or new style names are not treated as legacy', () {
+      expect(isLegacyDefaultDeviceName('Android · Xiaomi 15'), isFalse);
+      expect(isLegacyDefaultDeviceName('我的 MacBook'), isFalse);
+      expect(isLegacyDefaultDeviceName(''), isFalse);
+    });
+  });
 }
