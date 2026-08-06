@@ -252,3 +252,12 @@ Node.js Server (Express + SQLite)
 - **服务管理：** `systemctl restart clipflow`
 - **代码路径：** `/opt/clipflow/index.js`
 - **数据库：** `/opt/clipflow/clipflow.db`（SQLite）
+
+---
+
+## 技术债（含时间节点，防止遗忘）
+
+### 1. 窄窗口并发双下载（v1.5 Phase 3 遗留，2026-08-07 记录）
+- **描述**：`triggerSync()` 的「轮询未运行」判定依赖 `_syncTimer/_nextSyncTimer` 为 null，但轮询 tick 下载进行中 `_nextSyncTimer` 恰为 null，该窗口内 `triggerSync` 可能与轮询并发第二次下载。实际危害已被 HistoryService 内容/stableHash/fileHash 去重 + `markAsReceived` 推进完全中和（仅冗余网络 + 一次相同内容重复写剪贴板），reviewer 判定非阻断。
+- **时间节点**：**2026-08-10（周一）前完成修复并回归；且作为 v1.5 Phase 4 开工前置项**（先修完再启动 Phase 4，避免遗忘）。
+- **修复方向**：为补下载增加与轮询共用的在途互斥标记（如 `_downloadInFlight`），或统一经 `_isSyncing` 串行化；补充一个并发场景的回归测试。
