@@ -4,8 +4,9 @@ import 'package:http/http.dart' as http;
 
 /// 自建服务器 API 封装
 class CloudBaseService {
-  // 服务器地址（部署后替换为实际 IP）
-  static const _baseUrl = 'http://121.196.222.122:3000/api';
+  // 服务器地址：Cloudflare Tunnel 标准 443（无需备案）。
+  // 旧直连地址保留作回退：http://121.196.222.122:3000/api
+  static const _baseUrl = 'https://api.yihanlife.ccwu.cc/api';
 
   String? _token;
   String? _openId;
