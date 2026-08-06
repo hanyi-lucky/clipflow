@@ -93,7 +93,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                       IconButton(
                         icon: const Icon(Icons.add_circle_outline),
-                        onPressed: settings.historyLimit < 500
+                        onPressed: settings.historyLimit < 100
                             ? () => settings.setHistoryLimit(
                                 settings.historyLimit + 10,
                               )
@@ -110,7 +110,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       children: [
                         SwitchListTile(
                           title: const Text('后台自动同步'),
-                          subtitle: const Text('低版本Android有效，高版本可能受限'),
+                          subtitle: const Text(
+                            'Android 10+ 后台读取剪贴板受限，Android 16+ 仅打开 App 时可同步',
+                          ),
                           value: settings.backgroundSync,
                           onChanged: (v) async {
                             await settings.setBackgroundSync(v);
@@ -139,7 +141,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const Divider(height: 1, indent: 16),
                         SwitchListTile(
                           title: const Text('通知栏同步'),
-                          subtitle: const Text('显示常驻通知，可手动触发同步'),
+                          subtitle: const Text('显示常驻通知，点击打开 App 并立即同步'),
                           value: settings.notificationSync,
                           onChanged: (v) async {
                             await settings.setNotificationSync(v);
@@ -187,11 +189,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const Divider(height: 1, indent: 16),
                         ListTile(
                           leading: const Icon(Icons.run_circle),
-                          title: const Text('后台运行'),
-                          trailing: _buildPermissionStatus(
-                            true,
-                            onTap: () => settings.openAppSettingsPage(),
-                          ),
+                          title: const Text('应用详情设置'),
+                          subtitle: const Text('管理通知、电池优化等系统权限'),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => settings.openAppSettingsPage(),
                         ),
                       ],
                     ),
@@ -202,7 +203,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _buildSection(context, '关于', [
                 const ListTile(
                   title: Text('版本'),
-                  subtitle: Text('1.0.0'),
+                  subtitle: Text('1.4.0'),
                   leading: Icon(Icons.info_outline),
                 ),
                 ListTile(
@@ -271,12 +272,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   _compatibilityItem(
                     dialogContext,
-                    '文件',
-                    'macOS 经 Finder 复制任意文件（file-url）；'
-                        'Android 经文件管理器复制（content://，无需存储权限）；'
-                        'Windows 剪贴板文件（CF_HDROP，待真机验证）；'
-                        '单文件 ≤50MB；一次复制多文件只同步第一个；'
-                        '文件夹同步不支持。',
+                      '文件',
+                      'macOS 经 Finder 复制任意文件（file-url）；'
+                          'Android 经文件管理器复制（content://，无需存储权限）；'
+                          'Windows 剪贴板文件（CF_HDROP，已真机验证）；'
+                          '单文件 ≤50MB；一次复制多文件只同步第一个；'
+                          '文件夹同步不支持。',
                   ),
                   _compatibilityItem(
                     dialogContext,
@@ -292,8 +293,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     dialogContext,
                     '平台差异',
                     'macOS/Windows 500ms 轮询检测；'
-                        'Android 由前台服务 + 原生剪贴板监听；'
-                        '删除的记录保留 24 小时可恢复，'
+                        'Android 由前台服务 + 原生剪贴板监听，'
+                        '但 Android 10+ 后台读取剪贴板受限、Android 16+ 仅前台触发；'
+                        '删除记录在垃圾箱保留 24 小时，跨设备删除/恢复同步窗口 30 秒，'
                         '“倾倒垃圾桶”可彻底删除本地/服务器/磁盘数据。',
                   ),
                 ],

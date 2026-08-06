@@ -30,7 +30,7 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> initialize(LocalStorage storage) async {
     _storage = storage;
     _autoSync = storage.autoSync;
-    _historyLimit = storage.historyLimit;
+    _historyLimit = storage.historyLimit.clamp(10, 100);
     _themeMode = storage.themeMode;
     _backgroundSync = storage.backgroundSync;
     _autoSyncOnResume = storage.autoSyncOnResume;
@@ -45,7 +45,7 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Future<void> setHistoryLimit(int value) async {
-    _historyLimit = value;
+    _historyLimit = value.clamp(10, 100);
     await _storage?.setHistoryLimit(value);
     notifyListeners();
   }

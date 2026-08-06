@@ -1,6 +1,6 @@
 # ClipFlow 开发进度
 
-> 更新时间：2026-08-05
+> 更新时间：2026-08-06
 
 ---
 
@@ -13,7 +13,7 @@
 - [x] 设备来源显示（正确区分 Mac / Android Phone / Windows PC）
 
 ### 2. 混合同步架构
-- [x] 启动/刷新时全量加载服务器历史（200 条）
+- [x] 启动/刷新时全量加载服务器历史（客户端请求 200，服务端保留最近 100 条）
 - [x] 周期轮询轻量同步（deletedIds + restoredEntries）
 - [x] 本地独有条目保护（全量加载后合并）
 - [x] 服务器不可达时保留内存历史
@@ -71,7 +71,7 @@
 
 ---
 
-## 测试覆盖（当前 130 个测试）
+## 测试覆盖（当前 215 个测试）
 
 | 模块 | 测试文件 | 数量 |
 |------|---------|------|
@@ -103,7 +103,7 @@
 | Monitor 文本守卫 | clipboard_monitor_test.dart | 8 |
 | 既有文件增量（加密字节/模型/历史） | 其余文件 | ~10 |
 
-> v1.4 文件同步已完成（2026-08-05），共 212 个测试。详见 `docs/version-roadmap.md`。
+> v1.4 文件同步已完成（2026-08-05），v1.4.1 Windows 图片识别修复已完成（2026-08-06），共 215 个测试。详见 `docs/version-roadmap.md`。
 
 ### v1.3 已完成功能
 
@@ -116,7 +116,7 @@
 | 图片筛选 | ✅ | 搜索栏"图片"类型筛选解锁（"文件"锁定，v1.4） |
 | 服务器图片字段 | ✅ | clipboard/history 新增 thumb/width/height/format/hash/history_id（无外键、ALTER 兼容） |
 | 历史列表瘦身 | ✅ | 图片行 content 剥离、文本行截断 10000；/history/:id/content 按需取全量 |
-| Windows 图片通道 | ✅ | windows/runner WIC 实现（hasImage/getImage/setImage），待 Windows 真机验证 |
+| Windows 图片通道 | ✅ | windows/runner WIC 实现（hasImage/getImage/setImage），已真机验证（2026-08-06） |
 
 ### v1.3 修复（2026-08-05）
 
@@ -141,7 +141,7 @@
 | 倾倒垃圾桶 | ✅ | `DELETE /api/history/trash` 一键彻底删除本地、服务器、磁盘文件 |
 | 垃圾箱预览 | ✅ | 文本解密预览、文件行文件名/大小/MIME、图片行缩略图 |
 | 设置兼容性说明 | ✅ | 图片与文件格式兼容性、平台差异、大小限制说明 |
-| Windows 文件通道 | ✅ | 静态交付（标准 DROPFILES 双 NUL 终止），待 Windows 真机验证 |
+| Windows 文件通道 | ✅ | 标准 DROPFILES 双 NUL 终止，已真机验证 |
 
 ### v1.4 新增测试（73 个，总 212）
 
@@ -165,9 +165,16 @@
 - 复测修复：Android 文件导入 MethodChannel 回调改主线程，修复滚动历史列表闪退（FlutterJNI @UiThread）。
 - 复测修复：v1.3 残留 262.8 万字符乱码文本行改为 isolate 解密 + 50000 截断 + 列表 500 字符预览，消除历史/垃圾箱卡顿。
 - 复测修复：文件签名只在上传成功后记录，失败后同文件可再次复制重试。
-- 复测修复：Windows CF_HDROP 写入改为标准 DROPFILES 双 NUL 终止（静态修复，待 Windows 真机验证）。
+- 复测修复：Windows CF_HDROP 写入改为标准 DROPFILES 双 NUL 终止（已真机验证）。
 - tester 独立验收 PASS；reviewer 终审 PASS-WITH-RISKS（置信度 8/10）。
-- 发布门禁（未在本机验证）：Windows 真机 CF_HDROP/DROPFILES、macOS/Android 真机文件 E2E、双设备混合回归、50MB 压测。
+- 发布门禁（未在本机验证）：macOS/Android 真机文件 E2E、双设备混合回归、50MB 压测。
+
+### v1.4.1 Windows 图片文件识别修复（2026-08-06）
+
+- Windows CF_HDROP 全部为图片文件时按图片识别，直接读取原文件归一为 PNG 上传，PNG 复制生成带缩略图的「图片」条目（不再被识别为文件）。
+- 文件写回剪贴板后补充图片回声抑制：下载/历史复制图片文件时同时登记文件签名与图片字节哈希，消除「Mac 来源重复图片」。
+- 图片读取失败时 monitor 回退文件分支兜底，不误传占位文本。
+- 新增 3 个回归用例（通道图片忽略、图片读取失败回退文件、文件写回不回声成图片）；`flutter test` 215/215；Windows release 构建通过。
 
 ### v1.2 已完成功能
 
@@ -205,7 +212,7 @@ Node.js Server (Express + SQLite)
 服务器 → SyncService.downloadLatestContent → 系统剪切板
 
 同步策略：
-启动/刷新 → 全量加载 (GET /api/history?limit=200)
+启动/刷新 → 全量加载 (GET /api/history?limit=200；服务端保留最近 100 条)
 周期轮询 → 轻量同步 (GET /api/clipboard → deletedIds + restoredEntries)
 ```
 
