@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,12 +17,23 @@ class OpenSyncRepo extends CloudRepository {
   List<Map<String, dynamic>> history = [];
   Map<String, dynamic>? currentClipboard;
 
+  /// 下载调用计数，用于验证并发窗口内不会触发第二次下载。
+  int downloadCalls = 0;
+
+  /// 可选门控：非 null 时挂起下载，直到该 Completer 完成。
+  Completer<void>? downloadGate;
+
   @override
   Future<List<Map<String, dynamic>>> getHistoryEntries({int limit = 100}) async =>
       history;
 
   @override
   Future<Map<String, dynamic>?> getCurrentClipboardWithDeletions() async {
+    downloadCalls++;
+    final gate = downloadGate;
+    if (gate != null) {
+      await gate.future;
+    }
     if (currentClipboard == null) return null;
     return {...currentClipboard!};
   }
@@ -161,6 +173,44 @@ void main() {
 
       expect(
         provider.history.where((e) => e.content == 'polling content'),
+        hasLength(1),
+      );
+    });
+
+    test('在途下载未完成时第二次 triggerSync 不并发第二次下载', () async {
+      final textEnc = await encryption.encrypt('single download', key);
+      repo.currentClipboard = textRow('row-1', textEnc.toBase64());
+
+      final provider = await createProvider();
+      await settle(); // 让后台历史加载与首轮同步完成
+      provider.stopSync(); // 模拟「后台自动同步」关闭：轮询停止
+      repo.downloadCalls = 0; // 排除首轮同步的计数，只统计 triggerSync 触发的下载
+      repo.downloadGate = Completer<void>();
+
+      // 第一次 triggerSync 进入在途，挂起在门控上
+      final firstSync = provider.triggerSync();
+      await waitFor(
+        provider,
+        () => repo.downloadCalls == 1,
+        message: 'first triggerSync should enter in-flight download',
+      );
+
+      // 第二次 triggerSync 应立即返回，不触发第二次下载
+      provider.triggerSync();
+      await settle();
+      expect(repo.downloadCalls, 1);
+
+      // 放行门控，内容正常进入历史，全程只下载一次
+      repo.downloadGate!.complete();
+      await firstSync;
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.content == 'single download'),
+        message: 'gated download should complete after release',
+      );
+      expect(repo.downloadCalls, 1);
+      expect(
+        provider.history.where((e) => e.content == 'single download'),
         hasLength(1),
       );
     });

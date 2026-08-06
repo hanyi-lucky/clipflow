@@ -137,6 +137,8 @@ class ClipboardProvider extends ChangeNotifier
   // 并发保护
   bool _isLoadingHistory = false;
   bool _isRefreshing = false;
+  // 下载在途互斥：轮询 tick 与 triggerSync 并发窗口内只允许一次下载
+  bool _downloadInFlight = false;
   // 历史落盘节流
   Timer? _saveDebounceTimer;
   bool _savePending = false;
@@ -979,7 +981,13 @@ class ClipboardProvider extends ChangeNotifier
   /// 不含 paused/刷新守卫与轮询调度（`_scheduleNextSync`），由 `_syncTick`
   /// （轮询）与 `triggerSync`（通知「打开并同步」的一次性下载）复用，
   /// 保证下载逻辑单一来源。
+  ///
+  /// 在途互斥：轮询 tick 下载进行中时 `_nextSyncTimer` 恰为 null，
+  /// `triggerSync` 可能在窄窗口内并发进入，故用 `_downloadInFlight`
+  /// 保证同一时刻只有一次下载在途，避免冗余网络请求与重复写剪贴板。
   Future<void> _performDownload() async {
+    if (_downloadInFlight) return;
+    _downloadInFlight = true;
     try {
       final result = await _syncService!.downloadLatestContent();
 
@@ -1063,6 +1071,8 @@ class ClipboardProvider extends ChangeNotifier
           _setStatus(SyncStatus.error);
         }
       }
+    } finally {
+      _downloadInFlight = false;
     }
   }
 
