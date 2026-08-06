@@ -3,10 +3,12 @@
 # ClipFlow Windows 远程构建（一键脚本）
 #
 # 前置条件：
-#   1. 本机与 Windows 两端都打开 UU 远程，并保持端口映射
-#      （本机 127.0.0.1:22 -> Windows OpenSSH 22）
+#   1. Windows 上 sshd 已运行、仓库位于 E:\VSCode\clipflow
 #   2. 本机存在密钥 ~/.ssh/clipflow_win（已配置到 Windows）
-#   3. Windows 上 sshd 已运行、仓库位于 E:\VSCode\clipflow
+#   3. 连接方式（自动探测，先局域网后 UU）：
+#      - 局域网直连：Windows 与 Mac 同网段，默认解析 hanyi.local
+#        （可用环境变量 WIN_LAN_HOST 覆盖，如 192.168.2.159）
+#      - UU 隧道回退：两端 UU 远程在线，本机 127.0.0.1:22 -> Windows 22
 #
 # 用法：
 #   bash scripts/win-remote-build.sh          # 只构建
@@ -18,7 +20,9 @@ source "$SCRIPT_DIR/win-claude-preflight.sh"
 
 KEY="$HOME/.ssh/clipflow_win"
 WIN_USER="20982"
-WIN_HOST="127.0.0.1"
+WIN_LAN_HOST="${WIN_LAN_HOST:-hanyi.local}"   # 局域网直连（优先，同网段 mDNS 解析）
+WIN_UU_HOST="${WIN_UU_HOST:-127.0.0.1}"       # UU 隧道（回退）
+WIN_HOST=""
 WIN_PORT=22
 WIN_PROJECT='E:\VSCode\clipflow'
 FLUTTER_BAT='E:\flutter\bin\flutter.bat'
@@ -39,18 +43,31 @@ win_ssh() {
       "${WIN_USER}@${WIN_HOST}" "$@"
 }
 
+# 自动选择可用主机：局域网直连优先，UU 隧道回退
+pick_host() {
+  say "探测连接：局域网 ${WIN_LAN_HOST}（优先）→ UU 隧道 ${WIN_UU_HOST}"
+  if ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=5 \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      "${WIN_USER}@${WIN_LAN_HOST}" "echo OK" >/dev/null 2>&1; then
+    WIN_HOST="$WIN_LAN_HOST"
+  elif ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=5 \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      "${WIN_USER}@${WIN_UU_HOST}" "echo OK" >/dev/null 2>&1; then
+    WIN_HOST="$WIN_UU_HOST"
+  else
+    echo "SSH 无法连接（局域网与 UU 隧道均失败）：请确认 Windows sshd 运行、两端 UU 远程在线。"
+    return 1
+  fi
+  echo "已选择主机：${WIN_HOST}"
+}
+
 if [ ! -f "$KEY" ]; then
   echo "缺少密钥：$KEY"
   echo "请先生成并配置密钥（或检查 ~/.ssh/clipflow_win 是否存在）。"
   exit 1
 fi
 
-say "检查 UU 隧道（${WIN_HOST}:${WIN_PORT}）"
-if ! nc -z -w 5 "$WIN_HOST" "$WIN_PORT" >/dev/null 2>&1; then
-  echo "隧道未就绪：请在本机和 Windows 两端都打开 UU 远程，并保持 clipflow-ssh 映射成功。"
-  exit 1
-fi
-echo "隧道可用"
+pick_host || exit 1
 
 say "SSH 登录 Windows"
 if ! win_ssh "echo WINDOWS_OK && whoami"; then

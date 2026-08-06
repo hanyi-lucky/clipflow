@@ -27,11 +27,9 @@
 
 ### 本机（macOS）侧
 1. 密钥：`~/.ssh/clipflow_win`（私钥）已生成并配置到 Windows。
-2. UU 远程：新增端口映射 `clipflow-ssh`：
-   - 本地端口：22
-   - 目标地址：127.0.0.1
-   - 目标端口：22
-3. 使用前，本机与 Windows 两端都要打开 UU 远程，并确认映射状态为成功（本机 `lsof -nP -iTCP:22 -sTCP:LISTEN` 能看到监听）。
+2. 连接方式（脚本自动探测，局域网优先）：
+   - **局域网直连（推荐）**：Windows 与 Mac 同网段时直接 SSH 到 `hanyi.local`（或 `WIN_LAN_HOST=192.168.2.159` 覆盖）。
+   - **UU 隧道（回退）**：两端 UU 远程在线，映射 `clipflow-ssh`（本机 `127.0.0.1:22` → Windows 22）。
 
 ## Windows 端：环境一键配置（推荐先跑一次）
 
@@ -52,12 +50,12 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\setup-windows.ps1
 
 ## 每次使用
 
-1. 打开两端 UU 远程，确认 `clipflow-ssh` 映射成功。
-2. 本机执行：
+1. 本机执行（脚本自动探测：局域网直连优先，UU 隧道回退，无需手动选择）：
    `bash scripts/win-remote-build.sh`
    或双击 `scripts/win-remote-build.command`。
-3. 需要调用 Windows Claude Code 做 e2e 自查时：
+2. 需要调用 Windows Claude Code 做 e2e 自查时：
    `bash scripts/win-remote-build.sh --e2e`
+3. 局域网 IP 变化时用环境变量覆盖：`WIN_LAN_HOST=192.168.2.159 bash scripts/win-remote-build.sh`。
 
 脚本会自动：检查隧道 → SSH 登录 → `git pull --ff-only origin main` → `flutter pub get` → `flutter build windows --release` → 显示产物路径。
 
@@ -74,6 +72,6 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\setup-windows.ps1
 
 ## 常见问题
 
-- 隧道检查失败：两端 UU 远程没开，或映射规则未生效。
+- 局域网与 UU 都连不上：Windows `sshd` 未运行（`Start-Service sshd`），或密钥未写入 `administrators_authorized_keys`，或两端不在同网段且 UU 未在线。
 - SSH 登录失败：Windows `sshd` 未运行（`Start-Service sshd`），或密钥未写入 `administrators_authorized_keys`。
 - 构建报错：把脚本输出的错误信息原样发回，不要在 Windows 上重复排查。
