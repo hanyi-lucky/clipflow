@@ -2,6 +2,15 @@
 
 把 ClipFlow Windows 端的构建/调试流程自动化：本机（macOS）通过 UU 远程端口映射 SSH 到 Windows，在 Windows 上 `git pull` + `flutter pub get` + `flutter build windows --release`，可选调用 Windows 上的 Claude Code 做 e2e 自查。
 
+> **两套脚本，别用反了**（Windows 重启/环境坏了优先跑第二套）：
+>
+> | 脚本 | 在哪运行 | 干什么 |
+> |------|---------|--------|
+> | `scripts/windows/setup-windows.cmd` | **Windows 端**双击（自动提权） | 环境一键配置：检查 git/node/npm/flutter、**修复 Claude Code**、**配置 sshd 开机自启**、拉取最新代码 |
+> | `scripts/win-remote-build.sh`（或 `.command`） | **macOS 端** | 通过 UU+SSH 遥控 Windows 拉代码、analyze/test/build，`--e2e` 可调 Windows Claude 自查 |
+>
+> `win-remote-build.sh` 是 bash 脚本、依赖 macOS 侧密钥与 UU 隧道，**不能在 Windows 上直接运行**。
+
 ## 一次性准备
 
 ### Windows 侧
@@ -23,6 +32,20 @@
    - 目标地址：127.0.0.1
    - 目标端口：22
 3. 使用前，本机与 Windows 两端都要打开 UU 远程，并确认映射状态为成功（本机 `lsof -nP -iTCP:22 -sTCP:LISTEN` 能看到监听）。
+
+## Windows 端：环境一键配置（推荐先跑一次）
+
+> 用于 Windows 重启后恢复环境：修复 Claude Code（claude.exe 缺失）、把 OpenSSH Server 设为开机自启并启动（避免以后重启又连不上 SSH）、拉取最新代码。
+
+1. 在 Windows 上打开项目目录，`git pull`（或直接双击下面的脚本，它会自己拉）。
+2. 双击 `scripts\windows\setup-windows.cmd`，允许 UAC 提权。
+3. 脚本自动完成：环境检查 → 重装 Claude Code → 校验 `claude.cmd --version` → sshd 开机自启+启动 → `git pull`。
+4. 之后在 macOS 端执行 `bash scripts/win-remote-build.sh`（记得两端 UU 远程都打开）。
+
+等价的手动 PowerShell（管理员）：
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\setup-windows.ps1
+```
 
 ## 每次使用
 

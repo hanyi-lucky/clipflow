@@ -74,6 +74,18 @@ flutter build windows
 
 ---
 
+## 一键配置脚本（推荐）
+
+Windows 端环境检查 / 修复 Claude Code / sshd 开机自启，直接双击：
+
+```
+scripts\windows\setup-windows.cmd
+```
+
+脚本会自动：检查 git、node/npm、flutter → 重装并校验 Claude Code → 把 OpenSSH Server 设为开机自启并启动 → `git pull` 最新代码。
+
+> 注意：`scripts/win-remote-build.sh` 是 macOS 端遥控 Windows 构建的脚本，不要在本机运行。
+
 ## 开发工作流
 
 ```
