@@ -136,6 +136,7 @@
 | 工程体验 | 📋 待执行 | 崩溃上报、国际化、文案核对 |
 
 > 详细验收与配合清单见 `.codex/pipeline/v1.5-taskbook.md`。
+> HTTPS 接入决策、影响与回退方案见 `docs/https-cloudflare-tunnel-decision.md`。
 
 ---
 
