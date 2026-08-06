@@ -24,13 +24,17 @@ class CloudBaseService {
   }
 
   /// 登录/注册（userId 从密码派生，相同密码 = 相同账户 = 共享数据）
-  Future<void> signInAnonymously({String? userId}) async {
+  Future<void> signInAnonymously({String? userId, String? deviceId}) async {
     userId ??= DateTime.now().millisecondsSinceEpoch.toString();
     _userId = userId; // 保存用于自动重新登录
+    final body = <String, dynamic>{'userId': userId};
+    if (deviceId != null && deviceId.isNotEmpty) {
+      body['deviceId'] = deviceId;
+    }
     final response = await http.post(
       Uri.parse('$_baseUrl/auth'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'userId': userId}),
+      body: jsonEncode(body),
     );
 
     if (response.statusCode != 200) {
@@ -310,7 +314,7 @@ class CloudBaseService {
         throw Exception('updateDocument failed: ${result['message']}');
       }
     } else if (collection == 'devices') {
-      final result = await _callApi('POST', '/device', body: {'id': docId, ...data});
+      final result = await _callApi('PATCH', '/device/$docId', body: data);
       if (result['code'] != 'SUCCESS') {
         throw Exception('updateDocument failed: ${result['message']}');
       }
@@ -321,6 +325,11 @@ class CloudBaseService {
   Future<void> deleteDocument(String collection, String docId) async {
     if (collection == 'history') {
       final result = await _callApi('DELETE', '/history/$docId');
+      if (result['code'] != 'SUCCESS') {
+        throw Exception('deleteDocument failed: ${result['message']}');
+      }
+    } else if (collection == 'devices') {
+      final result = await _callApi('DELETE', '/device/$docId');
       if (result['code'] != 'SUCCESS') {
         throw Exception('deleteDocument failed: ${result['message']}');
       }

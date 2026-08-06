@@ -95,6 +95,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS tokens (
     token TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    device_id TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
@@ -124,6 +125,9 @@ try { db.exec('ALTER TABLE history ADD COLUMN file_name TEXT'); } catch(e) {}
 try { db.exec('ALTER TABLE history ADD COLUMN file_size INTEGER'); } catch(e) {}
 try { db.exec('ALTER TABLE history ADD COLUMN mime_type TEXT'); } catch(e) {}
 try { db.exec('ALTER TABLE history ADD COLUMN file_key TEXT'); } catch(e) {}
+
+// 为 tokens 表绑定设备（无外键，兼容升级）
+try { db.exec('ALTER TABLE tokens ADD COLUMN device_id TEXT'); } catch(e) {}
 
 // 认证中间件（token 从数据库读取，重启不丢失）
 function authenticate(req, res, next) {
@@ -181,7 +185,7 @@ app.get('/api/ping', (req, res) => {
 
 // 登录/注册
 app.post('/api/auth', (req, res) => {
-  const { userId, password, salt } = req.body;
+  const { userId, password, salt, deviceId } = req.body;
 
   if (!userId) {
     return res.json({ code: 'ERROR', message: 'userId is required' });
@@ -198,7 +202,7 @@ app.post('/api/auth', (req, res) => {
   }
 
   const token = uuidv4();
-  db.prepare('INSERT INTO tokens (token, user_id) VALUES (?, ?)').run(token, userId);
+  db.prepare('INSERT INTO tokens (token, user_id, device_id) VALUES (?, ?, ?)').run(token, userId, deviceId || null);
 
   // 清理超过24小时的旧 token
   db.prepare("DELETE FROM tokens WHERE created_at < datetime('now', '-1 day')").run();
@@ -557,6 +561,42 @@ app.get('/api/devices', authenticate, (req, res) => {
     code: 'SUCCESS',
     data: rows
   });
+});
+
+// 更新设备名称
+app.patch('/api/device/:id', authenticate, (req, res) => {
+  const { name } = req.body;
+  if (!name) {
+    return res.json({ code: 'ERROR', message: 'name is required' });
+  }
+
+  const result = db.prepare('UPDATE devices SET name=?, last_seen=CURRENT_TIMESTAMP WHERE id=? AND user_id=?')
+    .run(name, req.params.id, req.userId);
+
+  if (result.changes === 0) {
+    return res.status(404).json({ code: 'ERROR', message: 'Device not found' });
+  }
+
+  res.json({ code: 'SUCCESS' });
+});
+
+// 删除设备
+app.delete('/api/device/:id', authenticate, (req, res) => {
+  // 检查设备是否存在
+  const device = db.prepare('SELECT id FROM devices WHERE id=? AND user_id=?')
+    .get(req.params.id, req.userId);
+
+  if (!device) {
+    return res.status(404).json({ code: 'ERROR', message: 'Device not found' });
+  }
+
+  // 删除该设备关联的 token
+  db.prepare('DELETE FROM tokens WHERE device_id = ?').run(req.params.id);
+
+  // 删除设备
+  db.prepare('DELETE FROM devices WHERE id = ? AND user_id = ?').run(req.params.id, req.userId);
+
+  res.json({ code: 'SUCCESS' });
 });
 
 // ==================== Salt API ====================

@@ -236,6 +236,11 @@ class ClipboardProvider extends ChangeNotifier
     _settingsProvider = settings;
   }
 
+  /// 更新设备名（供重命名当前设备后使用）
+  void updateDeviceName(String name) {
+    _syncService?.updateDeviceName(name);
+  }
+
   Future<void> initialize({
     required LocalStorage storage,
     required CloudRepository cloudRepo,

@@ -20,6 +20,10 @@ class CloudRepository {
     });
   }
 
+  Future<void> updateDeviceName(String deviceId, String name) async {
+    await _cloud.updateDocument('devices', deviceId, {'name': name});
+  }
+
   Future<List<Device>> getDevices() async {
     final docs = await _cloud.queryDocuments('devices');
     return docs.map((d) => Device.fromMap(d)).toList();

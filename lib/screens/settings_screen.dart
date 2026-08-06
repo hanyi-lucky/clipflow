@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/clipboard_provider.dart';
+import '../widgets/device_management_section.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -102,6 +103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                 ),
+              ]),
+              _buildSection(context, '设备管理', [
+                const DeviceManagementSection(),
               ]),
               if (Platform.isAndroid) ...[
                 _buildSection(context, '同步设置', [

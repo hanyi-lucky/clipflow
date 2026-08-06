@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../services/auth_service.dart';
 import '../services/cloudbase_service.dart';
+import '../services/device_identity_service.dart';
 import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
 import '../models/device.dart';
@@ -48,7 +49,13 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _authService.signInAnonymously(userId: userId);
+      // 确保有 deviceId（首次登录生成 UUID）
+      String? deviceId = _storage?.deviceId;
+      if (deviceId == null || deviceId.isEmpty) {
+        deviceId = const Uuid().v4();
+        await _storage?.setDeviceId(deviceId);
+      }
+      await _authService.signInAnonymously(userId: userId, deviceId: deviceId);
     } on Exception catch (e) {
       _error = e.toString();
       _isLoading = false;
@@ -66,8 +73,23 @@ class AuthProvider extends ChangeNotifier {
     String deviceId = _storage!.deviceId ?? const Uuid().v4();
     await _storage!.setDeviceId(deviceId);
 
-    String deviceName = _storage!.deviceName ?? _getDefaultDeviceName();
-    await _storage!.setDeviceName(deviceName);
+    // 使用 DeviceIdentityService 获取准确的设备名
+    String? deviceName = _storage!.deviceName;
+    if (deviceName == null || deviceName.isEmpty) {
+      final identity = await loadDeviceIdentity();
+      var suggested = identity.suggestedName;
+      try {
+        final existing = await _cloudRepo.getDevices();
+        suggested = uniqueDeviceName(
+          suggested,
+          existing.map((d) => d.name),
+        );
+      } catch (_) {
+        // 拉取失败时直接使用建议名，不阻塞注册
+      }
+      deviceName = suggested;
+      await _storage!.setDeviceName(deviceName);
+    }
 
     _currentDevice = Device(
       id: deviceId,
@@ -79,12 +101,31 @@ class AuthProvider extends ChangeNotifier {
     await _cloudRepo.registerDevice(currentDevice);
   }
 
-  String _getDefaultDeviceName() {
-    if (Platform.isMacOS) return 'Mac';
-    if (Platform.isWindows) return 'Windows PC';
-    if (Platform.isAndroid) return 'Android Phone';
-    if (Platform.isIOS) return 'iOS Device';
-    return 'Unknown Device';
+  /// 获取所有设备列表
+  Future<List<Device>> fetchDevices() async {
+    return await _cloudRepo.getDevices();
+  }
+
+  /// 重命名设备
+  Future<void> renameDevice(String deviceId, String name) async {
+    await _cloudRepo.updateDeviceName(deviceId, name);
+
+    // 如果是当前设备，更新本地存储
+    if (_currentDevice?.id == deviceId) {
+      await _storage?.setDeviceName(name);
+      _currentDevice = _currentDevice!.copyWith(name: name);
+      notifyListeners();
+    }
+  }
+
+  /// 移除设备
+  Future<void> removeDevice(String deviceId) async {
+    await _cloudRepo.removeDevice(deviceId);
+
+    // 如果是当前设备，清空 token 和 storage，退出登录
+    if (_currentDevice?.id == deviceId) {
+      await signOut();
+    }
   }
 
   Future<void> signOut() async {

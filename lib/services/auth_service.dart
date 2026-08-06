@@ -5,8 +5,8 @@ class AuthService {
 
   AuthService(this._cloud);
 
-  Future<void> signInAnonymously({String? userId}) async {
-    await _cloud.signInAnonymously(userId: userId);
+  Future<void> signInAnonymously({String? userId, String? deviceId}) async {
+    await _cloud.signInAnonymously(userId: userId, deviceId: deviceId);
   }
 
   bool get isLoggedIn => _cloud.isLoggedIn;

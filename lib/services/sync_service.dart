@@ -102,7 +102,7 @@ class SyncService {
   final CloudRepository _repo;
   final EncryptionService _encryption;
   final String _deviceId;
-  final String _deviceName;
+  String _deviceName;
   final String _devicePlatform;
   final Uint8List _key;
 
@@ -114,6 +114,11 @@ class SyncService {
   String get lastUploadedHash => _lastUploadedHash;
   DateTime? get lastReceivedTimestamp => _lastReceivedTimestamp;
   Uint8List get key => _key;
+
+  /// 更新设备名（供重命名当前设备后使用）
+  void updateDeviceName(String name) {
+    _deviceName = name;
+  }
 
   /// 解密内容（供外部加载历史记录时使用）
   Future<String> decryptContent(String encryptedBase64) async {
