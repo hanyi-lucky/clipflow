@@ -608,7 +608,7 @@ process.on('unhandledRejection', (err) => {
 });
 
 // 启动服务器
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   console.log(`ClipFlow server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/ping`);
 
