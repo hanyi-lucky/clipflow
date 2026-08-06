@@ -66,6 +66,8 @@ class ImageClipboardPlugin {
       std::vector<uint8_t> png);
   std::optional<ImageResult> ReadDibAsPng(
       Microsoft::WRL::ComPtr<IWICImagingFactory> factory, HANDLE handle);
+  std::optional<ImageResult> ReadImageFileAsPng(
+      IWICImagingFactory* factory, const std::string& path);
 
   Microsoft::WRL::ComPtr<IWICImagingFactory> factory_;
   UINT cf_png_ = 0;

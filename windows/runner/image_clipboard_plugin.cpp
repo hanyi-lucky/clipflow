@@ -616,12 +616,46 @@ bool IsImagePath(const std::string& path) {
   return IsImageExtension(ExtensionFromFileName(name));
 }
 
+// Builds a file metadata map using GetFileAttributesExW. Missing size /
+// lastModified keep their default nullopt representation; the caller adds an
+// errorCode when the attribute query fails.
+flutter::EncodableMap BuildFileMetadata(const std::string& path,
+                                        const std::string& file_name,
+                                        bool include_error_code) {
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("path")] = flutter::EncodableValue(path);
+  map[flutter::EncodableValue("name")] = flutter::EncodableValue(file_name);
+  map[flutter::EncodableValue("mimeType")] =
+      flutter::EncodableValue(MimeTypeForExtension(ExtensionFromFileName(file_name)));
+  map[flutter::EncodableValue("temp")] = flutter::EncodableValue(false);
+
+  std::wstring wide = Utf8ToWide(path);
+  WIN32_FILE_ATTRIBUTE_DATA attributes{};
+  if (!wide.empty() && ::GetFileAttributesExW(wide.c_str(), GetFileExInfoStandard,
+                                              &attributes) != 0) {
+    ULARGE_INTEGER size;
+    size.LowPart = attributes.nFileSizeLow;
+    size.HighPart = attributes.nFileSizeHigh;
+    map[flutter::EncodableValue("size")] =
+        flutter::EncodableValue(static_cast<int64_t>(size.QuadPart));
+    map[flutter::EncodableValue("lastModified")] =
+        flutter::EncodableValue(FileTimeToUnixMs(attributes.ftLastWriteTime));
+  } else if (include_error_code) {
+    map[flutter::EncodableValue("errorCode")] =
+        flutter::EncodableValue(std::string("READ_ERROR"));
+  }
+  return map;
+}
+
+}  // namespace
+
 // Loads an image file from disk with WIC and normalizes it to PNG. Used when
 // Explorer copies an image file (CF_HDROP only): the actual file is the
 // source of truth instead of any preview bitmap, matching macOS file-url.
-std::optional<ImageClipboardPlugin::ImageResult> ReadImageFileAsPng(
+std::optional<ImageClipboardPlugin::ImageResult>
+ImageClipboardPlugin::ReadImageFileAsPng(
     IWICImagingFactory* factory, const std::string& path) {
-  ImageClipboardPlugin::ImageResult result;
+  ImageResult result;
   const std::wstring wide = Utf8ToWide(path);
   if (wide.empty()) {
     return std::nullopt;
@@ -659,39 +693,6 @@ std::optional<ImageClipboardPlugin::ImageResult> ReadImageFileAsPng(
   result.height = static_cast<int32_t>(height);
   return result;
 }
-
-// Builds a file metadata map using GetFileAttributesExW. Missing size /
-// lastModified keep their default nullopt representation; the caller adds an
-// errorCode when the attribute query fails.
-flutter::EncodableMap BuildFileMetadata(const std::string& path,
-                                        const std::string& file_name,
-                                        bool include_error_code) {
-  flutter::EncodableMap map;
-  map[flutter::EncodableValue("path")] = flutter::EncodableValue(path);
-  map[flutter::EncodableValue("name")] = flutter::EncodableValue(file_name);
-  map[flutter::EncodableValue("mimeType")] =
-      flutter::EncodableValue(MimeTypeForExtension(ExtensionFromFileName(file_name)));
-  map[flutter::EncodableValue("temp")] = flutter::EncodableValue(false);
-
-  std::wstring wide = Utf8ToWide(path);
-  WIN32_FILE_ATTRIBUTE_DATA attributes{};
-  if (!wide.empty() && ::GetFileAttributesExW(wide.c_str(), GetFileExInfoStandard,
-                                              &attributes) != 0) {
-    ULARGE_INTEGER size;
-    size.LowPart = attributes.nFileSizeLow;
-    size.HighPart = attributes.nFileSizeHigh;
-    map[flutter::EncodableValue("size")] =
-        flutter::EncodableValue(static_cast<int64_t>(size.QuadPart));
-    map[flutter::EncodableValue("lastModified")] =
-        flutter::EncodableValue(FileTimeToUnixMs(attributes.ftLastWriteTime));
-  } else if (include_error_code) {
-    map[flutter::EncodableValue("errorCode")] =
-        flutter::EncodableValue(std::string("READ_ERROR"));
-  }
-  return map;
-}
-
-}  // namespace
 
 ImageClipboardPlugin::ImageClipboardPlugin() = default;
 
@@ -748,9 +749,10 @@ bool ImageClipboardPlugin::HasImage() {
   if (cf_png != 0 && ::IsClipboardFormatAvailable(cf_png)) {
     return true;
   }
-  // Explorer 复制图片文件时通常只有 CF_HDROP（无 DIB/PNG 预览）。
-  // 全部文件都是图片扩展名时按图片处理，与 macOS file-url 行为对齐；
-  // 存在非图片文件则走文件分支，避免把文件图标/预览当图片上传。
+  // Explorer copies of image files usually expose CF_HDROP without a DIB/PNG
+  // preview. Treat them as images when every dropped file has an image
+  // extension (same as the macOS file-url path); any non-image file routes to
+  // the file branch so file icons/previews are never uploaded as images.
   if (!::IsClipboardFormatAvailable(CF_HDROP)) {
     return false;
   }
@@ -790,7 +792,8 @@ ImageClipboardPlugin::ReadResult ImageClipboardPlugin::ReadImageFromClipboard() 
     return result;
   }
 
-  // 1) CF_HDROP 图片文件：优先读取原文件，避免把资源管理器预览位图当图片上传。
+  // 1) CF_HDROP image files: read the actual file first so Explorer preview
+  //    bitmaps are never uploaded as the image.
   if (::IsClipboardFormatAvailable(CF_HDROP)) {
     const std::vector<std::string> paths = ReadFilePaths();
     for (const std::string& path : paths) {
