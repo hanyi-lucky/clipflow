@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -593,6 +594,72 @@ std::string ExtensionFromFileName(const std::string& file_name) {
   return file_name.substr(dot + 1);
 }
 
+// Case-insensitive image extension check shared by HasImage/getImage/getFiles.
+bool IsImageExtension(const std::string& extension) {
+  std::string ext;
+  ext.reserve(extension.size());
+  for (char c : extension) {
+    ext.push_back(static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c))));
+  }
+  static const std::set<std::string> kImageExtensions = {
+      "png", "jpg", "jpeg", "gif", "tiff", "tif",
+      "bmp", "webp", "heic", "heif",
+  };
+  return kImageExtensions.count(ext) > 0;
+}
+
+bool IsImagePath(const std::string& path) {
+  const size_t sep = path.find_last_of("\\/");
+  const std::string name =
+      sep == std::string::npos ? path : path.substr(sep + 1);
+  return IsImageExtension(ExtensionFromFileName(name));
+}
+
+// Loads an image file from disk with WIC and normalizes it to PNG. Used when
+// Explorer copies an image file (CF_HDROP only): the actual file is the
+// source of truth instead of any preview bitmap, matching macOS file-url.
+std::optional<ImageClipboardPlugin::ImageResult> ReadImageFileAsPng(
+    IWICImagingFactory* factory, const std::string& path) {
+  ImageClipboardPlugin::ImageResult result;
+  const std::wstring wide = Utf8ToWide(path);
+  if (wide.empty()) {
+    return std::nullopt;
+  }
+  ComPtr<IWICBitmapDecoder> decoder;
+  HRESULT hr = factory->CreateDecoderFromFilename(
+      wide.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+      &decoder);
+  if (FAILED(hr)) {
+    return std::nullopt;
+  }
+  ComPtr<IWICBitmapFrameDecode> frame;
+  hr = decoder->GetFrame(0, &frame);
+  if (FAILED(hr)) {
+    return std::nullopt;
+  }
+  UINT width = 0;
+  UINT height = 0;
+  hr = frame->GetSize(&width, &height);
+  if (FAILED(hr) || width == 0 || height == 0 || width > INT32_MAX ||
+      height > INT32_MAX) {
+    return std::nullopt;
+  }
+  const std::vector<uint8_t> bgra = GetBgraPixels(frame.Get(), width, height);
+  if (bgra.empty()) {
+    return std::nullopt;
+  }
+  const std::vector<uint8_t> png =
+      EncodePngFromBgra(factory, bgra, width, height);
+  if (png.empty()) {
+    return std::nullopt;
+  }
+  result.png = png;
+  result.width = static_cast<int32_t>(width);
+  result.height = static_cast<int32_t>(height);
+  return result;
+}
+
 // Builds a file metadata map using GetFileAttributesExW. Missing size /
 // lastModified keep their default nullopt representation; the caller adds an
 // errorCode when the attribute query fails.
@@ -678,7 +745,25 @@ bool ImageClipboardPlugin::HasImage() {
     return true;
   }
   const UINT cf_png = GetPngFormat();
-  return cf_png != 0 && ::IsClipboardFormatAvailable(cf_png);
+  if (cf_png != 0 && ::IsClipboardFormatAvailable(cf_png)) {
+    return true;
+  }
+  // Explorer 复制图片文件时通常只有 CF_HDROP（无 DIB/PNG 预览）。
+  // 全部文件都是图片扩展名时按图片处理，与 macOS file-url 行为对齐；
+  // 存在非图片文件则走文件分支，避免把文件图标/预览当图片上传。
+  if (!::IsClipboardFormatAvailable(CF_HDROP)) {
+    return false;
+  }
+  const std::vector<std::string> paths = ReadFilePaths();
+  if (paths.empty()) {
+    return false;
+  }
+  for (const std::string& path : paths) {
+    if (!IsImagePath(path)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 std::optional<ImageClipboardPlugin::ImageResult>
@@ -700,19 +785,37 @@ ImageClipboardPlugin::GetImage() {
 
 ImageClipboardPlugin::ReadResult ImageClipboardPlugin::ReadImageFromClipboard() {
   ReadResult result;
+  ComPtr<IWICImagingFactory> factory = GetFactory();
+  if (!factory) {
+    return result;
+  }
+
+  // 1) CF_HDROP 图片文件：优先读取原文件，避免把资源管理器预览位图当图片上传。
+  if (::IsClipboardFormatAvailable(CF_HDROP)) {
+    const std::vector<std::string> paths = ReadFilePaths();
+    for (const std::string& path : paths) {
+      if (!IsImagePath(path)) {
+        continue;
+      }
+      std::optional<ImageResult> from_file =
+          ReadImageFileAsPng(factory.Get(), path);
+      if (from_file.has_value()) {
+        result.complete = true;
+        result.image = std::move(from_file);
+        return result;
+      }
+    }
+  }
+
   if (!::OpenClipboard(nullptr)) {
     return result;
   }
   ClipboardCloser closer;
   result.complete = true;
 
-  ComPtr<IWICImagingFactory> factory = GetFactory();
-  if (!factory) {
-    return result;
-  }
   const UINT cf_png = GetPngFormat();
 
-  // 1) CF_PNG: byte passthrough (fastest, lossless, keeps echo-hash stable).
+  // 2) CF_PNG: byte passthrough (fastest, lossless, keeps echo-hash stable).
   if (cf_png != 0 && ::IsClipboardFormatAvailable(cf_png)) {
     HANDLE handle = ::GetClipboardData(cf_png);
     if (handle != nullptr) {
@@ -728,7 +831,7 @@ ImageClipboardPlugin::ReadResult ImageClipboardPlugin::ReadImageFromClipboard() 
     }
   }
 
-  // 2) CF_DIB / CF_DIBV5: parse DIB variants and normalize to PNG via WIC.
+  // 3) CF_DIB / CF_DIBV5: parse DIB variants and normalize to PNG via WIC.
   UINT dib_format = 0;
   if (::IsClipboardFormatAvailable(CF_DIBV5)) {
     dib_format = CF_DIBV5;
@@ -1100,6 +1203,9 @@ void ImageClipboardPlugin::HandleMethodCall(
     flutter::EncodableList files;
     files.reserve(paths.size());
     for (const std::string& path : paths) {
+      if (IsImagePath(path)) {
+        continue;
+      }
       const size_t sep = path.find_last_of("\\/");
       const std::string file_name =
           sep == std::string::npos ? path : path.substr(sep + 1);

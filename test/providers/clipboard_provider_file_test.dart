@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:clipflow/core/clipboard_channel_constants.dart';
 import 'package:clipflow/models/clipboard_entry.dart';
@@ -20,6 +21,7 @@ class FileProviderFakeRepo extends CloudRepository {
 
   Map<String, dynamic>? currentClipboard;
   final List<Map<String, dynamic>> uploadCalls = [];
+  final List<Map<String, dynamic>> imageUploads = [];
   final List<String> downloadCalls = [];
   List<int>? downloadBytes;
   Stream<List<int>>? controlledDownloadStream;
@@ -97,6 +99,13 @@ class FileProviderFakeRepo extends CloudRepository {
   Future<void> addHistoryEntry(Map<String, dynamic> data) async {}
 
   @override
+  Future<void> setCurrentClipboard(Map<String, dynamic> data) async {
+    if (data['type'] == 'image') {
+      imageUploads.add(data);
+    }
+  }
+
+  @override
   Future<List<Map<String, dynamic>>> getHistoryEntries({
     int limit = 100,
   }) async => [];
@@ -141,12 +150,14 @@ void main() {
     Completer<bool>? setFilesCompleter,
     List<Map<String, Object>>? readBackFiles,
     void Function()? onSetFiles,
+    bool hasImage = false,
+    Uint8List? imageBytes,
   }) {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           switch (call.method) {
             case AppChannelMethods.hasImage:
-              return false;
+              return hasImage;
             case AppChannelMethods.hasFiles:
               return hasFiles;
             case AppChannelMethods.getFiles:
@@ -156,7 +167,13 @@ void main() {
               if (setFilesCompleter != null) return setFilesCompleter.future;
               return setFilesResult;
             case AppChannelMethods.getImage:
-              return null;
+              if (!hasImage || imageBytes == null) return null;
+              return <String, Object?>{
+                'bytes': imageBytes,
+                'format': 'png',
+                'width': 8,
+                'height': 8,
+              };
           }
           return null;
         });
@@ -417,6 +434,66 @@ void main() {
         final entry = provider.history.firstWhere((e) => e.id == 'hist-dl-1');
         expect(entry.fileName, 'downloaded.pdf');
         expect(entry.fileHash, fileHash);
+
+        await settle();
+        provider.dispose();
+      },
+    );
+
+    test(
+      'downloaded image-named file write-back does not echo as image upload',
+      () async {
+        final plaintext = List<int>.generate(64, (i) => i % 251);
+        final encrypted = await encryption.encryptBytes(
+          Uint8List.fromList(plaintext),
+          key,
+        );
+        final image = img.Image(width: 8, height: 8, numChannels: 3);
+        for (var y = 0; y < image.height; y++) {
+          for (var x = 0; x < image.width; x++) {
+            image.setPixelRgba(x, y, 80, 120, 200, 255);
+          }
+        }
+        final pngBytes = Uint8List.fromList(img.encodePng(image));
+        repo.downloadBytes = encrypted.toBytes();
+        repo.currentClipboard = fileRow(
+          id: 'hist-echo-1',
+          fileName: 'photo.png',
+          fileSize: plaintext.length,
+          fileHash: 'file-hash-echo',
+        );
+        mockFileChannel(
+          hasFiles: false,
+          setFilesResult: true,
+          readBackFiles: [
+            {
+              'path': '/tmp/photo.png',
+              'name': 'photo.png',
+              'size': plaintext.length,
+              'lastModified': 1700000000000,
+              'temp': false,
+            },
+          ],
+          hasImage: true,
+          imageBytes: pngBytes,
+        );
+
+        final provider = await createProvider();
+        await waitFor(
+          () =>
+              provider.fileDownloadProgress('hist-echo-1')?.status ==
+              FileTransferStatus.completed,
+        );
+
+        // 文件写回后模拟一次轮询：图片分支应命中忽略表，不再重复上传
+        await provider.debugFileCheck();
+        await Future.delayed(const Duration(milliseconds: 700));
+
+        expect(repo.imageUploads, isEmpty);
+        expect(
+          provider.history.where((e) => e.type == ContentType.image),
+          isEmpty,
+        );
 
         await settle();
         provider.dispose();

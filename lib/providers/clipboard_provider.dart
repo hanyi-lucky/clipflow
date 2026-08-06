@@ -1339,7 +1339,7 @@ class ClipboardProvider extends ChangeNotifier
       final readBack = await _fileClipboardService.getFiles();
       if (progress.status == FileTransferStatus.cancelled) return;
       if (readBack != null && readBack.isNotEmpty) {
-        _monitor?.markFileAsWritten(plaintextHash, readBack);
+        await _suppressWrittenFileEcho(plaintextHash, readBack);
       }
       await Future.delayed(const Duration(milliseconds: 50));
       if (progress.status == FileTransferStatus.cancelled) return;
@@ -1454,6 +1454,30 @@ class ClipboardProvider extends ChangeNotifier
     progress.cancelToken = FileTransferCancelToken();
     notifyListeners();
     await _runFileDownload(entryId, result, isRetry: true);
+  }
+
+  bool _isImageFile(ClipboardFile file) {
+    final name = file.name ?? file.path ?? '';
+    final dot = name.lastIndexOf('.');
+    if (dot <= 0 || dot == name.length - 1) return false;
+    return kImageFileExtensions
+        .contains(name.substring(dot + 1).toLowerCase());
+  }
+
+  /// 文件写回系统剪贴板后登记循环防护：普通文件登记文件签名/哈希，
+  /// 图片文件还要登记图片字节哈希，避免 macOS/Windows 检测到
+  /// file-url/CF_HDROP 后把同一张图片再上传一次（产生“他端来源”的重复图片）。
+  Future<void> _suppressWrittenFileEcho(
+    String plaintextHash,
+    List<ClipboardFile> readBack,
+  ) async {
+    _monitor?.markFileAsWritten(plaintextHash, readBack);
+    if (readBack.any(_isImageFile)) {
+      final image = await _imageClipboardService.getImage();
+      if (image != null && image.bytes.isNotEmpty) {
+        _monitor?.markImageAsWritten(image.bytes);
+      }
+    }
   }
 
   FileDownloadProgress? fileDownloadProgress(String entryId) {
@@ -1591,7 +1615,7 @@ class ClipboardProvider extends ChangeNotifier
         if (written && entry.fileHash != null) {
           final readBack = await _fileClipboardService.getFiles();
           if (readBack != null && readBack.isNotEmpty) {
-            _monitor?.markFileAsWritten(entry.fileHash!, readBack);
+            await _suppressWrittenFileEcho(entry.fileHash!, readBack);
           }
         }
       }

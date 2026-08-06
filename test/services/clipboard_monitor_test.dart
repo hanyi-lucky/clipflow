@@ -79,6 +79,36 @@ void main() {
         expect(events, hasLength(1));
       },
     );
+
+    test(
+      'channel image whose hash is in ignoreHashes is skipped',
+      () async {
+        final events = <ClipboardImage>[];
+        final monitor = ClipboardMonitor(onChanged: (_) {});
+        monitor.onImageChanged = events.add;
+
+        final bytes = Uint8List.fromList([10, 20, 30, 40]);
+        final hash = sha256.convert(bytes).toString();
+        monitor.addIgnoreHash(hash);
+        mockImageChannel((call) async {
+          if (call.method == AppChannelMethods.hasImage) return true;
+          if (call.method == AppChannelMethods.getImage) {
+            return <String, Object?>{
+              'bytes': bytes,
+              'format': 'png',
+              'width': 2,
+              'height': 2,
+            };
+          }
+          return null;
+        });
+
+        await monitor.syncClipboard();
+
+        expect(events, isEmpty);
+        expect(monitor.ignoreHashes, isNot(contains(hash)));
+      },
+    );
   });
 
   group('ClipboardMonitor placeholder/garbage text guard', () {
@@ -262,6 +292,46 @@ void main() {
         expect(events, hasLength(2), reason: '清除签名后可再次触发');
       },
     );
+
+    test('image read failure falls through to files, never text', () async {
+      var clipboardReads = 0;
+      mockImageChannel((call) async {
+        if (call.method == AppChannelMethods.hasImage) return true;
+        if (call.method == AppChannelMethods.getImage) return null;
+        if (call.method == AppChannelMethods.hasFiles) return true;
+        if (call.method == AppChannelMethods.getFiles) {
+          return [
+            {
+              'path': '/tmp/pic.png',
+              'name': 'pic.png',
+              'mimeType': 'image/png',
+              'size': 3,
+              'lastModified': 1700000000000,
+              'temp': false,
+            },
+          ];
+        }
+        return null;
+      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.getData') {
+              clipboardReads++;
+              return <String, dynamic>{'text': '[文件]'};
+            }
+            return null;
+          });
+
+      final files = <List<ClipboardFile>>[];
+      final monitor = ClipboardMonitor(onChanged: (_) {});
+      monitor.onFilesChanged = files.add;
+
+      await monitor.debugCheckClipboard();
+
+      expect(files, hasLength(1));
+      expect(files.first.first.name, 'pic.png');
+      expect(clipboardReads, 0);
+    });
 
     test(
       'Android onClipboardFilesChanged forwards files with defensive parsing',

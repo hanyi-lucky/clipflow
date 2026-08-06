@@ -20,3 +20,8 @@ class AppConstants {
   static const int fileChunkSize = 1024 * 1024; // 流式加解密/哈希 IO 块
   static const int localFileCacheMaxBytes = 1536 * 1024 * 1024; // 1.5GB
 }
+
+/// 图片文件扩展名，与 macOS/Windows 原生通道保持一致。
+const Set<String> kImageFileExtensions = {
+  'png', 'jpg', 'jpeg', 'gif', 'tiff', 'tif', 'bmp', 'webp', 'heic', 'heif',
+};

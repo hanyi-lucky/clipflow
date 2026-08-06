@@ -201,7 +201,14 @@ class ClipboardMonitor extends ChangeNotifier {
             return;
           }
           // hasImage 为 true 但 getImage 返回 null/空（图片文件 URL 读取失败等）：
-          // 不落入文本分支，避免把 "[文件]" 占位文本当内容上传
+          // 先走文件分支兜底（图片文件不会静默丢弃），但绝不落入文本分支，
+          // 避免把 "[文件]" 占位文本当内容上传
+          if (await _fileClipboardService.hasFiles()) {
+            final files = await _fileClipboardService.getFiles();
+            if (files != null && files.isNotEmpty) {
+              _handleFiles(files);
+            }
+          }
           _syncStatus = 'idle';
           return;
         }
@@ -420,6 +427,14 @@ class ClipboardMonitor extends ChangeNotifier {
           if (hash != _lastImageHash) {
             _lastImageHash = hash;
             onImageChanged?.call(image);
+          }
+        }
+        // hasImage 为 true 但 getImage 返回 null/空：先走文件分支兜底，
+        // 但不落入文本分支（文件复制常带 "[文件]" 占位文本）
+        if (await _fileClipboardService.hasFiles()) {
+          final files = await _fileClipboardService.getFiles();
+          if (files != null && files.isNotEmpty) {
+            _handleFiles(files);
           }
         }
         return;
