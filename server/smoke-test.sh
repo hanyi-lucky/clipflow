@@ -22,12 +22,14 @@ FILE_REAL_DL="${SCRIPT_DIR}/.smoke-file-real.download"
 BIG1="${SCRIPT_DIR}/.smoke-file-big-1.bin"
 MISMATCH1="${SCRIPT_DIR}/.smoke-file-mismatch-1.bin"
 MISMATCH_BODY="${SCRIPT_DIR}/.smoke-mismatch-body.json"
+RATE_BODY="${SCRIPT_DIR}/.smoke-rate-body.json"
+RATE_HEADERS="${SCRIPT_DIR}/.smoke-rate-headers.txt"
 
 cleanup() {
   stop_server
   rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
   rm -f "${BIG_PAYLOAD}" "${FILE1}" "${FILE1_DL}" "${FILE_REAL}" "${FILE_REAL_DL}" "${BIG1}" \
-    "${MISMATCH1}" "${MISMATCH_BODY}"
+    "${MISMATCH1}" "${MISMATCH_BODY}" "${RATE_BODY}" "${RATE_HEADERS}"
   rm -rf "${FILE_DIR}"
 }
 trap cleanup EXIT
@@ -44,6 +46,7 @@ start_server() {
   echo "==> 启动测试服务器 (PORT=${TEST_PORT})"
   PORT="${TEST_PORT}" FILE_DIR="${FILE_DIR}" MAX_FILE_BYTES="${MAX_FILE_BYTES}" \
     USER_FILE_QUOTA_BYTES="${USER_FILE_QUOTA_BYTES}" GLOBAL_FILE_QUOTA_BYTES="${GLOBAL_FILE_QUOTA_BYTES}" \
+    AUTH_MAX_USER_REQUESTS=5 AUTH_MAX_IP_REQUESTS=6 AUTH_WINDOW_MS=2000 \
     node "${SCRIPT_DIR}/index.js" &
   SERVER_PID=$!
 
@@ -472,5 +475,78 @@ if [ -f "${FILE_DIR}/user_smoke_v13/${FILE1_KEY}" ]; then
   exit 1
 fi
 echo "    ok (disk file removed)"
+
+echo "==> 19. userId 桶限流：同 XFF IP + 同 userId 连发 6 次，第 6 次 429 + Retry-After；窗口后恢复"
+RATE_IP="203.0.113.10"
+RATE_USER="user_smoke_rate_a"
+ok=1
+for i in $(seq 1 5); do
+  CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${RATE_IP}" -d "{\"userId\":\"${RATE_USER}\"}" || true)
+  if [ "$CODE" != "200" ]; then
+    echo "FAIL: rate attempt $i expect 200 got ${CODE}" >&2
+    ok=0
+    break
+  fi
+done
+if [ "$ok" = "1" ]; then
+  CODE=$(curl -sS -D "${RATE_HEADERS}" -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${RATE_IP}" -d "{\"userId\":\"${RATE_USER}\"}" || true)
+  if [ "$CODE" != "429" ]; then
+    echo "FAIL: rate attempt 6 expect 429 got ${CODE}" >&2
+    ok=0
+  elif ! grep -qi '^Retry-After:' "${RATE_HEADERS}"; then
+    echo "FAIL: Retry-After header missing" >&2
+    ok=0
+  else
+    node -e '
+const fs = require("fs");
+const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (body.code !== "RATE_LIMITED" || typeof body.retryAfterMs !== "number" || body.retryAfterMs < 1000) {
+  console.error("FAIL rate body: " + fs.readFileSync(process.argv[1], "utf8"));
+  process.exit(1);
+}
+console.log("    ok (429 RATE_LIMITED retryAfterMs=" + body.retryAfterMs + ")");
+' "${RATE_BODY}"
+  fi
+fi
+if [ "$ok" != "1" ]; then
+  exit 1
+fi
+sleep 2.2
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${RATE_IP}" -d "{\"userId\":\"${RATE_USER}\"}" || true)
+if [ "$CODE" != "200" ]; then
+  echo "FAIL: rate limit should recover after window, got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok (window recovered -> 200)"
+
+echo "==> 20. IP 桶限流：同 XFF IP 换 7 个 userId，第 7 次 429；独立 IP 不受影响"
+RATE_IP2="203.0.113.20"
+ok=1
+for i in $(seq 1 6); do
+  CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${RATE_IP2}" -d "{\"userId\":\"user_smoke_rate_b_${i}\"}" || true)
+  if [ "$CODE" != "200" ]; then
+    echo "FAIL: ip attempt $i expect 200 got ${CODE}" >&2
+    ok=0
+    break
+  fi
+done
+if [ "$ok" = "1" ]; then
+  CODE=$(curl -sS -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${RATE_IP2}" -d '{"userId":"user_smoke_rate_b_7"}' || true)
+  if [ "$CODE" != "429" ]; then
+    echo "FAIL: ip attempt 7 expect 429 got ${CODE}" >&2
+    ok=0
+  else
+    echo "    ok (429 via IP bucket)"
+  fi
+fi
+if [ "$ok" != "1" ]; then
+  exit 1
+fi
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: 203.0.113.30" -d '{"userId":"user_smoke_rate_c"}' || true)
+if [ "$CODE" != "200" ]; then
+  echo "FAIL: independent IP should not be limited, got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok (independent IP not limited)"
 
 echo "SMOKE TEST PASSED"

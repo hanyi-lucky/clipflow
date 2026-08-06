@@ -27,6 +27,66 @@ const GLOBAL_FILE_QUOTA_BYTES = envInt('GLOBAL_FILE_QUOTA_BYTES', 4 * 1024 * 102
 // 1024 字节余量同时作为防配额绕过的大小校验窗口
 const FILE_CIPHERTEXT_OVERHEAD_BYTES = 1024;
 
+// 登录限流（POST /api/auth）：内存双滑动窗口（IP 桶 + userId 桶），全部 env 可调。
+// 重启清零=限制更宽松（无安全回退、无一致性要求，明确接受）；单实例（deploy.sh 强制 127.0.0.1）无共享需求。
+const AUTH_MAX_IP_REQUESTS = envInt('AUTH_MAX_IP_REQUESTS', 60);
+const AUTH_MAX_USER_REQUESTS = envInt('AUTH_MAX_USER_REQUESTS', 30);
+const AUTH_WINDOW_MS = envInt('AUTH_WINDOW_MS', 60000);
+const AUTH_CLEANUP_MS = envInt('AUTH_CLEANUP_MS', 60000);
+
+// key -> 窗口内时间戳数组（'ip:'+ip / 'user:'+userId）
+const authBuckets = new Map();
+
+// 来源 IP 识别：cf-connecting-ip → x-forwarded-for 首项 → socket remoteAddress。
+// 服务仅监听 127.0.0.1、外部流量必经 Cloudflare Tunnel（默认注入 CF 头），伪造面可忽略。
+function clientIp(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  if (cf) {
+    const v = String(cf).trim();
+    if (v) return v;
+  }
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) {
+    const first = String(xff).split(',')[0].trim();
+    if (first) return first;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
+// 清理过期时间戳，防止内存膨胀（与 token 清理定时器同构）
+function pruneAuthBuckets(now) {
+  for (const [key, stamps] of authBuckets) {
+    const kept = stamps.filter((t) => now - t < AUTH_WINDOW_MS);
+    if (kept.length === 0) authBuckets.delete(key);
+    else authBuckets.set(key, kept);
+  }
+}
+
+function isAuthLimited(key, now, limit) {
+  const stamps = authBuckets.get(key) || [];
+  const kept = stamps.filter((t) => now - t < AUTH_WINDOW_MS);
+  authBuckets.set(key, kept);
+  return kept.length >= limit;
+}
+
+function recordAuth(key, now) {
+  const stamps = authBuckets.get(key) || [];
+  stamps.push(now);
+  authBuckets.set(key, stamps);
+}
+
+// 计算最早超龄时间差；窗口已被 prune 清空时兜底返回整个窗口
+function computeRetryAfterMs(now, keys) {
+  let earliest = Infinity;
+  for (const key of keys) {
+    for (const t of authBuckets.get(key) || []) {
+      if (t < earliest) earliest = t;
+    }
+  }
+  const wait = earliest === Infinity ? AUTH_WINDOW_MS : (earliest + AUTH_WINDOW_MS - now);
+  return Math.max(wait, 1000);
+}
+
 // 中间件
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -194,7 +254,28 @@ app.get('/api/ping', (req, res) => {
 
 // 登录/注册
 app.post('/api/auth', (req, res) => {
-  const { userId, password, salt, deviceId } = req.body;
+  // 限流放 handler 最顶部（userId 校验前）：任何 /auth 请求都计尝试。
+  // 两桶：IP 桶拦「变换 userId 的暴力枚举」；userId 桶拦「单账户高频重试/脚本重放」。
+  const now = Date.now();
+  const ip = clientIp(req);
+  const body = req.body || {};
+  const { userId, password, salt, deviceId } = body;
+  const ipKey = 'ip:' + ip;
+  const userKey = userId ? 'user:' + userId : null;
+  const limitedKeys = [];
+  if (isAuthLimited(ipKey, now, AUTH_MAX_IP_REQUESTS)) limitedKeys.push(ipKey);
+  if (userKey && isAuthLimited(userKey, now, AUTH_MAX_USER_REQUESTS)) limitedKeys.push(userKey);
+  if (limitedKeys.length > 0) {
+    const retryAfterMs = computeRetryAfterMs(now, limitedKeys);
+    res.set('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
+    return res.status(429).json({
+      code: 'RATE_LIMITED',
+      message: '尝试过于频繁，请稍后再试',
+      retryAfterMs,
+    });
+  }
+  recordAuth(ipKey, now);
+  if (userKey) recordAuth(userKey, now);
 
   if (!userId) {
     return res.json({ code: 'ERROR', message: 'userId is required' });
@@ -687,6 +768,11 @@ process.on('unhandledRejection', (err) => {
 app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   console.log(`ClipFlow server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/ping`);
+
+  // 登录限流桶定时清理（防内存膨胀；重启清零=更宽松，接受）
+  setInterval(() => {
+    pruneAuthBuckets(Date.now());
+  }, AUTH_CLEANUP_MS);
 
   // 每小时清理过期 token 和超过 24h 的已删除条目
   setInterval(() => {
