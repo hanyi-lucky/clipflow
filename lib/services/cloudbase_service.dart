@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../core/exceptions.dart';
 
 /// 自建服务器 API 封装
 class CloudBaseService {
@@ -16,6 +17,20 @@ class CloudBaseService {
 
   String? get openId => _openId;
   bool get isLoggedIn => _token != null;
+
+  /// 解析 429 限流响应为 [RateLimitedException]；解析失败时兜底 60s。
+  RateLimitedException _parseRateLimited(String body) {
+    var retryAfterMs = 60000;
+    try {
+      final json = jsonDecode(body);
+      if (json is Map && json['retryAfterMs'] is num) {
+        retryAfterMs = (json['retryAfterMs'] as num).toInt();
+      }
+    } catch (_) {
+      // 保留兜底值
+    }
+    return RateLimitedException(retryAfterMs);
+  }
 
   /// Clear all authentication state
   void clearToken() {
@@ -40,6 +55,10 @@ class CloudBaseService {
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(body),
     );
+
+    if (response.statusCode == 429) {
+      throw _parseRateLimited(response.body);
+    }
 
     if (response.statusCode != 200) {
       throw Exception('Auth failed: ${response.body}');
@@ -114,6 +133,10 @@ class CloudBaseService {
         body: body != null ? jsonEncode(body) : null,
         timeout: timeout,
       );
+    }
+
+    if (response.statusCode == 429) {
+      throw _parseRateLimited(response.body);
     }
 
     if (response.statusCode != 200) {

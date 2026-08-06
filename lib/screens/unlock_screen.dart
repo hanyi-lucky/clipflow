@@ -7,7 +7,9 @@ import '../providers/clipboard_provider.dart';
 import '../providers/settings_provider.dart';
 import '../repositories/local_storage.dart';
 import '../services/encryption_service.dart';
+import '../services/auth_guard.dart';
 import '../core/hex_utils.dart';
+import '../core/exceptions.dart';
 
 class UnlockScreen extends StatefulWidget {
   const UnlockScreen({super.key});
@@ -19,10 +21,13 @@ class UnlockScreen extends StatefulWidget {
 class _UnlockScreenState extends State<UnlockScreen> {
   final _passwordController = TextEditingController();
   final _encryption = EncryptionService();
+  // 本地密码错误限流（内存态，App 重启清零；服务端另有 API 层尝试速率限流）
+  final _authGuard = AuthGuard();
   LocalStorage? _storage;
   bool _isFirstTime = true;
   bool _initialized = false;
   bool _authSuccess = false;
+  bool _isWeakPassword = false;
   String? _error;
   bool _loading = false;
 
@@ -67,6 +72,15 @@ class _UnlockScreenState extends State<UnlockScreen> {
     final password = _passwordController.text.trim();
     if (password.isEmpty) return;
 
+    // 本地锁定：连续输错密码超阈值，倒计时结束后才允许再次尝试
+    if (_authGuard.isLocked) {
+      final seconds = _authGuard.lockRemaining.inSeconds + 1;
+      setState(() {
+        _error = '尝试过于频繁，请 $seconds 秒后再试';
+      });
+      return;
+    }
+
     setState(() {
       _loading = true;
       _error = null;
@@ -78,6 +92,21 @@ class _UnlockScreenState extends State<UnlockScreen> {
       final userId = 'user_${passwordHash.substring(0, 16)}';
 
       final storage = _storage ?? await LocalStorage.create();
+
+      // 本地密码错误判定：已有 storedUserId（非新设备首登）且派生 userId 不一致
+      // → 密码错误：不发 /auth、不进 salt 分支（避免污染本地 salt 到错误账户）
+      if (_authGuard.isPasswordMismatch(
+        attemptedUserId: userId,
+        storedUserId: storage.userId,
+      )) {
+        _authGuard.recordFailure();
+        setState(() {
+          _loading = false;
+          _error = '密码错误，请重新输入';
+        });
+        return;
+      }
+
       final auth = context.read<AuthProvider>();
 
       // 使用密码派生的 userId 登录
@@ -122,9 +151,18 @@ class _UnlockScreenState extends State<UnlockScreen> {
         encryptionKey: key,
       );
 
+      // 解锁成功后才写 userId 标记（供后续本地密码错误判定）并清除失败计数
+      await storage.setUserId(userId);
+      _authGuard.reset();
+
       if (mounted) {
         Navigator.pushReplacementNamed(context, '/home');
       }
+    } on RateLimitedException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '尝试过于频繁，请 ${(e.retryAfterMs / 1000).ceil()} 秒后再试';
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -298,8 +336,52 @@ class _UnlockScreenState extends State<UnlockScreen> {
                             borderSide: BorderSide(color: Theme.of(context).colorScheme.primary, width: 2),
                           ),
                         ),
+                        onChanged: (value) {
+                          setState(() {
+                            _isWeakPassword = _authGuard.isWeakPassword(value);
+                          });
+                        },
                         onSubmitted: (_) => _unlock(),
                       ),
+                      if (_isWeakPassword) ...[
+                        const SizedBox(height: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: Colors.orange.withOpacity(0.4),
+                            ),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(
+                                Icons.warning_amber_rounded,
+                                size: 18,
+                                color: Colors.orange,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _isFirstTime
+                                      ? '此密码过于简单，容易被猜中，建议设置更复杂的密码'
+                                      : '此密码过于简单，请注意账户安全',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.orange.shade800,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 20),
                       SizedBox(
                         width: double.infinity,

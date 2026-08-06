@@ -19,6 +19,16 @@ class AuthException extends ClipboardException {
   AuthException(super.message) : super(code: 'AUTH_ERROR');
 }
 
+/// 服务端 429 限流响应。retryAfterMs 为服务端建议的重试等待时间。
+class RateLimitedException extends ClipboardException {
+  final int retryAfterMs;
+  RateLimitedException(this.retryAfterMs)
+      : super('尝试过于频繁，请稍后再试', code: 'RATE_LIMITED');
+
+  @override
+  String toString() => 'RateLimitedException: $message (code: $code, retryAfterMs: $retryAfterMs)';
+}
+
 class DecryptionException implements Exception {
   final String message;
   DecryptionException(this.message);
