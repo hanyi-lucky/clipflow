@@ -13,6 +13,9 @@
 #   bash scripts/win-remote-build.sh --e2e    # 构建后调用 Windows Claude Code 做 e2e 自查
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/win-claude-preflight.sh"
+
 KEY="$HOME/.ssh/clipflow_win"
 WIN_USER="20982"
 WIN_HOST="127.0.0.1"
@@ -79,6 +82,10 @@ win_ssh "dir /b ${WIN_PROJECT}\\build\\windows\\x64\\runner\\Release\\clipflow.e
 }
 
 if [ "$RUN_E2E" = "1" ]; then
+  win_claude_preflight || {
+    echo "Claude 预检失败，已中止 e2e（可先重装后重跑，或去掉 --e2e 只做构建）。"
+    exit 1
+  }
   say "调用 Windows Claude Code 做 e2e 自查（构建 + 冒烟）"
   win_ssh "cd /d ${WIN_PROJECT} && ${CLAUDE_CMD} -p \"阅读 PROGRESS.md 与 WINDOWS_SETUP.md，执行 flutter build windows --release，按 e2e 清单在真实剪贴板测试文件同步并报告结果\"" || {
     echo "Claude Code e2e 执行失败，可重试或手动在 Windows 上运行。"
