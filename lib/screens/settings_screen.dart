@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/clipboard_provider.dart';
 import '../widgets/device_management_section.dart';
+import 'backup/export_backup_screen.dart';
+import 'backup/import_backup_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -106,6 +108,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ]),
               _buildSection(context, '设备管理', [
                 const DeviceManagementSection(),
+              ]),
+              _buildSection(context, '账户与数据', [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Text(
+                    '改密码 = 换新账户：先导出备份，改密码后导入恢复',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.save_alt),
+                  title: const Text('导出备份'),
+                  subtitle: const Text('生成 .clipflow-backup.json 密文备份（含 salt，零明文）'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ExportBackupScreen(),
+                      ),
+                    );
+                  },
+                ),
+                const Divider(height: 1, indent: 16),
+                ListTile(
+                  leading: const Icon(Icons.upload_file),
+                  title: const Text('导入备份'),
+                  subtitle: const Text('迁移码导入：输入旧密码，恢复到当前账户'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ImportBackupScreen(),
+                      ),
+                    );
+                  },
+                ),
+                const Divider(height: 1, indent: 16),
+                ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('改密码说明'),
+                  subtitle: const Text('改密码会进入新账户，旧数据如何找回？'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _showChangePasswordDialog(context),
+                ),
               ]),
               if (Platform.isAndroid) ...[
                 _buildSection(context, '同步设置', [
@@ -250,6 +298,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
       leading: const Icon(Icons.description_outlined),
       title: const Text('图片与文件格式兼容性'),
       onTap: () => _showCompatibilityDialog(context),
+    );
+  }
+
+  Future<void> _showChangePasswordDialog(BuildContext context) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('改密码 = 换新账户'),
+          surfaceTintColor: Colors.transparent,
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'ClipFlow 用密码派生账户身份：密码不同 = 账户不同，旧数据不会自动带到新密码下。',
+                  style: TextStyle(
+                    color: Theme.of(dialogContext).colorScheme.onSurfaceVariant,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _compatibilityItem(dialogContext, '改密码的正确步骤', '① 改密码前，先在「导出备份」生成 .clipflow-backup.json；\n② 在解锁页输入新密码（= 进入新账户）；\n③ 在新账户下「导入备份」，选择备份文件并输入旧密码；\n④ 数据恢复完成。'),
+                _compatibilityItem(dialogContext, '注意', '旧账户数据仍保留在旧密码下，不会被删除。'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        );
+      },
     );
   }
 

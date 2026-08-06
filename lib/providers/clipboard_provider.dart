@@ -151,6 +151,20 @@ class ClipboardProvider extends ChangeNotifier
   final Set<String> _pendingFileUploadPaths = {};
 
   List<ClipboardEntry> get history => _historyService.entries;
+
+  // --- 备份导出/导入所需依赖透传 ---
+  /// 当前会话加密密钥（未解锁时为 null；供备份导入重加密）。
+  Uint8List? get encryptionKey => _syncService?.key;
+  /// 当前设备名（供备份清单 sourceDevice 记录）。
+  String get deviceName => _syncService?.deviceName ?? '';
+  /// 当前设备 ID（供导入上传来源标记）。
+  String get deviceId => _syncService?.deviceId ?? '';
+  CloudRepository? get cloudRepo => _cloudRepo;
+  LocalStorage? get storage => _storage;
+  LocalImageStore get imageStore => _localImageStore;
+  LocalFileStore get fileStore => _localFileStore;
+  HistoryService get historyService => _historyService;
+
   SyncStatus get syncStatus => _syncStatus;
   String? get errorMessage => _errorMessage;
   bool get isMergeMode => _isMergeMode;
@@ -518,6 +532,12 @@ class ClipboardProvider extends ChangeNotifier
     } finally {
       _isLoadingHistory = false;
     }
+  }
+
+  /// 备份导入完成后重新从服务器加载历史记录。
+  Future<void> reloadHistoryFromServer() async {
+    await _loadHistoryFromServer();
+    notifyListeners();
   }
 
   /// 统一截断超长文本：超过 50000 字符只保留前 50000，
