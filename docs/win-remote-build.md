@@ -42,6 +42,8 @@
 3. 脚本自动完成：环境检查 → 重装 Claude Code → 校验 `claude.cmd --version` → sshd 开机自启+启动 → `git pull`。
 4. 之后在 macOS 端执行 `bash scripts/win-remote-build.sh`（记得两端 UU 远程都打开）。
 
+> **编码注意**：`setup-windows.ps1` 必须保持 **UTF-8 with BOM** 编码。用无 BOM 的 UTF-8 保存后，Windows PowerShell 5.1 会按 ANSI 解析导致乱码/语法报错。
+
 等价的手动 PowerShell（管理员）：
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\setup-windows.ps1
