@@ -49,7 +49,8 @@ db.exec(`
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     platform TEXT NOT NULL,
-    last_seen TEXT DEFAULT CURRENT_TIMESTAMP
+    last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+    removed_at INTEGER DEFAULT NULL
   );
 
   CREATE TABLE IF NOT EXISTS clipboard (
@@ -128,6 +129,8 @@ try { db.exec('ALTER TABLE history ADD COLUMN file_key TEXT'); } catch(e) {}
 
 // 为 tokens 表绑定设备（无外键，兼容升级）
 try { db.exec('ALTER TABLE tokens ADD COLUMN device_id TEXT'); } catch(e) {}
+// 设备软删除标记（移除后禁止重新登录，防“删了又复活”）
+try { db.exec('ALTER TABLE devices ADD COLUMN removed_at INTEGER'); } catch(e) {}
 
 // 认证中间件（token 从数据库读取，重启不丢失）
 function authenticate(req, res, next) {
@@ -135,11 +138,17 @@ function authenticate(req, res, next) {
   if (!token) {
     return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Token required' });
   }
-  const row = db.prepare('SELECT user_id FROM tokens WHERE token = ?').get(token);
+  const row = db.prepare('SELECT user_id, device_id FROM tokens WHERE token = ?').get(token);
   if (!row) {
     return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Token invalid or expired' });
   }
   req.userId = row.user_id;
+  req.token = token;
+  // 在线心跳：绑定设备的 token 每次请求都刷新 last_seen，设备列表可显示在线状态
+  if (row.device_id) {
+    db.prepare('UPDATE devices SET last_seen = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+      .run(row.device_id, row.user_id);
+  }
   next();
 }
 
@@ -189,6 +198,18 @@ app.post('/api/auth', (req, res) => {
 
   if (!userId) {
     return res.json({ code: 'ERROR', message: 'userId is required' });
+  }
+
+  // 已移除的设备禁止重新登录（防止删除后自动重登复活）
+  if (deviceId) {
+    const removed = db.prepare('SELECT removed_at FROM devices WHERE id = ? AND user_id = ?')
+      .get(deviceId, userId);
+    if (removed && removed.removed_at != null) {
+      return res.status(403).json({
+        code: 'ERROR',
+        message: '设备已被移除，请清除应用数据后重新添加',
+      });
+    }
   }
 
   // 检查用户是否存在
@@ -546,6 +567,16 @@ app.post('/api/device', authenticate, (req, res) => {
     return res.json({ code: 'ERROR', message: 'id, name, platform are required' });
   }
 
+  // 已移除的设备不允许重新注册（避免设备列表复活）
+  const removed = db.prepare('SELECT removed_at FROM devices WHERE id = ? AND user_id = ?')
+    .get(id, req.userId);
+  if (removed && removed.removed_at != null) {
+    return res.status(403).json({
+      code: 'ERROR',
+      message: '设备已被移除，请清除应用数据后重新添加',
+    });
+  }
+
   db.prepare(`INSERT OR REPLACE INTO devices (id, user_id, name, platform, last_seen)
     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`).run(id, req.userId, name, platform);
 
@@ -554,7 +585,7 @@ app.post('/api/device', authenticate, (req, res) => {
 
 // 获取设备列表
 app.get('/api/devices', authenticate, (req, res) => {
-  const rows = db.prepare('SELECT * FROM devices WHERE user_id = ?')
+  const rows = db.prepare('SELECT * FROM devices WHERE user_id = ? AND removed_at IS NULL')
     .all(req.userId);
 
   res.json({
@@ -582,19 +613,24 @@ app.patch('/api/device/:id', authenticate, (req, res) => {
 
 // 删除设备
 app.delete('/api/device/:id', authenticate, (req, res) => {
-  // 检查设备是否存在
-  const device = db.prepare('SELECT id FROM devices WHERE id=? AND user_id=?')
+  const device = db.prepare('SELECT id, removed_at FROM devices WHERE id=? AND user_id=?')
     .get(req.params.id, req.userId);
 
   if (!device) {
     return res.status(404).json({ code: 'ERROR', message: 'Device not found' });
   }
 
-  // 删除该设备关联的 token
+  // 软删除：设备行保留但标记 removed_at，禁止再次登录/注册
+  db.prepare('UPDATE devices SET removed_at = ? WHERE id = ? AND user_id = ?')
+    .run(Date.now(), req.params.id, req.userId);
+
+  // 删除该设备绑定的 token
   db.prepare('DELETE FROM tokens WHERE device_id = ?').run(req.params.id);
 
-  // 删除设备
-  db.prepare('DELETE FROM devices WHERE id = ? AND user_id = ?').run(req.params.id, req.userId);
+  // 同时删除发起删除请求的当前 token（兼容未绑定 device_id 的旧会话）
+  if (req.token) {
+    db.prepare('DELETE FROM tokens WHERE token = ?').run(req.token);
+  }
 
   res.json({ code: 'SUCCESS' });
 });

@@ -11,6 +11,7 @@ class CloudBaseService {
   String? _token;
   String? _openId;
   String? _userId; // 保存用于自动重新登录
+  String? _deviceId; // 保存用于自动重新登录（设备级 token 绑定/移除拦截）
   final http.Client _streamClient = http.Client();
 
   String? get openId => _openId;
@@ -27,6 +28,9 @@ class CloudBaseService {
   Future<void> signInAnonymously({String? userId, String? deviceId}) async {
     userId ??= DateTime.now().millisecondsSinceEpoch.toString();
     _userId = userId; // 保存用于自动重新登录
+    if (deviceId != null && deviceId.isNotEmpty) {
+      _deviceId = deviceId;
+    }
     final body = <String, dynamic>{'userId': userId};
     if (deviceId != null && deviceId.isNotEmpty) {
       body['deviceId'] = deviceId;
@@ -101,7 +105,7 @@ class CloudBaseService {
 
     // token 失效 → 自动重新登录并重试一次
     if (response.statusCode == 401 && _userId != null) {
-      await signInAnonymously(userId: _userId);
+      await signInAnonymously(userId: _userId, deviceId: _deviceId);
       headers['Authorization'] = 'Bearer $_token';
       response = await _sendRequest(
         method,
