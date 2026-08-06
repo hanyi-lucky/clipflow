@@ -6,7 +6,7 @@
 >
 > | 脚本 | 在哪运行 | 干什么 |
 > |------|---------|--------|
-> | `scripts/windows/setup-windows.cmd` | **Windows 端**双击（自动提权） | 环境一键配置：检查 git/node/npm/flutter、**修复 Claude Code**、**配置 sshd 开机自启**、拉取最新代码 |
+> | `scripts/windows/setup-windows.cmd` | **Windows 端**双击（自动提权） | **SSH 一键配置**：安装/配置 OpenSSH Server（开机自启 + 启动 + 防火墙放行 22），保证重启后 Mac 端可远程控制 |
 > | `scripts/win-remote-build.sh`（或 `.command`） | **macOS 端** | 通过 UU+SSH 遥控 Windows 拉代码、analyze/test/build，`--e2e` 可调 Windows Claude 自查 |
 >
 > `win-remote-build.sh` 是 bash 脚本、依赖 macOS 侧密钥与 UU 隧道，**不能在 Windows 上直接运行**。
@@ -37,10 +37,11 @@
 
 > 用于 Windows 重启后恢复环境：修复 Claude Code（claude.exe 缺失）、把 OpenSSH Server 设为开机自启并启动（避免以后重启又连不上 SSH）、拉取最新代码。
 
-1. 在 Windows 上打开项目目录，`git pull`（或直接双击下面的脚本，它会自己拉）。
+1. 在 Windows 上打开项目目录，`git pull`。
 2. 双击 `scripts\windows\setup-windows.cmd`，允许 UAC 提权。
-3. 脚本自动完成：环境检查 → 重装 Claude Code → 校验 `claude.cmd --version` → sshd 开机自启+启动 → `git pull`。
-4. 之后在 macOS 端执行 `bash scripts/win-remote-build.sh`（记得两端 UU 远程都打开）。
+3. 脚本自动完成：安装/配置 OpenSSH Server（开机自启 + 启动 + 防火墙放行 22）。
+4. Windows 端打开 UU 远程，确认 `clipflow-ssh` 映射在线；之后在 macOS 端执行 `bash scripts/win-remote-build.sh` 即可远程控制。
+5. Claude Code 等 Windows 端环境问题，SSH 连通后由 macOS 端远程处理，无需写进该脚本。
 
 > **编码注意**：`setup-windows.ps1` 必须保持 **UTF-8 with BOM** 编码。用无 BOM 的 UTF-8 保存后，Windows PowerShell 5.1 会按 ANSI 解析导致乱码/语法报错。
 
