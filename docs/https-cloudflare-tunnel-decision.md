@@ -43,6 +43,7 @@ Cloudflare 全球边缘
 - `cloudflared` 装在阿里云服务器上，作为 systemd 服务常驻（`/etc/systemd/system/cloudflared.service`，token 存 `/etc/cloudflared/token`）。
 - Cloudflare 公共主机名：`api.yihanlife.ccwu.cc` → `http://localhost:3000`。
 - 服务器不需要对外开放 80/443/8443/3000；ClipFlow 服务通过 systemd `HOST=127.0.0.1` 只监听回环。
+- ⚠️ 部署约束：`server/deploy.sh` 的 systemd unit 必须保留 `Environment=HOST=127.0.0.1`（`server/index.js` 默认监听 `0.0.0.0`，删掉该行会退回公网暴露 3000；重新部署/换机后务必确认）。
 - nginx 8443 备用配置已移除；Let's Encrypt 证书已签发（acme.sh 自动续期）仅作备用。
 - 客户端 API 地址：`https://api.yihanlife.ccwu.cc/api`；旧地址 `http://121.196.222.122:3000/api` 保留在代码注释中作回退。
 

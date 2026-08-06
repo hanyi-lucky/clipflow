@@ -37,6 +37,8 @@ ExecStart=/usr/bin/node index.js
 Restart=always
 RestartSec=10
 Environment=PORT=3000
+# 只监听回环，禁止公网直连 3000（配合 Cloudflare Tunnel；index.js 默认 0.0.0.0，勿删此行）
+Environment=HOST=127.0.0.1
 Environment=FILE_DIR=/opt/clipflow/data/files
 
 [Install]
@@ -55,4 +57,4 @@ sudo systemctl status clipflow --no-pager
 
 echo ""
 echo "=== Deployment Complete ==="
-echo "Server: http://$(curl -s ifconfig.me):3000/api/ping"
+echo "Server: https://api.yihanlife.ccwu.cc/api（服务仅监听 127.0.0.1:3000，不对外暴露 3000）"
