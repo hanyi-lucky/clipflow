@@ -107,7 +107,7 @@ lib/
 ├── screens/       # 页面（解锁、主页、设置、垃圾箱）
 └── widgets/       # 可复用组件（条目卡片、拼接栏、状态指示器）
 
-test/              # 215 个测试（加密、同步、模型、Provider、Monitor、文件/图片集成）
+test/              # 238 个测试（加密、同步、模型、Provider、Monitor、设备/文件/图片集成）
 server/            # Node.js 后端（Express + SQLite）
 docs/              # 项目文档
 ```

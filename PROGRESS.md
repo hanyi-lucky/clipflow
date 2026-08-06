@@ -71,7 +71,7 @@
 
 ---
 
-## 测试覆盖（当前 215 个测试）
+## 测试覆盖（当前 238 个测试）
 
 | 模块 | 测试文件 | 数量 |
 |------|---------|------|
@@ -103,7 +103,7 @@
 | Monitor 文本守卫 | clipboard_monitor_test.dart | 8 |
 | 既有文件增量（加密字节/模型/历史） | 其余文件 | ~10 |
 
-> v1.4 文件同步已完成（2026-08-05），v1.4.1 Windows 图片识别修复已完成（2026-08-06），共 215 个测试。详见 `docs/version-roadmap.md`。
+> v1.4 文件同步已完成（2026-08-05）；v1.4.1 Windows 图片识别修复、v1.5 Phase 1 HTTPS、Phase 2 设备管理已完成（2026-08-06），共 238 个测试。详见 `docs/version-roadmap.md`。
 
 ### v1.3 已完成功能
 
@@ -175,6 +175,13 @@
 - 文件写回剪贴板后补充图片回声抑制：下载/历史复制图片文件时同时登记文件签名与图片字节哈希，消除「Mac 来源重复图片」。
 - 图片读取失败时 monitor 回退文件分支兜底，不误传占位文本。
 - 新增 3 个回归用例（通道图片忽略、图片读取失败回退文件、文件写回不回声成图片）；`flutter test` 215/215；Windows release 构建通过。
+
+### v1.5 Phase 1/2（2026-08-06）
+
+- Phase 1 HTTPS：Cloudflare Tunnel + 标准 443（`https://api.yihanlife.ccwu.cc/api`），不备案；服务器仅监听 127.0.0.1:3000。
+- Phase 2 设备管理：机型识别默认名（平台+机型、同名自动加序号）、设置页设备列表（查看/重命名/移除踢 token）、来源筛选；服务端 `tokens.device_id` 绑定与 `PATCH/DELETE /api/device/:id`。
+- Phase 2 修复：设备列表 `last_seen` 解析兼容；旧默认设备名自动升级；设备软删除（`removed_at`）并禁止重登/重注册；`_callApi` 自动重登携带 deviceId；token 每次请求刷新 `last_seen` 作为在线心跳。
+- `flutter test` 238/238（本机文件上传用例存在既有偶发超时，重跑全绿；Windows 上正常）。
 
 ### v1.2 已完成功能
 
