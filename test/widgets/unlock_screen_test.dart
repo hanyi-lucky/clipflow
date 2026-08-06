@@ -83,4 +83,39 @@ void main() {
     await tester.pump();
     expect(find.textContaining('尝试过于频繁'), findsOneWidget);
   });
+
+  testWidgets('切换到其他账户：确认后清除本机账户标记，可输入新密码不再判错', (tester) async {
+    // 预置本机账户标记（模拟已用旧密码解锁过的设备）
+    SharedPreferences.setMockInitialValues({'user_id': 'user_old'});
+    final storage = await LocalStorage.create();
+    final auth = AuthProvider();
+    final settings = SettingsProvider();
+    await auth.initialize(storage);
+    await settings.initialize(storage);
+
+    await tester.pumpWidget(_buildApp(auth, settings));
+    await tester.pumpAndSettle();
+
+    // 已有本机账户标记 → 显示「切换到其他账户」入口
+    expect(find.text('切换到其他账户'), findsOneWidget);
+
+    // 点击 → 出现确认对话框
+    await tester.tap(find.text('切换到其他账户'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('切换账户将清除'), findsOneWidget);
+
+    // 确认 → 清除本机账户标记，回到「设置主密码」首次设密码界面
+    await tester.tap(find.text('继续切换'));
+    await tester.pumpAndSettle();
+    expect(storage.userId, isNull);
+    expect(find.text('设置主密码'), findsOneWidget);
+
+    // 输入新密码：不再被本地判定拦截（环境无网络 → 显示「解锁失败」，而非「密码错误」）
+    await tester.enterText(find.byType(TextField), 'new-password');
+    await tester.tap(find.text('创建并开始'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.textContaining('密码错误'), findsNothing);
+    expect(find.textContaining('解锁失败'), findsOneWidget);
+  });
 }

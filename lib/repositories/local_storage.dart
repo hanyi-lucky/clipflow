@@ -39,6 +39,24 @@ class LocalStorage {
     await _prefs.setString(_keyUserId, id);
   }
 
+  /// 清除本机账户身份与相关本地缓存（「切换到其他账户」时调用）。
+  ///
+  /// 清除 userId 标记、加密盐、本地历史缓存、软删除 ID 与同步游标/去重状态，
+  /// 避免旧账户数据污染新账户；设备信息（deviceId/deviceName）与设备设置保留。
+  Future<void> clearAccountIdentity() async {
+    await _prefs.remove(_keyUserId);
+    await _prefs.remove(_keySalt);
+    await _prefs.remove(_keyHistory);
+    await _prefs.remove(_keyDeletedEntryIds);
+    await _prefs.remove(_keyLastSyncTimestamp);
+    await _prefs.remove(_keyLastContentHash);
+    await _prefs.remove(_keyMonitorLastHash);
+    await _prefs.remove(_keyMonitorLastSyncTime);
+    await _prefs.remove(_keyMonitorIgnoreHashes);
+    await _prefs.remove(_keyMonitorIgnoreFileHashes);
+    await _prefs.remove(_keyMonitorLastFileSignatures);
+  }
+
   // Sync state
   DateTime? get lastSyncTimestamp {
     final ms = _prefs.getInt(_keyLastSyncTimestamp);

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import '../core/constants.dart';
 import '../core/exceptions.dart';
 import '../core/hex_utils.dart';
 import '../models/backup_manifest.dart';
@@ -139,16 +140,25 @@ class BackupService {
       );
     }
 
-    // 文本：本地历史存全量明文（≤50000 截断）→ 重加密；未命中走服务端全量密文
-    String content;
+    // 文本：本地明文长度 < 截断上限（50000）→ 本地重加密；达到上限（疑似
+    // v1.3 遗留被截断的超长文本）优先走服务端 /content 全量密文，保证备份
+    // 不丢数据；服务端缺失时回退本地明文（可能被截断，但优于丢弃条目）。
+    String? content;
     final localPlain = _findLocalTextPlain(id);
-    if (localPlain != null && localPlain.isNotEmpty) {
+    final useLocal = localPlain != null &&
+        localPlain.isNotEmpty &&
+        localPlain.length < AppConstants.maxContentLength;
+    if (useLocal) {
       content = (await encryption.encrypt(localPlain, key)).toBase64();
     } else {
       final fetched = await _fetchServerContent(id);
-      if (fetched == null || fetched.isEmpty) return null;
-      content = fetched;
+      if (fetched != null && fetched.isNotEmpty) {
+        content = fetched;
+      } else if (localPlain != null && localPlain.isNotEmpty) {
+        content = (await encryption.encrypt(localPlain, key)).toBase64();
+      }
     }
+    if (content == null || content.isEmpty) return null;
     return BackupEntry(
       id: id,
       type: type,

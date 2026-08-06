@@ -322,7 +322,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                _compatibilityItem(dialogContext, '改密码的正确步骤', '① 改密码前，先在「导出备份」生成 .clipflow-backup.json；\n② 在解锁页输入新密码（= 进入新账户）；\n③ 在新账户下「导入备份」，选择备份文件并输入旧密码；\n④ 数据恢复完成。'),
+                _compatibilityItem(dialogContext, '改密码的正确步骤', '① 改密码前，先在「导出备份」生成 .clipflow-backup.json；\n② 在解锁页点击「切换到其他账户」（确认后清除本机旧账户标记），再输入新密码（= 进入新账户）；\n③ 在新账户下「导入备份」，选择备份文件并输入旧密码；\n④ 数据恢复完成。'),
                 _compatibilityItem(dialogContext, '注意', '旧账户数据仍保留在旧密码下，不会被删除。'),
               ],
             ),

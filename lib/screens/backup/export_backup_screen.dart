@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../../models/backup_manifest.dart';
 import '../../providers/clipboard_provider.dart';
 import '../../services/backup_service.dart';
 import '../../services/encryption_service.dart';
@@ -43,10 +42,10 @@ class _ExportBackupScreenState extends State<ExportBackupScreen> {
         XTypeGroup(label: 'ClipFlow 备份', extensions: ['json']),
       ],
     );
-    if (location == null || location.path == null || location.path!.isEmpty) {
+    if (location == null || location.path.isEmpty) {
       return; // 用户取消
     }
-    final targetPath = location.path!;
+    final targetPath = location.path;
 
     setState(() {
       _exporting = true;

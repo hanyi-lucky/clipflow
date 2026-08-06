@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:clipflow/core/constants.dart';
 import 'package:clipflow/core/exceptions.dart';
 import 'package:clipflow/core/hex_utils.dart';
 import 'package:clipflow/models/backup_manifest.dart';
@@ -283,6 +284,63 @@ void main() {
     );
     final manifest = await service.buildExport(deviceName: 'd', encryptionKey: key);
     expect(manifest.saltHex, saltHex);
+  });
+
+  test('buildExport：本地明文达到截断上限时优先走服务端 /content 全量密文', () async {
+    // 本地历史存被截断到 50000 的明文（v1.3 遗留超长文本），服务端有全量密文
+    final cappedLocal = 'x' * AppConstants.maxContentLength;
+    final fullPlain = 'y' * 60000;
+    final fullCipher = (await encryption.encrypt(fullPlain, key)).toBase64();
+    history.addEntry(ClipboardEntry(
+      id: 'long1',
+      content: cappedLocal,
+      sourceDeviceId: 'd1',
+      sourceDeviceName: 'Mac',
+      sourcePlatform: 'macos',
+      timestamp: DateTime.fromMillisecondsSinceEpoch(1),
+      type: ContentType.text,
+    ));
+    repo.history = [serverRow(id: 'long1', type: 'text', content: 'TRUNC')];
+    repo.contents['long1'] = fullCipher;
+
+    final manifest = await buildService().buildExport(
+      deviceName: 'dev',
+      encryptionKey: key,
+    );
+
+    final entry = manifest.entries.single;
+    // 备份内容必须是服务端全量密文（解密得到 60000 字符），而非本地截断明文
+    expect(
+      await encryption.decrypt(EncryptedData.fromBase64(entry.content), key),
+      fullPlain,
+    );
+    expect(repo.contentFallbackCalls, greaterThanOrEqualTo(1));
+  });
+
+  test('buildExport：本地明文达到截断上限且服务端 /content 缺失时回退本地明文', () async {
+    final cappedLocal = 'x' * AppConstants.maxContentLength;
+    history.addEntry(ClipboardEntry(
+      id: 'long2',
+      content: cappedLocal,
+      sourceDeviceId: 'd1',
+      sourceDeviceName: 'Mac',
+      sourcePlatform: 'macos',
+      timestamp: DateTime.fromMillisecondsSinceEpoch(2),
+      type: ContentType.text,
+    ));
+    repo.history = [serverRow(id: 'long2', type: 'text', content: 'TRUNC')];
+    // repo.contents 无 long2 → 服务端兜底失败，回退本地明文（不丢弃条目）
+
+    final manifest = await buildService().buildExport(
+      deviceName: 'dev',
+      encryptionKey: key,
+    );
+
+    final entry = manifest.entries.single;
+    expect(
+      await encryption.decrypt(EncryptedData.fromBase64(entry.content), key),
+      cappedLocal,
+    );
   });
 
   group('BackupService importBackup', () {

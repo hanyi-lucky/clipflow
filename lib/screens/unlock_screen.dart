@@ -25,6 +25,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
   final _authGuard = AuthGuard();
   LocalStorage? _storage;
   bool _isFirstTime = true;
+  bool _hasStoredUserId = false;
   bool _initialized = false;
   bool _authSuccess = false;
   bool _isWeakPassword = false;
@@ -53,6 +54,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
       if (!mounted) return;
       setState(() {
         _isFirstTime = storage.encryptionSalt == null;
+        _hasStoredUserId = storage.userId != null;
         _initialized = true;
         _authSuccess = true;
       });
@@ -173,6 +175,47 @@ class _UnlockScreenState extends State<UnlockScreen> {
     if (mounted) {
       setState(() => _loading = false);
     }
+  }
+
+  /// 切换到其他账户：确认后清除本机账户标记与本地缓存（含加密盐），
+  /// 使解锁页可输入新密码进入新账户（改密码迁移主流程的出口）。
+  Future<void> _confirmSwitchAccount() async {
+    final storage = _storage ?? await LocalStorage.create();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('切换到其他账户'),
+          content: const Text(
+            '切换账户将清除本机已保存的账户标记与本地缓存（含加密盐），\n'
+            '当前账户数据需先用「导出备份」保存，之后在新账户下用「导入备份」恢复。\n\n'
+            '确定要继续切换吗？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('继续切换'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    if (!mounted) return;
+
+    await storage.clearAccountIdentity();
+    _authGuard.reset();
+    _passwordController.clear();
+    setState(() {
+      _hasStoredUserId = false;
+      _isFirstTime = true;
+      _isWeakPassword = false;
+      _error = null;
+    });
   }
 
   @override
@@ -400,6 +443,14 @@ class _UnlockScreenState extends State<UnlockScreen> {
                                 ),
                         ),
                       ),
+                      if (_hasStoredUserId) ...[
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: _loading ? null : _confirmSwitchAccount,
+                          icon: const Icon(Icons.switch_account_outlined, size: 18),
+                          label: const Text('切换到其他账户'),
+                        ),
+                      ],
                     ],
                   ],
                 ),
