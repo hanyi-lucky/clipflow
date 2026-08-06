@@ -130,11 +130,6 @@ class ClipboardPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     result.success(true)
                 }
             }
-            "syncClipboard" -> {
-                // SyncNotificationReceiver already directly invokes Flutter's
-                // MethodChannel; this handler only acknowledges the call.
-                result.success(true)
-            }
             "hasImage" -> {
                 val clip = clipboardManager?.primaryClip
                 result.success(clip?.description?.hasMimeType("image/*") == true)

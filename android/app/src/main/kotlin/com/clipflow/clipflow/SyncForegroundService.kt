@@ -10,7 +10,6 @@ class SyncForegroundService : Service() {
     companion object {
         const val NOTIFICATION_ID = 1
         const val CHANNEL_ID = "clipflow_sync_channel"
-        const val ACTION_SYNC_NOW = "com.clipflow.clipflow.SYNC_NOW"
     }
 
     override fun onCreate() {
@@ -46,12 +45,21 @@ class SyncForegroundService : Service() {
     }
 
     private fun buildNotification(status: String): Notification {
-        // Click notification → open app → onResume triggers syncClipboard()
+        // 整条通知点击 → 打开 App → onResume 触发 triggerSync()
+        // 「立即同步」按钮与整条点击共用 getActivity 拉起路径（不同 requestCode）：
+        // Android 10+ 禁止后台启动 Activity，广播（getBroadcast）是历史「点击无效果」的根源，
+        // 因此这里不使用广播，只用 getActivity（通知 Action 属用户可见交互，不受后台启动限制）。
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
         }
-        val pendingIntent = PendingIntent.getActivity(
+        // 整条通知点击：打开 App（requestCode 0）
+        val openPendingIntent = PendingIntent.getActivity(
             this, 0, launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        // 「立即同步」按钮：同样拉起 App，前台 onResume 触发一次同步（requestCode 1 与整条区分）
+        val syncNowPendingIntent = PendingIntent.getActivity(
+            this, 1, launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -62,7 +70,12 @@ class SyncForegroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .setShowWhen(false)
-            .setContentIntent(pendingIntent)  // Click notification to open app
+            .setContentIntent(openPendingIntent)  // Click notification to open app
+            .addAction(
+                android.R.drawable.ic_popup_sync,
+                "立即同步",
+                syncNowPendingIntent
+            )
             .build()
     }
 

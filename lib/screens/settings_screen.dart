@@ -145,7 +145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const Divider(height: 1, indent: 16),
                         SwitchListTile(
                           title: const Text('通知栏同步'),
-                          subtitle: const Text('显示常驻通知，点击打开 App 并立即同步'),
+                          subtitle: const Text('显示常驻通知，点击通知打开 App 并立即同步'),
                           value: settings.notificationSync,
                           onChanged: (v) async {
                             await settings.setNotificationSync(v);

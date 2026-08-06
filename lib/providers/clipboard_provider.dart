@@ -574,7 +574,7 @@ class ClipboardProvider extends ChangeNotifier
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && Platform.isAndroid) {
       if (_settingsProvider?.autoSyncOnResume ?? true) {
-        _monitor?.syncClipboard();
+        triggerSync();
       }
     }
   }
@@ -582,8 +582,17 @@ class ClipboardProvider extends ChangeNotifier
   // -- External sync trigger --
 
   /// External entry point for triggering sync (e.g., from notification action)
+  ///
+  /// 「打开并同步」：先上传本地剪贴板；若轮询未在运行（如「后台自动同步」
+  /// 关闭），再补一次下载，保证双向同步。防重入：上传沿用 monitor
+  /// `_isSyncing`，下载沿用 `_isRefreshing`/`_isLoadingHistory`，且仅在轮询
+  /// 未运行时补下载，避免与 500ms loop 并发双下载。
   Future<void> triggerSync() async {
     await _monitor?.syncClipboard();
+    if (_syncTimer != null || _nextSyncTimer != null) return;
+    if (_disposed || _syncService == null || _cloudRepo == null) return;
+    if (_isRefreshing || _isLoadingHistory) return;
+    await _performDownload();
   }
 
   /// Start the background sync service (notification-driven sync)
@@ -961,6 +970,16 @@ class ClipboardProvider extends ChangeNotifier
       return;
     }
 
+    await _performDownload();
+    _scheduleNextSync();
+  }
+
+  /// 下载核心：拉取最新内容并处理删除/恢复/图片/文件/文本。
+  ///
+  /// 不含 paused/刷新守卫与轮询调度（`_scheduleNextSync`），由 `_syncTick`
+  /// （轮询）与 `triggerSync`（通知「打开并同步」的一次性下载）复用，
+  /// 保证下载逻辑单一来源。
+  Future<void> _performDownload() async {
     try {
       final result = await _syncService!.downloadLatestContent();
 
@@ -1045,7 +1064,6 @@ class ClipboardProvider extends ChangeNotifier
         }
       }
     }
-    _scheduleNextSync();
   }
 
   /// 处理恢复同步条目：按 type 分流。

@@ -547,16 +547,6 @@ class ClipboardMonitor extends ChangeNotifier {
           }
         }
         break;
-      case 'syncClipboard':
-        // Native layer passes clipboard content (Android 10+ can't read clipboard from background)
-        final clipboardText = call.arguments as String?;
-        if (clipboardText != null && clipboardText.isNotEmpty) {
-          await syncClipboard(preReadContent: clipboardText);
-        } else {
-          // Fallback: try reading from Flutter (for foreground cases)
-          await syncClipboard();
-        }
-        break;
     }
   }
 

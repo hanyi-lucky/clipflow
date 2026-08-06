@@ -33,13 +33,6 @@
             android:foregroundServiceType="dataSync"
             android:exported="false"/>
 
-        <receiver
-            android:name=".SyncNotificationReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.clipflow.clipflow.SYNC_NOW"/>
-            </intent-filter>
-        </receiver>
 
         <!-- 图片剪切板：通过 FileProvider 向其他应用提供图片 content URI -->
         <provider
