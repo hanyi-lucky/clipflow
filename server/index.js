@@ -87,6 +87,54 @@ function computeRetryAfterMs(now, keys) {
   return Math.max(wait, 1000);
 }
 
+// 崩溃上报限流（POST /api/crash）：独立于 authBuckets 的内存双滑动窗口（IP 桶 + userId 桶），
+// 全部 env 可调。崩溃可能发生在未登录态，匿名上报由 IP 桶 + body 上限 + 30 天清理兜底。
+const CRASH_MAX_IP_REQUESTS = envInt('CRASH_MAX_IP_REQUESTS', 20);
+const CRASH_MAX_USER_REQUESTS = envInt('CRASH_MAX_USER_REQUESTS', 10);
+const CRASH_WINDOW_MS = envInt('CRASH_WINDOW_MS', 60000);
+const CRASH_CLEANUP_MS = envInt('CRASH_CLEANUP_MS', 60000);
+// 单条崩溃报告 body 上限（全局 express.json 50mb 已先行解析，路由级 limit 不生效，handler 内校验）
+const CRASH_MAX_BODY_BYTES = 256 * 1024;
+// 崩溃报告保留期：30 天（小时级清理任务执行）
+const CRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// key -> 窗口内时间戳数组（'crash-ip:'+ip / 'crash-user:'+userId）
+const crashBuckets = new Map();
+
+function isCrashLimited(key, now) {
+  const stamps = crashBuckets.get(key) || [];
+  const kept = stamps.filter((t) => now - t < CRASH_WINDOW_MS);
+  crashBuckets.set(key, kept);
+  return kept.length >= (key.startsWith('crash-user:') ? CRASH_MAX_USER_REQUESTS : CRASH_MAX_IP_REQUESTS);
+}
+
+function recordCrash(key, now) {
+  const stamps = crashBuckets.get(key) || [];
+  stamps.push(now);
+  crashBuckets.set(key, stamps);
+}
+
+// 计算最早超龄时间差；窗口已被 prune 清空时兜底返回整个窗口
+function computeCrashRetryAfterMs(now, keys) {
+  let earliest = Infinity;
+  for (const key of keys) {
+    for (const t of crashBuckets.get(key) || []) {
+      if (t < earliest) earliest = t;
+    }
+  }
+  const wait = earliest === Infinity ? CRASH_WINDOW_MS : (earliest + CRASH_WINDOW_MS - now);
+  return Math.max(wait, 1000);
+}
+
+// 清理过期时间戳，防止内存膨胀
+function pruneCrashBuckets(now) {
+  for (const [key, stamps] of crashBuckets) {
+    const kept = stamps.filter((t) => now - t < CRASH_WINDOW_MS);
+    if (kept.length === 0) crashBuckets.delete(key);
+    else crashBuckets.set(key, kept);
+  }
+}
+
 // 中间件
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -159,7 +207,20 @@ db.exec(`
     device_id TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS crash_reports (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    device_id TEXT,
+    app_version TEXT,
+    platform TEXT,
+    device_model TEXT,
+    exception_type TEXT,
+    message TEXT,
+    stack TEXT,
+    reported_at INTEGER NOT NULL
+  );
 `);
+
 
 // 为已有数据库的 history 表添加 deleted_at 列（如果不存在）
 try { db.exec('ALTER TABLE history ADD COLUMN deleted_at INTEGER DEFAULT NULL'); } catch(e) {}
@@ -208,6 +269,23 @@ function authenticate(req, res, next) {
   if (row.device_id) {
     db.prepare('UPDATE devices SET last_seen = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
       .run(row.device_id, row.user_id);
+  }
+  next();
+}
+
+// 可选认证：有有效 token 则填充 req.userId/req.token（并刷新设备心跳），
+// 无/无效 token 放行——崩溃上报在未登录/解锁页也可匿名上报（由限流兜底）。
+function authenticateOptional(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return next();
+  const row = db.prepare('SELECT user_id, device_id FROM tokens WHERE token = ?').get(token);
+  if (row) {
+    req.userId = row.user_id;
+    req.token = token;
+    if (row.device_id) {
+      db.prepare('UPDATE devices SET last_seen = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+        .run(row.device_id, row.user_id);
+    }
   }
   next();
 }
@@ -746,6 +824,45 @@ app.post('/api/salt', authenticate, (req, res) => {
   res.json({ code: 'SUCCESS' });
 });
 
+// 崩溃上报：可选认证 + 独立双滑动窗口限流 + stack 必填 + body 256KB + 字段裁剪入库。
+// 白名单字段（异常类型/消息/栈/平台/机型/版本/设备/指纹/时间），绝不采集剪贴板明文/密码。
+app.post('/api/crash', authenticateOptional, (req, res) => {
+  const now = Date.now();
+  const keys = ['crash-ip:' + clientIp(req)];
+  if (req.userId) keys.push('crash-user:' + req.userId);
+  if (keys.some((k) => isCrashLimited(k, now))) {
+    const retryAfterMs = computeCrashRetryAfterMs(now, keys);
+    res.set('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
+    return res.status(429).json({
+      code: 'RATE_LIMITED',
+      message: 'Too many crash reports',
+      retryAfterMs,
+    });
+  }
+
+  const body = req.body || {};
+  const stack = typeof body.stack === 'string' ? body.stack : '';
+  if (stack.trim().length === 0) {
+    return res.status(400).json({ code: 'ERROR', message: 'stack is required' });
+  }
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') > CRASH_MAX_BODY_BYTES) {
+    return res.status(413).json({ code: 'ERROR', message: 'Crash report too large' });
+  }
+
+  // 校验通过才记账（与 /auth 同语义），避免非法请求刷爆桶
+  keys.forEach((k) => recordCrash(k, now));
+
+  const safe = (v, max) => (typeof v === 'string' ? v.slice(0, max) : null);
+  db.prepare(`INSERT INTO crash_reports (id, user_id, device_id, app_version, platform, device_model, exception_type, message, stack, reported_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(uuidv4(), req.userId || null,
+      safe(body.deviceId, 64), safe(body.appVersion, 64), safe(body.platform, 32),
+      safe(body.deviceModel, 300), safe(body.exceptionType, 128),
+      safe(body.message, 5000), stack.slice(0, 100000), now);
+
+  res.json({ code: 'SUCCESS' });
+});
+
 // 全局错误处理中间件
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
@@ -769,14 +886,16 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   console.log(`ClipFlow server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/ping`);
 
-  // 登录限流桶定时清理（防内存膨胀；重启清零=更宽松，接受）
+  // 登录限流桶与崩溃限流桶定时清理（防内存膨胀；重启清零=更宽松，接受）
   setInterval(() => {
     pruneAuthBuckets(Date.now());
-  }, AUTH_CLEANUP_MS);
+    pruneCrashBuckets(Date.now());
+  }, Math.min(AUTH_CLEANUP_MS, CRASH_CLEANUP_MS));
 
-  // 每小时清理过期 token 和超过 24h 的已删除条目
+  // 每小时清理过期 token、超过 24h 的已删除条目，以及超过 30 天的崩溃报告
   setInterval(() => {
     db.prepare("DELETE FROM tokens WHERE created_at < datetime('now', '-1 day')").run();
+    db.prepare('DELETE FROM crash_reports WHERE reported_at < ?').run(Date.now() - CRASH_RETENTION_MS);
 
     // 软删超过 24h 的 file 行先收集 file_key，物理删除后同步清理磁盘文件
     const expiredFileRows = db.prepare(

@@ -7,7 +7,8 @@ import '../core/exceptions.dart';
 class CloudBaseService {
   // 服务器地址：Cloudflare Tunnel 标准 443（无需备案）。
   // 旧直连地址保留作回退：http://121.196.222.122:3000/api
-  static const _baseUrl = 'https://api.yihanlife.ccwu.cc/api';
+  static const String baseUrl = 'https://api.yihanlife.ccwu.cc/api';
+  static const _baseUrl = baseUrl;
 
   String? _token;
   String? _openId;
@@ -31,6 +32,9 @@ class CloudBaseService {
     }
     return RateLimitedException(retryAfterMs);
   }
+
+  /// 当前 token（崩溃上报等跨服务场景需要，避免 URL/token 双源漂移）。
+  String? get authToken => _token;
 
   /// Clear all authentication state
   void clearToken() {

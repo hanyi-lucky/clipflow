@@ -23,6 +23,12 @@ class AuthProvider extends ChangeNotifier {
   bool get isAuthenticated => _cloudService.isLoggedIn;
   String get userId => _cloudService.openId ?? '';
 
+  /// 当前登录 token（可空：未登录/已登出）。崩溃上报匿名兜底用。
+  String? get authToken => _cloudService.authToken;
+
+  /// 当前设备 ID（注册完成后才有；可空）。崩溃上报元信息用。
+  String? get currentDeviceIdOrNull => _currentDevice?.id;
+
   Device? _currentDevice;
   Device get currentDevice {
     if (_currentDevice == null) {

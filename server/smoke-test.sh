@@ -47,6 +47,7 @@ start_server() {
   PORT="${TEST_PORT}" FILE_DIR="${FILE_DIR}" MAX_FILE_BYTES="${MAX_FILE_BYTES}" \
     USER_FILE_QUOTA_BYTES="${USER_FILE_QUOTA_BYTES}" GLOBAL_FILE_QUOTA_BYTES="${GLOBAL_FILE_QUOTA_BYTES}" \
     AUTH_MAX_USER_REQUESTS=5 AUTH_MAX_IP_REQUESTS=6 AUTH_WINDOW_MS=2000 \
+    CRASH_MAX_IP_REQUESTS=5 CRASH_MAX_USER_REQUESTS=3 CRASH_WINDOW_MS=60000 \
     node "${SCRIPT_DIR}/index.js" &
   SERVER_PID=$!
 
@@ -548,5 +549,113 @@ if [ "$CODE" != "200" ]; then
   exit 1
 fi
 echo "    ok (independent IP not limited)"
+
+
+echo "==> 21. 崩溃上报：带 token POST /api/crash -> 200 SUCCESS，直查库断言入库字段"
+CRASH_IP_A="198.51.100.10"
+curl -fsS -X POST "${BASE}/crash" -H "$AUTH" -H 'Content-Type: application/json' \
+  -H "X-Forwarded-For: ${CRASH_IP_A}" \
+  -d '{"exceptionType":"TestCrash","message":"boom","stack":"Test stack line 1\nline 2","platform":"macos","deviceModel":"MacBookPro18,3","appVersion":"1.5.0+1","deviceId":"smoke-device"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"){console.error("FAIL crash upload: "+s);process.exit(1)}console.log("    ok (code=SUCCESS)")})'
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const rows = db.prepare("SELECT * FROM crash_reports WHERE exception_type = ? ORDER BY reported_at DESC LIMIT 1").all("TestCrash");
+if (rows.length !== 1) { console.error("FAIL: no crash row"); process.exit(1); }
+const r = rows[0];
+if (r.user_id !== "user_smoke_v13") { console.error("FAIL user_id: " + r.user_id); process.exit(1); }
+if (r.stack !== "Test stack line 1\nline 2") { console.error("FAIL stack: " + r.stack); process.exit(1); }
+if (r.app_version !== "1.5.0+1") { console.error("FAIL app_version: " + r.app_version); process.exit(1); }
+if (r.platform !== "macos") { console.error("FAIL platform: " + r.platform); process.exit(1); }
+if (typeof r.reported_at !== "number" || r.reported_at <= 0) { console.error("FAIL reported_at: " + r.reported_at); process.exit(1); }
+console.log("    ok (row: user_id/app_version/platform/stack/reported_at)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}"
+
+echo "==> 22. 崩溃上报：匿名（无 token）-> 200，直查库断言 user_id IS NULL"
+CRASH_IP_B="198.51.100.11"
+curl -fsS -X POST "${BASE}/crash" -H 'Content-Type: application/json' \
+  -H "X-Forwarded-For: ${CRASH_IP_B}" \
+  -d '{"exceptionType":"AnonymousCrash","message":"anonymous","stack":"anon stack","platform":"android","deviceModel":"Xiaomi 15","appVersion":"1.5.0+1"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"){console.error("FAIL anonymous crash: "+s);process.exit(1)}console.log("    ok (code=SUCCESS)")})'
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const rows = db.prepare("SELECT * FROM crash_reports WHERE exception_type = ? ORDER BY reported_at DESC LIMIT 1").all("AnonymousCrash");
+if (rows.length !== 1) { console.error("FAIL: no anonymous crash row"); process.exit(1); }
+if (rows[0].user_id !== null) { console.error("FAIL: expected user_id NULL, got " + rows[0].user_id); process.exit(1); }
+console.log("    ok (user_id NULL)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}"
+
+echo "==> 23. 崩溃上报：缺 stack -> 400"
+CRASH_IP_C="198.51.100.12"
+CODE=$(curl -sS -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/crash" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${CRASH_IP_C}" -d '{"exceptionType":"NoStack","message":"no stack"}' || true)
+if [ "$CODE" != "400" ]; then
+  echo "FAIL: missing stack expect 400 got ${CODE}" >&2
+  exit 1
+fi
+node -e '
+const fs = require("fs");
+const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (body.code !== "ERROR") { console.error("FAIL missing stack body: " + fs.readFileSync(process.argv[1], "utf8")); process.exit(1); }
+console.log("    ok (400 ERROR)");
+' "${RATE_BODY}"
+
+echo "==> 24. 崩溃上报 IP 桶限流：同 XFF IP 连发 6 次，第 6 次 429 + Retry-After"
+CRASH_IP_RATE="198.51.100.99"
+ok=1
+for i in $(seq 1 5); do
+  CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/crash" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${CRASH_IP_RATE}" -d "{\"stack\":\"rate test ${i}\"}" || true)
+  if [ "$CODE" != "200" ]; then
+    echo "FAIL: crash ip attempt $i expect 200 got ${CODE}" >&2
+    ok=0
+    break
+  fi
+done
+if [ "$ok" = "1" ]; then
+  CODE=$(curl -sS -D "${RATE_HEADERS}" -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/crash" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${CRASH_IP_RATE}" -d '{"stack":"rate limit test"}' || true)
+  if [ "$CODE" != "429" ]; then
+    echo "FAIL: crash ip attempt 6 expect 429 got ${CODE}" >&2
+    ok=0
+  elif ! grep -qi '^Retry-After:' "${RATE_HEADERS}"; then
+    echo "FAIL: Retry-After header missing on crash 429" >&2
+    ok=0
+  else
+    echo "    ok (429 via crash IP bucket + Retry-After)"
+  fi
+fi
+if [ "$ok" != "1" ]; then
+  exit 1
+fi
+
+echo "==> 25. 崩溃上报 userId 桶限流：同 token 用户连发 4 次，第 4 次 429"
+CRASH_USER_IP="198.51.100.50"
+CRASH_USER="user_smoke_crash_bucket"
+CRASH_USER_TOKEN=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
+  -H "X-Forwarded-For: ${CRASH_USER_IP}" -d "{\"userId\":\"${CRASH_USER}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+CRASH_USER_AUTH="Authorization: Bearer ${CRASH_USER_TOKEN}"
+ok=1
+for i in $(seq 1 3); do
+  CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/crash" -H "$CRASH_USER_AUTH" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${CRASH_USER_IP}" -d "{\"stack\":\"user bucket ${i}\"}" || true)
+  if [ "$CODE" != "200" ]; then
+    echo "FAIL: crash user attempt $i expect 200 got ${CODE}" >&2
+    ok=0
+    break
+  fi
+done
+if [ "$ok" = "1" ]; then
+  CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/crash" -H "$CRASH_USER_AUTH" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${CRASH_USER_IP}" -d '{"stack":"user bucket limit"}' || true)
+  if [ "$CODE" != "429" ]; then
+    echo "FAIL: crash user attempt 4 expect 429 got ${CODE}" >&2
+    ok=0
+  else
+    echo "    ok (429 via crash userId bucket)"
+  fi
+fi
+if [ "$ok" != "1" ]; then
+  exit 1
+fi
 
 echo "SMOKE TEST PASSED"
