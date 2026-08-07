@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:clipflow/core/constants.dart';
 import 'package:clipflow/core/exceptions.dart';
 import 'package:clipflow/core/hex_utils.dart';
+import 'package:clipflow/core/user_id.dart';
 import 'package:clipflow/models/backup_manifest.dart';
 import 'package:clipflow/models/clipboard_entry.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
@@ -601,6 +602,325 @@ void main() {
         fileBytes,
       );
     });
+
+  group('BackupService cloud pull', () {
+    const oldPassword = 'old-password';
+    const newPassword = 'new-password';
+    final oldSaltHex =
+        'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
+    final newSaltHex =
+        'ccddeeff00112233445566778899aabbccddeeff00112233445566778899aabb';
+
+    late EncryptionService encryption;
+    late Uint8List oldKey;
+    late Uint8List newKey;
+    late FakeCloudPullRepo source;
+    late FakeImportRepo importRepo;
+    late LocalStorage storage;
+    late LocalImageStore imageStore;
+    late LocalFileStore fileStore;
+    late HistoryService history;
+    late Directory tempDir;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      encryption = EncryptionService();
+      oldKey = await encryption.deriveKey(oldPassword, hexToBytes(oldSaltHex));
+      newKey = await encryption.deriveKey(newPassword, hexToBytes(newSaltHex));
+      source = FakeCloudPullRepo()..salt = oldSaltHex;
+      importRepo = FakeImportRepo();
+      storage = LocalStorage(await SharedPreferences.getInstance());
+      // 本地盐预设为新账户盐：云拉取 manifest.saltHex 必须忽略它
+      await storage.setEncryptionSalt(newSaltHex);
+      tempDir = await Directory.systemTemp.createTemp('clipflow_cloudpull_');
+      imageStore = LocalImageStore(directoryPath: tempDir.path);
+      fileStore = LocalFileStore(directoryPath: tempDir.path);
+      history = HistoryService(maxEntries: 100);
+    });
+
+    tearDown(() async {
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
+    BackupService buildService() => BackupService(
+          cloudRepo: importRepo,
+          storage: storage,
+          imageStore: imageStore,
+          fileStore: fileStore,
+          historyService: history,
+          encryption: encryption,
+        );
+
+    String currentUserId() => deriveUserId(newPassword);
+
+    // 构造旧账户：text/image/file 三类；列表 content 故意用截断占位，全量密文放 /content
+    Future<void> seedOldAccount() async {
+      final textCipher = (await encryption.encrypt('cloud text', oldKey)).toBase64();
+      final imageCipher = (await encryption.encryptBytes(
+        Uint8List.fromList(List.generate(48, (i) => i)),
+        oldKey,
+      )).toBase64();
+      final thumbCipher = (await encryption.encryptBytes(
+        Uint8List.fromList([3, 3, 3]),
+        oldKey,
+      )).toBase64();
+      final fileCipherBytes = (await encryption.encryptBytes(
+        Uint8List.fromList(List.generate(160, (i) => i % 247)),
+        oldKey,
+      )).toBytes();
+
+      source.history = [
+        serverRow(
+          id: 'ct1',
+          type: 'text',
+          timestamp: 1,
+          content: 'TRUNCATED-LIST-CONTENT',
+        ),
+        serverRow(
+          id: 'ci1',
+          type: 'image',
+          timestamp: 2,
+          thumb: thumbCipher,
+          extra: {'width': 12, 'height': 34, 'format': 'jpeg', 'hash': 'ci-hash'},
+        ),
+        serverRow(
+          id: 'cf1',
+          type: 'file',
+          timestamp: 3,
+          extra: {
+            'file_name': 'note.pdf',
+            'file_size': 160,
+            'mime_type': 'application/pdf',
+            'hash': 'cf-hash',
+          },
+        ),
+      ];
+      source.contents['ct1'] = textCipher;
+      source.contents['ci1'] = imageCipher;
+      source.fileContents['cf1'] = fileCipherBytes;
+    }
+
+    test('端到端：旧账户 text/image/file → 新账户落库，historyId 保留、新密钥可解回明文', () async {
+      await seedOldAccount();
+      final result = await buildService().pullFromCloud(
+        sourceRepo: source,
+        currentUserId: currentUserId(),
+        oldPassword: oldPassword,
+        newKey: newKey,
+        deviceId: 'new-dev',
+        deviceName: 'New Mac',
+        devicePlatform: 'macos',
+      );
+
+      expect(result.imported, 3);
+      expect(result.failed, 0);
+
+      // text：内容来自 /content 全量（列表 content 是截断占位，若被使用必解密失败）
+      final textRow =
+          importRepo.uploadedHistory.firstWhere((r) => r['historyId'] == 'ct1');
+      expect(textRow['timestamp'], 1);
+      expect(
+        await encryption.decrypt(
+          EncryptedData.fromBase64(textRow['content'] as String),
+          newKey,
+        ),
+        'cloud text',
+      );
+      // 旧密钥解新密文必须失败（确实重加密）
+      expect(
+        () => encryption.decrypt(
+          EncryptedData.fromBase64(textRow['content'] as String),
+          oldKey,
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      // image：content/thumb 新密钥可解，元数据保留
+      final imgRow =
+          importRepo.uploadedHistory.firstWhere((r) => r['historyId'] == 'ci1');
+      expect(imgRow['timestamp'], 2);
+      expect(imgRow['width'], 12);
+      expect(
+        await encryption.decryptBytes(
+          EncryptedData.fromBase64(imgRow['content'] as String),
+          newKey,
+        ),
+        Uint8List.fromList(List.generate(48, (i) => i)),
+      );
+      expect(
+        await encryption.decryptBytes(
+          EncryptedData.fromBase64(imgRow['thumb'] as String),
+          newKey,
+        ),
+        Uint8List.fromList([3, 3, 3]),
+      );
+
+      // file：流式上传，字节新密钥可解
+      final fileRow =
+          importRepo.uploadedFiles.firstWhere((r) => r['historyId'] == 'cf1');
+      expect(fileRow['fileName'], 'note.pdf');
+      expect(fileRow['fileSize'], 160);
+      expect(fileRow['plaintextHash'], 'cf-hash');
+      expect(
+        await encryption.decryptBytes(
+          EncryptedData.fromBytes(Uint8List.fromList(fileRow['bytes'] as List<int>)),
+          newKey,
+        ),
+        Uint8List.fromList(List.generate(160, (i) => i % 247)),
+      );
+
+      // 编排顺序：verify(limit 10) → build(limit 100)，salt 只走旧 repo
+      expect(source.historyLimits, [10, 100]);
+      expect(source.saltCalls, 2);
+      // verify(ct1) + build(ct1/ci1) 走 /content；file marker 查找不计数（fake 无 marker）
+      expect(source.contentFallbackCalls, greaterThanOrEqualTo(3));
+      expect(source.downloadFileCalls, 1); // file 走文件流全量
+    });
+
+    test('截断文本强制走 /content 全量：列表 content 截断不误判旧密码错误', () async {
+      final textCipher = (await encryption.encrypt('long plaintext', oldKey)).toBase64();
+      source.history = [
+        serverRow(
+          id: 'trunc-1',
+          type: 'text',
+          timestamp: 1,
+          content: 'TRUNCATED-LIST-CONTENT',
+        ),
+      ];
+      source.contents['trunc-1'] = textCipher;
+
+      final result = await buildService().pullFromCloud(
+        sourceRepo: source,
+        currentUserId: currentUserId(),
+        oldPassword: oldPassword,
+        newKey: newKey,
+        deviceId: 'd',
+        deviceName: 'n',
+        devicePlatform: 'p',
+      );
+
+      expect(result.imported, 1);
+      expect(result.failed, 0);
+      expect(source.contentFallbackCalls, greaterThanOrEqualTo(1));
+      final row = importRepo.uploadedHistory.single;
+      expect(
+        await encryption.decrypt(
+          EncryptedData.fromBase64(row['content'] as String),
+          newKey,
+        ),
+        'long plaintext',
+      );
+    });
+
+    test('错误旧密码：verify 前置终止抛 DecryptionException，新账户零写入', () async {
+      await seedOldAccount();
+      expect(
+        () => buildService().pullFromCloud(
+          sourceRepo: source,
+          currentUserId: currentUserId(),
+          oldPassword: 'wrong-password',
+          newKey: newKey,
+          deviceId: 'd',
+          deviceName: 'n',
+          devicePlatform: 'p',
+        ),
+        throwsA(isA<DecryptionException>()),
+      );
+      expect(importRepo.uploadedHistory, isEmpty);
+      expect(importRepo.uploadedFiles, isEmpty);
+
+      // verifyCloudAccount 独立调用同样抛错
+      expect(
+        () => buildService().verifyCloudAccount(
+          sourceRepo: source,
+          oldPassword: 'wrong-password',
+        ),
+        throwsA(isA<DecryptionException>()),
+      );
+    });
+
+    test('空账户：salt 缺失或 history 为空 → CloudPullException(emptyAccount)', () async {
+      // salt 缺失
+      source.salt = null;
+      expect(
+        () => buildService().pullFromCloud(
+          sourceRepo: source,
+          currentUserId: currentUserId(),
+          oldPassword: oldPassword,
+          newKey: newKey,
+          deviceId: 'd',
+          deviceName: 'n',
+          devicePlatform: 'p',
+        ),
+        throwsA(
+          isA<CloudPullException>().having(
+            (e) => e.type,
+            'type',
+            CloudPullErrorType.emptyAccount,
+          ),
+        ),
+      );
+
+      // salt 有但 history 空
+      source.salt = oldSaltHex;
+      source.history = [];
+      expect(
+        () => buildService().verifyCloudAccount(
+          sourceRepo: source,
+          oldPassword: oldPassword,
+        ),
+        throwsA(
+          isA<CloudPullException>().having(
+            (e) => e.type,
+            'type',
+            CloudPullErrorType.emptyAccount,
+          ),
+        ),
+      );
+    });
+
+    test('同账户：oldPassword 派生 userId == 当前 userId → 拒绝且零网络调用', () async {
+      await seedOldAccount();
+      expect(
+        () => buildService().pullFromCloud(
+          sourceRepo: source,
+          currentUserId: currentUserId(),
+          oldPassword: newPassword, // 与当前密码相同
+          newKey: newKey,
+          deviceId: 'd',
+          deviceName: 'n',
+          devicePlatform: 'p',
+        ),
+        throwsA(
+          isA<CloudPullException>().having(
+            (e) => e.type,
+            'type',
+            CloudPullErrorType.sameAccount,
+          ),
+        ),
+      );
+      expect(source.saltCalls, 0);
+      expect(source.historyLimits, isEmpty);
+      expect(importRepo.uploadedHistory, isEmpty);
+    });
+
+    test('盐强制旧源：storage 预设新盐，manifest.saltHex 仍取旧 repo /api/salt', () async {
+      await seedOldAccount();
+      final manifest = await buildService().buildCloudManifest(sourceRepo: source);
+      expect(manifest.saltHex, oldSaltHex);
+      expect(manifest.saltHex, isNot(newSaltHex));
+      expect(manifest.entries.length, 3);
+      // text 条目内容来自 /content 全量（可解回明文）
+      final textEntry = manifest.entries.firstWhere((e) => e.id == 'ct1');
+      expect(
+        await encryption.decrypt(EncryptedData.fromBase64(textEntry.content), oldKey),
+        'cloud text',
+      );
+    });
+  });
+
   });
 
 }
@@ -660,3 +980,51 @@ class FakeImportRepo extends CloudRepository {
   }
 }
 
+// ==================== 云拉取（旧账户只读源） ====================
+
+/// 模拟旧账户服务端仓库（云拉取只读源；记录调用次数与 limit 以断言编排）。
+class FakeCloudPullRepo extends CloudRepository {
+  FakeCloudPullRepo() : super(CloudBaseService());
+
+  String? salt;
+  List<Map<String, dynamic>> history = [];
+  Map<String, String> contents = {}; // id -> 全量密文（文本/图片）
+  Map<String, List<int>> fileContents = {}; // id -> 文件密文字节
+  int saltCalls = 0;
+  int contentFallbackCalls = 0;
+  int downloadFileCalls = 0;
+  final List<int> historyLimits = [];
+
+  @override
+  Future<String?> getSalt() async {
+    saltCalls++;
+    return salt;
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getHistoryEntries({int limit = 100}) async {
+    historyLimits.add(limit);
+    return List.from(history);
+  }
+
+  @override
+  Future<Map<String, dynamic>?> getHistoryEntryContent(String entryId) async {
+    final c = contents[entryId];
+    if (c == null) return null;
+    contentFallbackCalls++;
+    return {'content': c};
+  }
+
+  @override
+  Future<http.StreamedResponse> downloadFile(String entryId) async {
+    downloadFileCalls++;
+    final bytes = fileContents[entryId];
+    if (bytes == null) {
+      return http.StreamedResponse(const Stream.empty(), 404);
+    }
+    return http.StreamedResponse(
+      http.ByteStream.fromBytes(bytes),
+      200,
+    );
+  }
+}

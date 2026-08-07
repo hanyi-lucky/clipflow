@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import '../core/constants.dart';
 import '../core/exceptions.dart';
 import '../core/hex_utils.dart';
+import '../core/user_id.dart';
 import '../models/backup_manifest.dart';
 import '../models/clipboard_entry.dart';
 import '../repositories/cloud_repository.dart';
@@ -247,6 +248,214 @@ class BackupService {
 
     onProgress?.call(1.0, AppStrings.backupImportDone);
     return ImportResult(imported: imported, failed: failed, errors: errors);
+  }
+
+  /// 云拉取前置预检：确认旧账户存在且旧密码可解密（轻量，避免全量下载后才失败）。
+  ///
+  /// - 旧 salt 缺失 / 历史为空 → [CloudPullException]（emptyAccount）。
+  /// - 首条 text/image 条目解密失败（GCM tag 错）→ [DecryptionException]（旧密码错误）。
+  /// - 旧账户全是 file（罕见）→ 静默通过，由 [importBackup] 首条解密兜底。
+  Future<void> verifyCloudAccount({
+    required CloudRepository sourceRepo,
+    required String oldPassword,
+  }) async {
+    final salt = await sourceRepo.getSalt();
+    if (salt == null || salt.isEmpty) {
+      throw CloudPullException(
+        CloudPullErrorType.emptyAccount,
+        AppStrings.cloudPullEmptyAccount,
+      );
+    }
+    final records = await sourceRepo.getHistoryEntries(limit: 10);
+    if (records.isEmpty) {
+      throw CloudPullException(
+        CloudPullErrorType.emptyAccount,
+        AppStrings.cloudPullEmptyAccount,
+      );
+    }
+    for (final record in records) {
+      final type = record['type'] as String? ?? 'text';
+      if (type == ContentType.file.name) continue;
+      final entry = await _buildCloudEntry(record, sourceRepo);
+      if (entry == null) continue;
+      final oldKey = await encryption.deriveKey(oldPassword, hexToBytes(salt));
+      await _decryptWithOldKey(entry, oldKey); // 解密失败抛 DecryptionException
+      return;
+    }
+  }
+
+  /// 构建云拉取数据源清单（与备份文件等价的 [BackupManifest]）。
+  ///
+  /// 强制服务端全量：text/image 一律 `GET /api/history/:id/content` 全量密文
+  /// （列表接口 content 服务端截断至 10000 字符，截断密文解密必 GCM 失败，
+  /// 禁用）；file 走文件流。manifest.saltHex 强制取旧 repo `GET /api/salt`
+  /// （禁用本地盐——切换账户后 storage.encryptionSalt 是新账户盐）。
+  Future<BackupManifest> buildCloudManifest({
+    required CloudRepository sourceRepo,
+    void Function(double progress, String label)? onProgress,
+  }) async {
+    final saltHex = await sourceRepo.getSalt();
+    if (saltHex == null || saltHex.isEmpty) {
+      throw CloudPullException(
+        CloudPullErrorType.emptyAccount,
+        AppStrings.cloudPullEmptyAccount,
+      );
+    }
+    final records = await sourceRepo.getHistoryEntries(limit: 100);
+    if (records.isEmpty) {
+      throw CloudPullException(
+        CloudPullErrorType.emptyAccount,
+        AppStrings.cloudPullEmptyAccount,
+      );
+    }
+
+    final entries = <BackupEntry>[];
+    for (var i = 0; i < records.length; i++) {
+      onProgress?.call(
+        records.isEmpty ? 1.0 : i / records.length,
+        AppStrings.cloudPullFetching(i + 1, records.length),
+      );
+      final entry = await _buildCloudEntry(records[i], sourceRepo);
+      if (entry != null) entries.add(entry);
+    }
+    onProgress?.call(1.0, AppStrings.cloudPullFetchingLabel);
+
+    return BackupManifest(
+      exportedAt: DateTime.now(),
+      sourceDevice: '',
+      saltHex: saltHex,
+      entries: entries,
+    );
+  }
+
+  /// 云拉取单条数据源条目：与 [_buildBackupEntry] 平行、强制纯服务端来源。
+  /// 绝不读当前账户本地缓存（imageStore/fileStore/historyService）——旧账户
+  /// 数据必须完全来自旧 repo。
+  Future<BackupEntry?> _buildCloudEntry(
+    Map<String, dynamic> record,
+    CloudRepository sourceRepo,
+  ) async {
+    final id = record['id'] as String? ?? '';
+    if (id.isEmpty) return null;
+    final type = record['type'] as String? ?? 'text';
+    final timestamp = (record['timestamp'] as num?)?.toInt() ?? 0;
+    final pinned = (record['pinned'] as int?) == 1;
+    final sourceDeviceId = record['source_device'] as String? ?? 'unknown';
+    final sourceDeviceName = record['source_device_name'] as String? ?? 'Unknown';
+    final sourcePlatform = record['source_platform'] as String? ?? 'unknown';
+
+    if (type == ContentType.image.name) {
+      final content = await _fetchSourceContent(sourceRepo, id);
+      if (content == null) return null;
+      return BackupEntry(
+        id: id,
+        type: type,
+        timestamp: timestamp,
+        sourceDeviceId: sourceDeviceId,
+        sourceDeviceName: sourceDeviceName,
+        sourcePlatform: sourcePlatform,
+        pinned: pinned,
+        content: content,
+        thumb: record['thumb'] as String?,
+        width: (record['width'] as num?)?.toInt(),
+        height: (record['height'] as num?)?.toInt(),
+        format: record['format'] as String?,
+        stableHash: record['hash'] as String?,
+      );
+    }
+
+    if (type == ContentType.file.name) {
+      // marker：服务端 /content 返回标记密文，缺失时 '' 兜底（file 解密走
+      // fileCiphertextBase64，_uploadEntry 会重新生成 marker）
+      final markerData = await sourceRepo.getHistoryEntryContent(id);
+      final marker = markerData?['content'] as String? ?? '';
+
+      // 文件密文字节：服务端文件流全量下载（云拉取无本地 .enc 缓存）
+      String? cipherB64;
+      final response = await sourceRepo.downloadFile(id);
+      if (response.statusCode == 200) {
+        final builder = BytesBuilder(copy: false);
+        await response.stream.forEach(builder.add);
+        cipherB64 = base64Encode(builder.takeBytes());
+      }
+      if (cipherB64 == null || cipherB64.isEmpty) return null;
+      return BackupEntry(
+        id: id,
+        type: type,
+        timestamp: timestamp,
+        sourceDeviceId: sourceDeviceId,
+        sourceDeviceName: sourceDeviceName,
+        sourcePlatform: sourcePlatform,
+        pinned: pinned,
+        content: marker,
+        fileName: record['file_name'] as String?,
+        fileSize: (record['file_size'] as num?)?.toInt(),
+        mimeType: record['mime_type'] as String?,
+        fileHash: record['hash'] as String?,
+        fileCiphertextBase64: cipherB64,
+      );
+    }
+
+    // 文本：强制 /content 全量密文（绝不取列表截断 content）
+    final content = await _fetchSourceContent(sourceRepo, id);
+    if (content == null) return null;
+    return BackupEntry(
+      id: id,
+      type: type,
+      timestamp: timestamp,
+      sourceDeviceId: sourceDeviceId,
+      sourceDeviceName: sourceDeviceName,
+      sourcePlatform: sourcePlatform,
+      pinned: pinned,
+      content: content,
+    );
+  }
+
+  Future<String?> _fetchSourceContent(
+    CloudRepository sourceRepo,
+    String id,
+  ) async {
+    final data = await sourceRepo.getHistoryEntryContent(id);
+    final content = data?['content'] as String?;
+    if (content == null || content.isEmpty) return null;
+    return content;
+  }
+
+  /// 从云端拉取：旧账户数据迁移到当前账户。
+  ///
+  /// ① 同账户守卫（在任何网络调用前拒绝）→ ② [verifyCloudAccount] 预检 →
+  /// ③ [buildCloudManifest] 构建数据源（拉取阶段）→ ④ [importBackup] 导入
+  /// （复用完整导入管线：旧密钥解密 → 新密钥重加密 → 新账户上传）。
+  Future<ImportResult> pullFromCloud({
+    required CloudRepository sourceRepo,
+    required String currentUserId,
+    required String oldPassword,
+    required Uint8List newKey,
+    required String deviceId,
+    required String deviceName,
+    required String devicePlatform,
+    void Function(double progress, String label)? onProgress,
+  }) async {
+    if (deriveUserId(oldPassword) == currentUserId) {
+      throw CloudPullException(
+        CloudPullErrorType.sameAccount,
+        AppStrings.cloudPullSameAccount,
+      );
+    }
+    await verifyCloudAccount(sourceRepo: sourceRepo, oldPassword: oldPassword);
+    final manifest = await buildCloudManifest(
+      sourceRepo: sourceRepo,
+      onProgress: onProgress,
+    );
+    return importBackup(
+      manifest: manifest,
+      oldPassword: oldPassword,
+      newKey: newKey,
+      deviceId: deviceId,
+      deviceName: deviceName,
+      devicePlatform: devicePlatform,
+      onProgress: onProgress,
+    );
   }
 
   /// 用旧密钥解密条目。解密失败（密钥/密文不匹配）抛 [DecryptionException]。
