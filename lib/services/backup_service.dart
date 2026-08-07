@@ -421,6 +421,35 @@ class BackupService {
     return content;
   }
 
+  /// 云端拉取前置上限检查：目标（当前）账户已有条目且合并后总量可能超过
+  /// 服务端「保留最近 100 条」上限时返回 [CloudPullLimitWarning]；否则返回 null。
+  ///
+  /// 服务端每次上传后按 timestamp DESC 仅保留最近 [AppConstants.maxHistoryEntries]
+  /// 条历史（server/index.js 的「清理旧历史记录」）。迁移条目保留旧时间戳，
+  /// 「旧数据并入已使用账户」时，较早时间戳的已迁移条目会在导入过程中被服务端
+  /// 静默清理。因此迁移前必须先统计目标账户现有条数，超限时交由 UI 警告并由
+  /// 用户确认。条数以服务端列表长度为准（服务端本身只保留最近 100 条，长度即
+  /// 精确条数）。
+  Future<CloudPullLimitWarning?> checkCloudPullHistoryLimit({
+    required CloudRepository sourceRepo,
+  }) async {
+    final targetCount = (await cloudRepo.getHistoryEntries(
+      limit: AppConstants.maxHistoryEntries,
+    )).length;
+    if (targetCount == 0) return null; // 空目标账户：合并后 ≤ 100，不触发清理
+    final sourceCount = (await sourceRepo.getHistoryEntries(
+      limit: AppConstants.maxHistoryEntries,
+    )).length;
+    if (targetCount + sourceCount <= AppConstants.maxHistoryEntries) {
+      return null;
+    }
+    return CloudPullLimitWarning(
+      targetCount: targetCount,
+      sourceCount: sourceCount,
+      totalCount: targetCount + sourceCount,
+    );
+  }
+
   /// 从云端拉取：旧账户数据迁移到当前账户。
   ///
   /// ① 同账户守卫（在任何网络调用前拒绝）→ ② [verifyCloudAccount] 预检 →
@@ -575,6 +604,25 @@ class BackupService {
     await cloudRepo.setCurrentClipboard(data);
     await cloudRepo.addHistoryEntry({...data, 'pinned': false});
   }
+}
+
+/// 云端拉取合并超限警告信息：目标账户已有条目，且合并后总量超过服务端
+/// 「保留最近 100 条」上限（较早时间戳的迁移条目导入过程中会被服务端清理）。
+class CloudPullLimitWarning {
+  /// 目标（当前）账户现有历史条数。
+  final int targetCount;
+
+  /// 源（旧）账户待迁移条数。
+  final int sourceCount;
+
+  /// 合并后总量（targetCount + sourceCount）。
+  final int totalCount;
+
+  const CloudPullLimitWarning({
+    required this.targetCount,
+    required this.sourceCount,
+    required this.totalCount,
+  });
 }
 
 /// 导入结果汇总。

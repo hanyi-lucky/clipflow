@@ -264,6 +264,12 @@ abstract final class AppStrings {
   static const String cloudPullDone = '拉取完成';
   static const String cloudPullSameAccount = '旧密码与当前账户相同，无需拉取';
   static const String cloudPullEmptyAccount = '未找到旧账户数据：旧密码错误或旧账户为空';
+  static const String cloudPullLimitDialogTitle = '历史记录上限提示';
+  static String cloudPullLimitDialogBody(int targetCount, int totalCount) =>
+      '目标账户已有 $targetCount 条记录，加上本次迁移共 $totalCount 条。'
+      '服务端仅保留每个账户最近 100 条历史，较早的迁移条目可能被自动清理。'
+      '是否继续拉取？';
+  static const String cloudPullLimitConfirmAction = '仍然继续';
 
   // ===== Provider / 服务层用户可见错误 =====
   static const String decryptFailedPlaceholder = '[解密失败]';

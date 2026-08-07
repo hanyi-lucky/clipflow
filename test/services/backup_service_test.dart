@@ -919,6 +919,59 @@ void main() {
         'cloud text',
       );
     });
+
+    test('目标账户已有条目且合并超 100：checkCloudPullHistoryLimit 返回警告', () async {
+      importRepo.history = List.generate(
+        60,
+        (i) => serverRow(id: 'target-$i', type: 'text'),
+      );
+      source.history = List.generate(
+        50,
+        (i) => serverRow(id: 'src-$i', type: 'text'),
+      );
+
+      final warning = await buildService().checkCloudPullHistoryLimit(
+        sourceRepo: source,
+      );
+
+      expect(warning, isNotNull);
+      expect(warning!.targetCount, 60);
+      expect(warning.sourceCount, 50);
+      expect(warning.totalCount, 110);
+    });
+
+    test('目标账户为空：checkCloudPullHistoryLimit 返回 null 且不查询源账户', () async {
+      source.history = List.generate(
+        50,
+        (i) => serverRow(id: 'src-$i', type: 'text'),
+      );
+
+      final warning = await buildService().checkCloudPullHistoryLimit(
+        sourceRepo: source,
+      );
+
+      expect(warning, isNull);
+      expect(source.historyLimits, isEmpty);
+    });
+
+    test('目标非空但合并未超 100：checkCloudPullHistoryLimit 返回 null', () async {
+      importRepo.history = List.generate(
+        60,
+        (i) => serverRow(id: 'target-$i', type: 'text'),
+      );
+      source.history = List.generate(
+        30,
+        (i) => serverRow(id: 'src-$i', type: 'text'),
+      );
+
+      final warning = await buildService().checkCloudPullHistoryLimit(
+        sourceRepo: source,
+      );
+
+      expect(warning, isNull);
+      // 目标非空 → 源账户被查询一次（limit 100）
+      expect(source.historyLimits, [100]);
+    });
   });
 
   });
@@ -934,6 +987,12 @@ class FakeImportRepo extends CloudRepository {
   final List<Map<String, dynamic>> uploadedHistory = [];
   final List<Map<String, dynamic>> uploadedFiles = [];
   final List<String> patchedPinned = [];
+  List<Map<String, dynamic>> history = [];
+
+  @override
+  Future<List<Map<String, dynamic>>> getHistoryEntries({int limit = 100}) async {
+    return List.from(history);
+  }
 
   @override
   Future<void> setCurrentClipboard(Map<String, dynamic> data) async {

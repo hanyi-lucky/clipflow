@@ -17,7 +17,13 @@ import '../../l10n/app_strings.dart';
 /// 账户 token）；预检 / 数据源构建 / 导入编排全部收进 [BackupService]，
 /// 写入复用 importBackup 管线（旧密钥解密 → 新密钥重加密 → 新账户上传）。
 class CloudPullScreen extends StatefulWidget {
-  const CloudPullScreen({super.key});
+  const CloudPullScreen({super.key, @visibleForTesting this.sourceRepoFactory});
+
+  /// 测试钩子：构造旧账户只读仓库。生产默认走真实第二实例
+  /// （[CloudBaseService] 登录旧账户后包 [CloudRepository]）。
+  @visibleForTesting
+  final CloudRepository Function(String userId, String deviceId)?
+      sourceRepoFactory;
 
   @override
   State<CloudPullScreen> createState() => _CloudPullScreenState();
@@ -53,6 +59,11 @@ class _CloudPullScreenState extends State<CloudPullScreen> {
 
     final provider = context.read<ClipboardProvider>();
     final auth = context.read<AuthProvider>();
+    // 同账户守卫：旧密码派生 userId 与当前账户相同 → 在任何网络调用前拒绝
+    if (deriveUserId(oldPassword) == auth.userId) {
+      setState(() => _error = AppStrings.cloudPullSameAccount);
+      return;
+    }
     final newKey = provider.encryptionKey;
     final cloudRepo = provider.cloudRepo;
     final storage = provider.storage;
@@ -70,14 +81,12 @@ class _CloudPullScreenState extends State<CloudPullScreen> {
     });
 
     try {
+      final oldUserId = deriveUserId(oldPassword);
       // 旧账户读取器：第二 CloudBaseService 实例 + 旧 userId 登录（绑定当前
       // deviceId，服务端 /auth 仅建 users 行 + 发旧账户 token，不注册设备）。
-      final sourceCloud = CloudBaseService();
-      await sourceCloud.signInAnonymously(
-        userId: deriveUserId(oldPassword),
-        deviceId: provider.deviceId,
-      );
-      final sourceRepo = CloudRepository(sourceCloud);
+      final sourceRepo = widget.sourceRepoFactory != null
+          ? widget.sourceRepoFactory!(oldUserId, provider.deviceId)
+          : await _createSourceRepo(oldUserId, provider.deviceId);
 
       final service = BackupService(
         cloudRepo: cloudRepo,
@@ -87,6 +96,24 @@ class _CloudPullScreenState extends State<CloudPullScreen> {
         historyService: provider.historyService,
         encryption: EncryptionService(),
       );
+
+      // 云端拉取前置上限检查：目标账户已有条目且合并后总量可能超过服务端
+      // 「保留最近 100 条」上限 → 弹确认框，用户确认后才继续。
+      final warning = await service.checkCloudPullHistoryLimit(
+        sourceRepo: sourceRepo,
+      );
+      if (warning != null) {
+        final confirmed = await _confirmHistoryLimit(warning);
+        if (confirmed != true) {
+          if (!mounted) return;
+          setState(() {
+            _pulling = false;
+            _progress = 0;
+            _status = '';
+          });
+          return;
+        }
+      }
 
       final result = await service.pullFromCloud(
         sourceRepo: sourceRepo,
@@ -142,6 +169,46 @@ class _CloudPullScreenState extends State<CloudPullScreen> {
         _error = AppStrings.importFailed('$e');
       });
     }
+  }
+
+  /// 构造旧账户只读仓库：第二 [CloudBaseService] 实例 + 旧 userId 登录。
+  Future<CloudRepository> _createSourceRepo(
+    String userId,
+    String deviceId,
+  ) async {
+    final sourceCloud = CloudBaseService();
+    await sourceCloud.signInAnonymously(userId: userId, deviceId: deviceId);
+    return CloudRepository(sourceCloud);
+  }
+
+  /// 历史保留上限确认框：告知用户服务端仅保留最近 100 条，较早的迁移条目
+  /// 可能被自动清理；返回 true 表示用户确认继续。
+  Future<bool?> _confirmHistoryLimit(CloudPullLimitWarning warning) {
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text(AppStrings.cloudPullLimitDialogTitle),
+          surfaceTintColor: Colors.transparent,
+          content: Text(
+            AppStrings.cloudPullLimitDialogBody(
+              warning.targetCount,
+              warning.totalCount,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text(AppStrings.commonCancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text(AppStrings.cloudPullLimitConfirmAction),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
