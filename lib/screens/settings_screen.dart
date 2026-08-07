@@ -10,6 +10,7 @@ import '../services/app_info.dart';
 import '../widgets/device_management_section.dart';
 import 'backup/export_backup_screen.dart';
 import 'backup/import_backup_screen.dart';
+import 'backup/cloud_pull_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -146,6 +147,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Navigator.of(context).push(
                       MaterialPageRoute(
                         builder: (_) => const ImportBackupScreen(),
+                      ),
+                    );
+                  },
+                ),
+                const Divider(height: 1, indent: 16),
+                ListTile(
+                  leading: const Icon(Icons.cloud_download_outlined),
+                  title: const Text(AppStrings.cloudPullTitle),
+                  subtitle: const Text(AppStrings.cloudPullSubtitle),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const CloudPullScreen(),
                       ),
                     );
                   },

@@ -6,9 +6,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:clipflow/l10n/app_strings.dart';
 import 'package:clipflow/models/device.dart';
 import 'package:clipflow/providers/auth_provider.dart';
+import 'package:clipflow/providers/clipboard_provider.dart';
 import 'package:clipflow/providers/settings_provider.dart';
 import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/screens/settings_screen.dart';
+import 'package:clipflow/screens/backup/cloud_pull_screen.dart';
 import 'package:clipflow/screens/unlock_screen.dart';
 import 'package:clipflow/services/app_info.dart';
 
@@ -27,6 +29,7 @@ void main() {
         ChangeNotifierProvider<AuthProvider>(
           create: (_) => FakeAuthProvider(),
         ),
+        ChangeNotifierProvider(create: (_) => ClipboardProvider()),
         ChangeNotifierProvider(create: (_) => SettingsProvider()),
         Provider<AppInfo>.value(
           value: const AppInfo(version: 'test', buildNumber: '1'),
@@ -148,5 +151,22 @@ void main() {
     expect(find.byType(UnlockScreen), findsNothing);
     expect(storage.userId, 'user_test');
     expect(storage.encryptionSalt, 'abcd');
+  });
+  testWidgets('设置页「账户与数据」显示「从云端拉取」入口，点击进入云拉取页', (tester) async {
+    await useTallViewport(tester);
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    await tester.pumpWidget(buildApp(storage));
+    await tester.pumpAndSettle();
+
+    // 入口存在（含副标题）
+    expect(find.text(AppStrings.cloudPullTitle), findsOneWidget);
+    expect(find.text(AppStrings.cloudPullSubtitle), findsOneWidget);
+
+    // 点击入口 → CloudPullScreen
+    await tester.tap(find.text(AppStrings.cloudPullTitle));
+    await tester.pumpAndSettle();
+    expect(find.byType(CloudPullScreen), findsOneWidget);
   });
 }
