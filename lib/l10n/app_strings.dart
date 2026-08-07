@@ -72,6 +72,13 @@ abstract final class AppStrings {
   static const String changePasswordNoteTitle = '注意';
   static const String changePasswordNoteBody = '旧账户数据仍保留在旧密码下，不会被删除。';
 
+  // ===== 设置页：切换账号 =====
+  static const String settingsSwitchAccountTitle = '切换账号';
+  static const String settingsSwitchAccountSubtitle = '退出当前账户并回到登录页，可切换到其他密码对应的账户';
+  static const String switchAccountDialogTitle = '切换账号';
+  static const String switchAccountDialogBody = '切换后将退出当前账户并回到登录页。请确认已导出备份，否则当前设备上的历史记录将无法直接访问（之后可用旧密码从云端拉取恢复）。';
+  static const String switchAccountDialogConfirmAction = '确认切换';
+
   // ===== 设置页：兼容性对话框 =====
   static const String compatibilityImageTitle = '图片';
   static const String compatibilityImageBody = '支持剪贴板图片 PNG/JPEG/GIF/TIFF/BMP/WebP/HEIC；统一转 PNG/JPEG，长边超 2048 压缩、JPEG q80、含透明转 PNG；单张上限 5MB。';

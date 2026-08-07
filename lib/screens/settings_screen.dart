@@ -1,9 +1,11 @@
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../providers/auth_provider.dart';
 import '../providers/settings_provider.dart';
 import '../l10n/app_strings.dart';
 import '../providers/clipboard_provider.dart';
+import '../repositories/local_storage.dart';
 import '../services/app_info.dart';
 import '../widgets/device_management_section.dart';
 import 'backup/export_backup_screen.dart';
@@ -155,6 +157,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   subtitle: const Text(AppStrings.changePasswordInfoSubtitle),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _showChangePasswordDialog(context),
+                ),
+                const Divider(height: 1, indent: 16),
+                ListTile(
+                  leading: const Icon(Icons.switch_account_outlined),
+                  title: const Text(AppStrings.settingsSwitchAccountTitle),
+                  subtitle: const Text(AppStrings.settingsSwitchAccountSubtitle),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _confirmSwitchAccount,
                 ),
               ]),
               if (Platform.isAndroid) ...[
@@ -412,6 +422,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// 切换账号：警告对话框确认后清账户身份（token + 本地缓存），
+  /// 保留设备信息与设置，然后回到解锁页（不杀进程）。
+  Future<void> _confirmSwitchAccount() async {
+    final auth = context.read<AuthProvider>();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text(AppStrings.switchAccountDialogTitle),
+          surfaceTintColor: Colors.transparent,
+          content: const Text(AppStrings.switchAccountDialogBody),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text(AppStrings.commonCancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text(AppStrings.switchAccountDialogConfirmAction),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    if (!mounted) return;
+
+    final storage = await LocalStorage.create();
+    await auth.signOut();
+    await storage.clearAccountIdentity();
+    if (!mounted) return;
+    Navigator.of(context).pushNamedAndRemoveUntil(
+      '/unlock',
+      (route) => false,
     );
   }
 
