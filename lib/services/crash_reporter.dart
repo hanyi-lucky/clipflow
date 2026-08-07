@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'pinned_client.dart';
 
 import 'app_info.dart';
 import 'cloudbase_service.dart';
@@ -104,7 +105,7 @@ class CrashReporter {
     http.Client? client,
     CrashReportPolicy? policy,
     this.sendTimeout = const Duration(seconds: 5),
-  }) : _client = client ?? http.Client(),
+  }) : _client = client ?? createPinnedHttpClient(),
        _policy = policy ?? CrashReportPolicy();
 
   /// 测试专用构造：注入 mock client / policy，不影响全局单例。

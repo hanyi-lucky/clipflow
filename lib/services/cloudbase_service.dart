@@ -1,20 +1,23 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'pinned_client.dart';
 import '../core/exceptions.dart';
 
 /// 自建服务器 API 封装
 class CloudBaseService {
-  // 服务器地址：Cloudflare Tunnel 标准 443（无需备案）。
-  // 旧直连地址保留作回退：http://121.196.222.122:3000/api
-  static const String baseUrl = 'https://api.yihanlife.ccwu.cc/api';
+  // 服务器地址：HTTPS 直连固定 IP（SNI=IP 绕开「443+域名 SNI」被运营商/云厂商拦截的问题）。
+  // 证书固定见 pinned_client.dart（subject=api.yihanlife.ccwu.cc + Let's Encrypt）。
+  // 旧地址保留作回退：https://api.yihanlife.ccwu.cc/api（域名直连/Cloudflare 橙云均受 SNI 拦截影响）
+  static const String baseUrl = 'https://121.196.222.122/api';
   static const _baseUrl = baseUrl;
 
   String? _token;
   String? _openId;
   String? _userId; // 保存用于自动重新登录
   String? _deviceId; // 保存用于自动重新登录（设备级 token 绑定/移除拦截）
-  final http.Client _streamClient = http.Client();
+  final http.Client _client = createPinnedHttpClient();
+  final http.Client _streamClient = createPinnedHttpClient();
 
   String? get openId => _openId;
   bool get isLoggedIn => _token != null;
@@ -54,7 +57,7 @@ class CloudBaseService {
     if (deviceId != null && deviceId.isNotEmpty) {
       body['deviceId'] = deviceId;
     }
-    final response = await http.post(
+    final response = await _client.post(
       Uri.parse('$_baseUrl/auth'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(body),
@@ -88,16 +91,16 @@ class CloudBaseService {
     Future<http.Response> request;
     switch (method) {
       case 'GET':
-        request = http.get(uri, headers: headers);
+        request = _client.get(uri, headers: headers);
         break;
       case 'POST':
-        request = http.post(uri, headers: headers, body: body);
+        request = _client.post(uri, headers: headers, body: body);
         break;
       case 'PATCH':
-        request = http.patch(uri, headers: headers, body: body);
+        request = _client.patch(uri, headers: headers, body: body);
         break;
       case 'DELETE':
-        request = http.delete(uri, headers: headers);
+        request = _client.delete(uri, headers: headers);
         break;
       default:
         throw Exception('Unsupported method: $method');
