@@ -1,3 +1,5 @@
+import '../l10n/app_strings.dart';
+
 /// 密文备份清单（.clipflow-backup.json）。
 ///
 /// 版本化 schema：条目密文保持 EncryptedData 兼容（text/image = EncryptedData
@@ -33,10 +35,10 @@ class BackupManifest {
   /// 解析并校验备份文件；format/version 不合法抛 [FormatException]。
   factory BackupManifest.fromJson(Map<String, dynamic> json) {
     if (json['format'] != kFormat) {
-      throw FormatException('不是有效的 ClipFlow 备份文件（format 不匹配）');
+      throw FormatException(AppStrings.invalidBackupFormat);
     }
     if (json['version'] != kVersion) {
-      throw FormatException('不支持的备份版本: ${json['version']}');
+      throw FormatException(AppStrings.unsupportedBackupVersion('${json['version']}'));
     }
     final account = json['account'] as Map<String, dynamic>? ?? const {};
     final rawEntries = json['entries'] as List? ?? const [];

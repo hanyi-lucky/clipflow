@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../providers/clipboard_provider.dart';
+import '../l10n/app_strings.dart';
 
 /// 全屏图片查看器：加载态 / 错误态 / InteractiveViewer / 复制
 class ImagePreviewScreen extends StatefulWidget {
@@ -27,7 +28,7 @@ class _ImagePreviewScreenState extends State<ImagePreviewScreen> {
     await provider.copyEntry(widget.entryId);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已复制到剪切板')),
+      const SnackBar(content: Text(AppStrings.copiedToClipboard)),
     );
   }
 
@@ -38,11 +39,11 @@ class _ImagePreviewScreenState extends State<ImagePreviewScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
-        title: const Text('图片预览'),
+        title: const Text(AppStrings.imagePreviewTitle),
         actions: [
           IconButton(
             icon: const Icon(Icons.copy_rounded),
-            tooltip: '复制',
+            tooltip: AppStrings.commonCopy,
             onPressed: _copyToClipboard,
           ),
         ],
@@ -65,7 +66,7 @@ class _ImagePreviewScreenState extends State<ImagePreviewScreen> {
                   Icon(Icons.broken_image_outlined, size: 64, color: Colors.white30),
                   SizedBox(height: 12),
                   Text(
-                    '图片解密失败',
+                    AppStrings.imageDecryptFailed,
                     style: TextStyle(color: Colors.white70),
                   ),
                 ],
@@ -81,7 +82,7 @@ class _ImagePreviewScreenState extends State<ImagePreviewScreen> {
                 fit: BoxFit.contain,
                 errorBuilder: (context, error, stackTrace) => const Center(
                   child: Text(
-                    '图片加载失败',
+                    AppStrings.imageLoadFailed,
                     style: TextStyle(color: Colors.white70),
                   ),
                 ),

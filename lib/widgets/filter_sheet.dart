@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/clipboard_provider.dart';
+import '../l10n/app_strings.dart';
 
 class FilterSheet extends StatelessWidget {
   const FilterSheet({super.key});
@@ -33,7 +34,7 @@ class FilterSheet extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            '筛选设备',
+            AppStrings.filterDevicesTitle,
             style: theme.textTheme.titleMedium,
           ),
           const SizedBox(height: 12),
@@ -43,7 +44,7 @@ class FilterSheet extends StatelessWidget {
             runSpacing: 8,
             children: [
               FilterChip(
-                label: const Text('全部设备'),
+                label: const Text(AppStrings.filterAllDevices),
                 selected: provider.activeDeviceFilter == null,
                 onSelected: (_) {
                   provider.setDeviceFilter(null);

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../l10n/app_strings.dart';
 import 'package:crypto/crypto.dart';
 import '../core/constants.dart';
 import '../models/clipboard_file.dart';
@@ -41,15 +42,8 @@ class ClipboardMonitor extends ChangeNotifier {
 
   /// 微信/QQ/Finder 复制图片文件时剪贴板常只含 file-url + 文本占位，
   /// 这些占位不是真实文本内容，命中则跳过上传。
-  static const Set<String> _placeholderTexts = {
-    '[文件]',
-    '[图片]',
-    '[照片]',
-    '[表情]',
-    '[语音]',
-    '[视频]',
-    '[链接]',
-  };
+  static final Set<String> _placeholderTexts =
+      AppStrings.clipboardPlaceholderTexts.toSet();
 
   // SyncService reference (set externally)
   SyncService? _syncService;

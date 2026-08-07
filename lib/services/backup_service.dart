@@ -13,6 +13,7 @@ import '../repositories/local_image_store.dart';
 import '../repositories/local_storage.dart';
 import '../services/encryption_service.dart';
 import '../services/history_service.dart';
+import '../l10n/app_strings.dart';
 
 /// 密文备份导出 / 迁移码导入。
 ///
@@ -52,12 +53,12 @@ class BackupService {
       final record = records[i];
       onProgress?.call(
         records.isEmpty ? 1.0 : i / records.length,
-        '正在导出 ${i + 1}/${records.length}',
+        AppStrings.backupExporting(i + 1, records.length),
       );
       final entry = await _buildBackupEntry(record, encryptionKey);
       if (entry != null) entries.add(entry);
     }
-    onProgress?.call(1.0, '导出完成');
+    onProgress?.call(1.0, AppStrings.backupExportDone);
 
     return BackupManifest(
       exportedAt: DateTime.now(),
@@ -212,7 +213,7 @@ class BackupService {
       final entry = manifest.entries[i];
       onProgress?.call(
         manifest.entries.isEmpty ? 1.0 : i / manifest.entries.length,
-        '正在导入 ${i + 1}/${manifest.entries.length}',
+        AppStrings.backupImporting(i + 1, manifest.entries.length),
       );
       try {
         final decrypted = await _decryptWithOldKey(entry, oldKey);
@@ -240,11 +241,11 @@ class BackupService {
         await cloudRepo.updateHistoryEntry(id, {'pinned': true});
       } catch (e) {
         failed++;
-        errors.add('$id (置顶恢复): $e');
+        errors.add(AppStrings.backupPinRestoreFailed(id, '$e'));
       }
     }
 
-    onProgress?.call(1.0, '导入完成');
+    onProgress?.call(1.0, AppStrings.backupImportDone);
     return ImportResult(imported: imported, failed: failed, errors: errors);
   }
 
@@ -279,7 +280,7 @@ class BackupService {
         oldKey,
       );
     } on EncryptionException {
-      throw DecryptionException('旧密码错误');
+      throw DecryptionException(AppStrings.backupWrongOldPassword);
     }
   }
 

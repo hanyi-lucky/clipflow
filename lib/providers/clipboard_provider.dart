@@ -18,6 +18,7 @@ import '../services/clipboard_monitor.dart';
 import '../services/file_clipboard_service.dart';
 import '../services/file_processing_service.dart';
 import '../services/image_clipboard_service.dart';
+import '../l10n/app_strings.dart';
 import '../services/image_compression_service.dart';
 import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
@@ -69,11 +70,11 @@ mixin _DefaultWidgetsBindingObserver implements WidgetsBindingObserver {
 }
 
 enum SyncStatus {
-  connected('已连接', Colors.green),
-  syncing('同步中...', Colors.orange),
-  error('同步失败', Colors.red),
-  disconnected('未连接', Colors.grey),
-  paused('已暂停同步', Colors.blueGrey);
+  connected(AppStrings.syncStatusConnected, Colors.green),
+  syncing(AppStrings.syncStatusSyncing, Colors.orange),
+  error(AppStrings.syncStatusError, Colors.red),
+  disconnected(AppStrings.syncStatusDisconnected, Colors.grey),
+  paused(AppStrings.syncStatusPaused, Colors.blueGrey);
 
   final String label;
   final Color color;
@@ -520,7 +521,7 @@ class ClipboardProvider extends ChangeNotifier
         ..._fileDownloads.keys,
       });
     } catch (e) {
-      _errorMessage = '从服务器加载历史失败: $e';
+      _errorMessage = AppStrings.loadHistoryFailed('$e');
       notifyListeners();
       // 失败时保留当前内存历史，不清空
       if (_historyService.entries.isEmpty) {
@@ -743,21 +744,22 @@ class ClipboardProvider extends ChangeNotifier
     _pendingFileUploadPaths.add(path);
     try {
       if (file.errorCode != null) {
-        _errorMessage = '文件读取失败（${file.errorCode}），已拒绝上传';
+        _errorMessage = AppStrings.fileReadFailed('${file.errorCode}');
         _serverConnected = false;
         _setStatus(SyncStatus.error);
         return;
       }
       if (file.size != null && file.size! > AppConstants.maxFileBytes) {
-        _errorMessage =
-            '文件超过 ${AppConstants.maxFileBytes ~/ (1024 * 1024)}MB，已拒绝上传';
+        _errorMessage = AppStrings.fileTooLarge(
+          AppConstants.maxFileBytes ~/ (1024 * 1024),
+        );
         _serverConnected = false;
         _setStatus(SyncStatus.error);
         return;
       }
       final source = File(path);
       if (!await source.exists()) {
-        _errorMessage = '文件不存在或已被移动，已跳过同步';
+        _errorMessage = AppStrings.fileMissing;
         _serverConnected = false;
         _setStatus(SyncStatus.error);
         return;
@@ -861,8 +863,9 @@ class ClipboardProvider extends ChangeNotifier
       final compressed = await _imageCompressionService.compress(image.bytes);
 
       if (compressed.bytes.length > AppConstants.maxImageBytes) {
-        _errorMessage =
-            '图片超过 ${AppConstants.maxImageBytes ~/ (1024 * 1024)}MB，已拒绝上传';
+        _errorMessage = AppStrings.imageTooLarge(
+          AppConstants.maxImageBytes ~/ (1024 * 1024),
+        );
         _serverConnected = false;
         _setStatus(SyncStatus.error);
         return;
@@ -1476,7 +1479,7 @@ class ClipboardProvider extends ChangeNotifier
     }
     progress.cancelToken?.cancel();
     progress.status = FileTransferStatus.cancelled;
-    progress.error = '已取消';
+    progress.error = AppStrings.fileCancelled;
     _pendingFileRetries.remove(entryId);
     if (_activeFileDownloadId == entryId) {
       _activeFileDownloadId = null;
@@ -1762,7 +1765,7 @@ class ClipboardProvider extends ChangeNotifier
       // 不调用 _loadHistoryFromServer，让 sync loop 处理
       notifyListeners();
     } catch (e) {
-      _errorMessage = '恢复失败: $e';
+      _errorMessage = AppStrings.restoreFailed('$e');
       notifyListeners();
     }
   }
@@ -1808,7 +1811,7 @@ class ClipboardProvider extends ChangeNotifier
             entry['id'] as String?,
             encrypted,
           );
-          entry['content'] = decrypted ?? '[解密失败]';
+          entry['content'] = decrypted ?? AppStrings.decryptFailedPlaceholder;
         }
       }
       return entries;

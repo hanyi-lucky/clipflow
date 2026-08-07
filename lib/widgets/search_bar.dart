@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/clipboard_provider.dart';
 import '../models/clipboard_entry.dart';
 import 'filter_sheet.dart';
+import '../l10n/app_strings.dart';
 
 class HistorySearchBar extends StatefulWidget {
   const HistorySearchBar({super.key});
@@ -40,13 +41,13 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
   String _typeFilterLabel(ContentType? type) {
     switch (type) {
       case ContentType.text:
-        return '文本';
+        return AppStrings.typeText;
       case ContentType.image:
-        return '图片';
+        return AppStrings.typeImage;
       case ContentType.file:
-        return '文件';
+        return AppStrings.typeFile;
       default:
-        return '全部';
+        return AppStrings.typeAll;
     }
   }
 
@@ -92,7 +93,7 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
                           controller: _controller,
                           focusNode: _focusNode,
                           decoration: InputDecoration(
-                            hintText: '搜索历史记录',
+                            hintText: AppStrings.searchHistoryHint,
                             hintStyle: TextStyle(
                               color: cs.onSurfaceVariant.withOpacity(0.6),
                               fontSize: 15,
@@ -143,7 +144,7 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
               ),
               const SizedBox(width: 6),
               _FilterChip(
-                label: provider.activeDeviceFilter ?? '设备',
+                label: provider.activeDeviceFilter ?? AppStrings.deviceFilterLabel,
                 icon: Icons.devices_outlined,
                 isSelected: provider.activeDeviceFilter != null,
                 onTap: _showFilterSheet,
@@ -184,14 +185,14 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
             ),
             const SizedBox(height: 16),
             Text(
-              '内容类型',
+              AppStrings.contentTypeTitle,
               style: theme.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
               ),
             ),
             const SizedBox(height: 12),
             _TypeOption(
-              label: '全部',
+              label: AppStrings.typeAll,
               icon: Icons.all_inclusive_rounded,
               isSelected: provider.activeTypeFilter == null,
               onTap: () {
@@ -200,7 +201,7 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
               },
             ),
             _TypeOption(
-              label: '文本',
+              label: AppStrings.typeText,
               icon: Icons.text_fields_rounded,
               isSelected: provider.activeTypeFilter == ContentType.text,
               onTap: () {
@@ -209,7 +210,7 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
               },
             ),
             _TypeOption(
-              label: '图片',
+              label: AppStrings.typeImage,
               icon: Icons.image_outlined,
               isSelected: provider.activeTypeFilter == ContentType.image,
               onTap: () {
@@ -218,7 +219,7 @@ class _HistorySearchBarState extends State<HistorySearchBar> {
               },
             ),
             _TypeOption(
-              label: '文件',
+              label: AppStrings.typeFile,
               icon: Icons.insert_drive_file_outlined,
               isSelected: provider.activeTypeFilter == ContentType.file,
               onTap: () {

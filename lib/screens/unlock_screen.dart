@@ -10,6 +10,7 @@ import '../services/encryption_service.dart';
 import '../services/auth_guard.dart';
 import '../core/hex_utils.dart';
 import '../core/exceptions.dart';
+import '../l10n/app_strings.dart';
 
 class UnlockScreen extends StatefulWidget {
   const UnlockScreen({super.key});
@@ -63,7 +64,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
       setState(() {
         _initialized = true;
         _authSuccess = false;
-        _error = '连接失败: $e';
+        _error = AppStrings.unlockConnectFailed('$e');
       });
     }
   }
@@ -78,7 +79,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
     if (_authGuard.isLocked) {
       final seconds = _authGuard.lockRemaining.inSeconds + 1;
       setState(() {
-        _error = '尝试过于频繁，请 $seconds 秒后再试';
+        _error = AppStrings.unlockTooManyAttempts(seconds);
       });
       return;
     }
@@ -104,7 +105,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
         _authGuard.recordFailure();
         setState(() {
           _loading = false;
-          _error = '密码错误，请重新输入';
+          _error = AppStrings.unlockWrongPassword;
         });
         return;
       }
@@ -163,12 +164,14 @@ class _UnlockScreenState extends State<UnlockScreen> {
     } on RateLimitedException catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '尝试过于频繁，请 ${(e.retryAfterMs / 1000).ceil()} 秒后再试';
+        _error = AppStrings.unlockTooManyAttempts(
+          (e.retryAfterMs / 1000).ceil(),
+        );
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '解锁失败: $e';
+        _error = AppStrings.unlockFailed('$e');
       });
     }
 
@@ -185,20 +188,16 @@ class _UnlockScreenState extends State<UnlockScreen> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('切换到其他账户'),
-          content: const Text(
-            '切换账户将清除本机已保存的账户标记与本地缓存（含加密盐），\n'
-            '当前账户数据需先用「导出备份」保存，之后在新账户下用「导入备份」恢复。\n\n'
-            '确定要继续切换吗？',
-          ),
+          title: const Text(AppStrings.switchAccountAction),
+          content: const Text(AppStrings.switchAccountConfirmBody),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('取消'),
+              child: const Text(AppStrings.commonCancel),
             ),
             FilledButton(
               onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('继续切换'),
+              child: const Text(AppStrings.switchAccountConfirmAction),
             ),
           ],
         );
@@ -276,7 +275,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        '正在连接服务器...',
+                        AppStrings.unlockConnecting,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.outline,
                         ),
@@ -290,14 +289,14 @@ class _UnlockScreenState extends State<UnlockScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        '无法连接服务器',
+                        AppStrings.unlockServerUnreachable,
                         style: theme.textTheme.headlineSmall?.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '请检查网络连接后重试',
+                        AppStrings.unlockCheckNetwork,
                         textAlign: TextAlign.center,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.outline,
@@ -327,7 +326,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
                         height: 48,
                         child: ElevatedButton.icon(
                           icon: const Icon(Icons.refresh_rounded),
-                          label: const Text('重试'),
+                          label: const Text(AppStrings.commonRetry),
                           onPressed: () {
                             setState(() {
                               _initialized = false;
@@ -340,7 +339,9 @@ class _UnlockScreenState extends State<UnlockScreen> {
                     ] else ...[
                       // Password input
                       Text(
-                        _isFirstTime ? '设置主密码' : '解锁',
+                        _isFirstTime
+                            ? AppStrings.unlockSetPasswordTitle
+                            : AppStrings.unlockTitle,
                         style: theme.textTheme.headlineSmall?.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
@@ -348,8 +349,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
                       const SizedBox(height: 8),
                       Text(
                         _isFirstTime
-                            ? '创建密码加密剪切板数据\n请在所有设备上使用相同密码'
-                            : '输入主密码解锁',
+                            ? AppStrings.unlockFirstTimeSubtitle
+                            : AppStrings.unlockEnterPassword,
                         textAlign: TextAlign.center,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.outline,
@@ -361,7 +362,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
                         controller: _passwordController,
                         obscureText: true,
                         decoration: InputDecoration(
-                          labelText: '主密码',
+                          labelText: AppStrings.masterPasswordLabel,
                           prefixIcon: const Icon(Icons.lock_outline_rounded),
                           errorText: _error,
                           filled: true,
@@ -412,8 +413,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
                               Expanded(
                                 child: Text(
                                   _isFirstTime
-                                      ? '此密码过于简单，容易被猜中，建议设置更复杂的密码'
-                                      : '此密码过于简单，请注意账户安全',
+                                      ? AppStrings.weakPasswordFirstTime
+                                      : AppStrings.weakPasswordExisting,
                                   style: TextStyle(
                                     fontSize: 12,
                                     color: Colors.orange.shade800,
@@ -438,7 +439,9 @@ class _UnlockScreenState extends State<UnlockScreen> {
                                   child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white),
                                 )
                               : Text(
-                                  _isFirstTime ? '创建并开始' : '解锁',
+                                  _isFirstTime
+                                      ? AppStrings.createAndStartAction
+                                      : AppStrings.unlockTitle,
                                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                                 ),
                         ),
@@ -448,7 +451,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
                         TextButton.icon(
                           onPressed: _loading ? null : _confirmSwitchAccount,
                           icon: const Icon(Icons.switch_account_outlined, size: 18),
-                          label: const Text('切换到其他账户'),
+                          label: const Text(AppStrings.switchAccountAction),
                         ),
                       ],
                     ],

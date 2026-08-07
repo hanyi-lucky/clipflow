@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../l10n/app_strings.dart';
 import '../models/clipboard_entry.dart';
 import '../providers/clipboard_provider.dart';
 import '../widgets/clipboard_item.dart';
@@ -103,7 +104,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                 provider.enterMergeMode();
                               }
                             },
-                            tooltip: provider.isMergeMode ? '完成选择' : '多选拼接',
+                            tooltip: provider.isMergeMode
+                              ? AppStrings.mergeModeDoneTooltip
+                              : AppStrings.mergeModeTooltip,
                           );
                         },
                       ),
@@ -111,13 +114,13 @@ class _HomeScreenState extends State<HomeScreen> {
                         icon: const Icon(Icons.refresh_rounded),
                         onPressed: () =>
                             context.read<ClipboardProvider>().refresh(),
-                        tooltip: '刷新',
+                        tooltip: AppStrings.commonRefresh,
                       ),
                       IconButton(
                         icon: const Icon(Icons.settings_rounded),
                         onPressed: () =>
                             Navigator.pushNamed(context, '/settings'),
-                        tooltip: '设置',
+                        tooltip: AppStrings.settingsTitle,
                       ),
                     ],
                   ),
@@ -141,7 +144,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                                 const SizedBox(height: 12),
                                 Text(
-                                  '没有找到匹配的记录',
+                                  AppStrings.searchNoResults,
                                   style: Theme.of(context).textTheme.titleMedium
                                       ?.copyWith(
                                         color: Theme.of(
@@ -170,7 +173,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                                 const SizedBox(height: 16),
                                 Text(
-                                  '暂无剪切板记录',
+                                  AppStrings.homeEmptyTitle,
                                   style: Theme.of(context).textTheme.titleMedium
                                       ?.copyWith(
                                         color: Theme.of(
@@ -180,7 +183,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
-                                  '复制内容后自动同步',
+                                  AppStrings.homeEmptyHint,
                                   style: Theme.of(context).textTheme.bodyMedium
                                       ?.copyWith(
                                         color: Theme.of(
@@ -212,7 +215,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   vertical: 6,
                                 ),
                                 child: Text(
-                                  '${history.length} 条结果',
+                                  AppStrings.searchResultCount(history.length),
                                   style: Theme.of(context).textTheme.bodySmall
                                       ?.copyWith(
                                         color: Theme.of(
@@ -257,12 +260,12 @@ class _HomeScreenState extends State<HomeScreen> {
                                   showDialog(
                                     context: context,
                                     builder: (ctx) => AlertDialog(
-                                      title: const Text('删除'),
-                                      content: const Text('确定要删除这条记录吗？'),
+                                      title: const Text(AppStrings.commonDelete),
+                                      content: const Text(AppStrings.deleteEntryConfirmBody),
                                       actions: [
                                         TextButton(
                                           onPressed: () => Navigator.pop(ctx),
-                                          child: const Text('取消'),
+                                          child: const Text(AppStrings.commonCancel),
                                         ),
                                         TextButton(
                                           onPressed: () {
@@ -270,7 +273,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                             Navigator.pop(ctx);
                                           },
                                           child: const Text(
-                                            '删除',
+                                            AppStrings.commonDelete,
                                             style: TextStyle(color: Colors.red),
                                           ),
                                         ),

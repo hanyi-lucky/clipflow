@@ -2,7 +2,9 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
+import '../l10n/app_strings.dart';
 import '../providers/clipboard_provider.dart';
+import '../services/app_info.dart';
 import '../widgets/device_management_section.dart';
 import 'backup/export_backup_screen.dart';
 import 'backup/import_backup_screen.dart';
@@ -45,44 +47,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
+      appBar: AppBar(title: const Text(AppStrings.settingsTitle)),
       body: Consumer<SettingsProvider>(
         builder: (context, settings, _) {
           return ListView(
             children: [
-              _buildSection(context, '外观', [
+              _buildSection(context, AppStrings.settingsAppearanceSection, [
                 _buildThemeTile(
                   context,
                   settings,
                   ThemeMode.system,
-                  '跟随系统',
+                  AppStrings.themeFollowSystem,
                   Icons.brightness_auto,
                 ),
                 _buildThemeTile(
                   context,
                   settings,
                   ThemeMode.light,
-                  '浅色模式',
+                  AppStrings.themeLight,
                   Icons.light_mode,
                 ),
                 _buildThemeTile(
                   context,
                   settings,
                   ThemeMode.dark,
-                  '深色模式',
+                  AppStrings.themeDark,
                   Icons.dark_mode,
                 ),
               ]),
-              _buildSection(context, '通用', [
+              _buildSection(context, AppStrings.settingsGeneralSection, [
                 SwitchListTile(
-                  title: const Text('自动同步'),
-                  subtitle: const Text('检测到新内容时自动同步到云端'),
+                  title: const Text(AppStrings.autoSyncTitle),
+                  subtitle: const Text(AppStrings.autoSyncSubtitle),
                   value: settings.autoSync,
                   onChanged: (v) => settings.setAutoSync(v),
                 ),
                 ListTile(
-                  title: const Text('历史记录保留'),
-                  subtitle: Text('${settings.historyLimit}条'),
+                  title: const Text(AppStrings.historyLimitTitle),
+                  subtitle: Text(AppStrings.historyLimitCount(settings.historyLimit)),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -106,14 +108,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
               ]),
-              _buildSection(context, '设备管理', [
+              _buildSection(context, AppStrings.settingsDevicesSection, [
                 const DeviceManagementSection(),
               ]),
-              _buildSection(context, '账户与数据', [
+              _buildSection(context, AppStrings.settingsAccountSection, [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
                   child: Text(
-                    '改密码 = 换新账户：先导出备份，改密码后导入恢复',
+                    AppStrings.changePasswordHint,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -121,8 +123,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 ListTile(
                   leading: const Icon(Icons.save_alt),
-                  title: const Text('导出备份'),
-                  subtitle: const Text('生成 .clipflow-backup.json 密文备份（含 salt，零明文）'),
+                  title: const Text(AppStrings.exportBackupTitle),
+                  subtitle: const Text(AppStrings.exportBackupSubtitle),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
                     Navigator.of(context).push(
@@ -135,8 +137,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const Divider(height: 1, indent: 16),
                 ListTile(
                   leading: const Icon(Icons.upload_file),
-                  title: const Text('导入备份'),
-                  subtitle: const Text('迁移码导入：输入旧密码，恢复到当前账户'),
+                  title: const Text(AppStrings.importBackupTitle),
+                  subtitle: const Text(AppStrings.importBackupSubtitle),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
                     Navigator.of(context).push(
@@ -149,21 +151,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const Divider(height: 1, indent: 16),
                 ListTile(
                   leading: const Icon(Icons.info_outline),
-                  title: const Text('改密码说明'),
-                  subtitle: const Text('改密码会进入新账户，旧数据如何找回？'),
+                  title: const Text(AppStrings.changePasswordInfoTitle),
+                  subtitle: const Text(AppStrings.changePasswordInfoSubtitle),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _showChangePasswordDialog(context),
                 ),
               ]),
               if (Platform.isAndroid) ...[
-                _buildSection(context, '同步设置', [
+                _buildSection(context, AppStrings.settingsSyncSection, [
                   Card(
                     child: Column(
                       children: [
                         SwitchListTile(
-                          title: const Text('后台自动同步'),
+                          title: const Text(AppStrings.backgroundSyncTitle),
                           subtitle: const Text(
-                            'Android 10+ 后台读取剪贴板受限，Android 16+ 仅打开 App 时可同步',
+                            AppStrings.backgroundSyncSubtitle,
                           ),
                           value: settings.backgroundSync,
                           onChanged: (v) async {
@@ -184,16 +186,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         const Divider(height: 1, indent: 16),
                         SwitchListTile(
-                          title: const Text('App打开自动同步'),
-                          subtitle: const Text('进入前台时自动检查并同步'),
+                          title: const Text(AppStrings.autoSyncOnResumeTitle),
+                          subtitle: const Text(AppStrings.autoSyncOnResumeSubtitle),
                           value: settings.autoSyncOnResume,
                           onChanged: (v) => settings.setAutoSyncOnResume(v),
                           secondary: const Icon(Icons.open_in_browser),
                         ),
                         const Divider(height: 1, indent: 16),
                         SwitchListTile(
-                          title: const Text('通知栏同步'),
-                          subtitle: const Text('显示常驻通知，点击通知打开 App 并立即同步'),
+                          title: const Text(AppStrings.notificationSyncTitle),
+                          subtitle: const Text(AppStrings.notificationSyncSubtitle),
                           value: settings.notificationSync,
                           onChanged: (v) async {
                             await settings.setNotificationSync(v);
@@ -215,13 +217,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                 ]),
-                _buildSection(context, '权限状态', [
+                _buildSection(context, AppStrings.settingsPermissionSection, [
                   Card(
                     child: Column(
                       children: [
                         ListTile(
                           leading: const Icon(Icons.notifications),
-                          title: const Text('通知权限'),
+                          title: const Text(AppStrings.notificationPermissionTitle),
                           trailing: _buildPermissionStatus(
                             settings.notificationPermissionGranted,
                             onTap: () =>
@@ -231,18 +233,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const Divider(height: 1, indent: 16),
                         ListTile(
                           leading: const Icon(Icons.battery_saver),
-                          title: const Text('电池优化'),
-                          subtitle: const Text('关闭电池优化可提高后台同步稳定性'),
+                          title: const Text(AppStrings.batteryOptimizationTitle),
+                          subtitle: const Text(AppStrings.batteryOptimizationSubtitle),
                           trailing: _buildPermissionStatus(
                             !settings.batteryOptimized,
+                            grantedLabel: AppStrings.batteryOptimizationOff,
+                            deniedLabel: AppStrings.batteryOptimizationOn,
                             onTap: () => settings.openBatterySettings(),
                           ),
                         ),
                         const Divider(height: 1, indent: 16),
                         ListTile(
                           leading: const Icon(Icons.run_circle),
-                          title: const Text('应用详情设置'),
-                          subtitle: const Text('管理通知、电池优化等系统权限'),
+                          title: const Text(AppStrings.appSettingsTitle),
+                          subtitle: const Text(AppStrings.appSettingsSubtitle),
                           trailing: const Icon(Icons.chevron_right),
                           onTap: () => settings.openAppSettingsPage(),
                         ),
@@ -251,15 +255,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ]),
               ],
-              _buildSection(context, '兼容性', [_buildCompatibilityTile(context)]),
-              _buildSection(context, '关于', [
-                const ListTile(
-                  title: Text('版本'),
-                  subtitle: Text('1.4.0'),
-                  leading: Icon(Icons.info_outline),
+              _buildSection(context, AppStrings.settingsCompatibilitySection, [_buildCompatibilityTile(context)]),
+              _buildSection(context, AppStrings.settingsAboutSection, [
+                ListTile(
+                  title: const Text(AppStrings.aboutVersion),
+                  subtitle: Text(context.watch<AppInfo>().fullVersion),
+                  leading: const Icon(Icons.info_outline),
                 ),
                 ListTile(
-                  title: const Text('开源协议'),
+                  title: const Text(AppStrings.aboutLicense),
                   subtitle: const Text('MIT License'),
                   leading: const Icon(Icons.code),
                 ),
@@ -296,7 +300,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildCompatibilityTile(BuildContext context) {
     return ListTile(
       leading: const Icon(Icons.description_outlined),
-      title: const Text('图片与文件格式兼容性'),
+      title: const Text(AppStrings.compatibilityTitle),
       onTap: () => _showCompatibilityDialog(context),
     );
   }
@@ -306,7 +310,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('改密码 = 换新账户'),
+          title: const Text(AppStrings.changePasswordDialogTitle),
           surfaceTintColor: Colors.transparent,
           content: SizedBox(
             width: double.maxFinite,
@@ -315,22 +319,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'ClipFlow 用密码派生账户身份：密码不同 = 账户不同，旧数据不会自动带到新密码下。',
+                  AppStrings.changePasswordDialogBody,
                   style: TextStyle(
                     color: Theme.of(dialogContext).colorScheme.onSurfaceVariant,
                     height: 1.5,
                   ),
                 ),
                 const SizedBox(height: 12),
-                _compatibilityItem(dialogContext, '改密码的正确步骤', '① 改密码前，先在「导出备份」生成 .clipflow-backup.json；\n② 在解锁页点击「切换到其他账户」（确认后清除本机旧账户标记），再输入新密码（= 进入新账户）；\n③ 在新账户下「导入备份」，选择备份文件并输入旧密码；\n④ 数据恢复完成。'),
-                _compatibilityItem(dialogContext, '注意', '旧账户数据仍保留在旧密码下，不会被删除。'),
+                _compatibilityItem(dialogContext, AppStrings.changePasswordStepsTitle, AppStrings.changePasswordStepsBody),
+                _compatibilityItem(dialogContext, AppStrings.changePasswordNoteTitle, AppStrings.changePasswordNoteBody),
               ],
             ),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('知道了'),
+              child: const Text(AppStrings.commonGotIt),
             ),
           ],
         );
@@ -343,7 +347,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('图片与文件格式兼容性'),
+          title: const Text(AppStrings.compatibilityTitle),
           surfaceTintColor: Colors.transparent,
           content: SizedBox(
             width: double.maxFinite,
@@ -354,38 +358,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: [
                   _compatibilityItem(
                     dialogContext,
-                    '图片',
-                    '支持剪贴板图片 PNG/JPEG/GIF/TIFF/BMP/WebP/HEIC；'
-                        '统一转 PNG/JPEG，长边超 2048 压缩、JPEG q80、'
-                        '含透明转 PNG；单张上限 5MB。',
+                    AppStrings.compatibilityImageTitle,
+                    AppStrings.compatibilityImageBody,
                   ),
                   _compatibilityItem(
                     dialogContext,
-                      '文件',
-                      'macOS 经 Finder 复制任意文件（file-url）；'
-                          'Android 经文件管理器复制（content://，无需存储权限）；'
-                          'Windows 剪贴板文件（CF_HDROP，已真机验证）；'
-                          '单文件 ≤50MB；一次复制多文件只同步第一个；'
-                          '文件夹同步不支持。',
+                    AppStrings.compatibilityFileTitle,
+                    AppStrings.compatibilityFileBody,
                   ),
                   _compatibilityItem(
                     dialogContext,
-                    '常见文件格式',
-                    '文本（txt/md/csv/json）、文档（pdf/doc/docx）、'
-                        '表格（xls/xlsx）、演示（ppt/pptx）、'
-                        '压缩（zip/7z/rar/tar/gz）、'
-                        '音视频（mp3/wav/mp4/mov/mkv）、'
-                        '代码（dart/swift/kt/cpp/h/py/js/ts/html/css）等；'
-                        '未识别扩展名按通用文件处理。',
+                    AppStrings.compatibilityFormatsTitle,
+                    AppStrings.compatibilityFormatsBody,
                   ),
                   _compatibilityItem(
                     dialogContext,
-                    '平台差异',
-                    'macOS/Windows 500ms 轮询检测；'
-                        'Android 由前台服务 + 原生剪贴板监听，'
-                        '但 Android 10+ 后台读取剪贴板受限、Android 16+ 仅前台触发；'
-                        '删除记录在垃圾箱保留 24 小时，跨设备删除/恢复同步窗口 30 秒，'
-                        '“倾倒垃圾桶”可彻底删除本地/服务器/磁盘数据。',
+                    AppStrings.compatibilityPlatformTitle,
+                    AppStrings.compatibilityPlatformBody,
                   ),
                 ],
               ),
@@ -394,7 +383,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('知道了'),
+              child: const Text(AppStrings.commonGotIt),
             ),
           ],
         );
@@ -450,7 +439,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildPermissionStatus(bool granted, {VoidCallback? onTap}) {
+  Widget _buildPermissionStatus(
+    bool granted, {
+    String grantedLabel = AppStrings.permissionGranted,
+    String deniedLabel = AppStrings.permissionDenied,
+    VoidCallback? onTap,
+  }) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
@@ -473,7 +467,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(width: 4),
             Text(
-              granted ? '已授予' : '未授予',
+              granted ? grantedLabel : deniedLabel,
               style: TextStyle(
                 fontSize: 12,
                 color: granted ? Colors.green.shade700 : Colors.orange.shade700,

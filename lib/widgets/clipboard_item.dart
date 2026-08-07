@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/clipboard_entry.dart';
 import '../models/file_download_progress.dart';
+import '../l10n/app_strings.dart';
 
 const Set<String> _pdfExtensions = {'pdf'};
 const Set<String> _docExtensions = {
@@ -88,7 +89,7 @@ IconData fileTypeIcon(String? fileName, String? mimeType) {
 }
 
 String formatFileSize(int? bytes) {
-  if (bytes == null || bytes < 0) return '未知大小';
+  if (bytes == null || bytes < 0) return AppStrings.fileSizeUnknown;
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) {
     return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -139,10 +140,16 @@ class _ClipboardItemState extends State<ClipboardItem> {
   String _formatTime(DateTime time) {
     final now = DateTime.now();
     final diff = now.difference(time);
-    if (diff.inSeconds < 60) return '${diff.inSeconds}秒前';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前';
-    if (diff.inHours < 24) return '${diff.inHours}小时前';
-    return '${diff.inDays}天前';
+    if (diff.inSeconds < 60) {
+      return AppStrings.clipboardTimeSecondsAgo(diff.inSeconds);
+    }
+    if (diff.inMinutes < 60) {
+      return AppStrings.clipboardTimeMinutesAgo(diff.inMinutes);
+    }
+    if (diff.inHours < 24) {
+      return AppStrings.clipboardTimeHoursAgo(diff.inHours);
+    }
+    return AppStrings.clipboardTimeDaysAgo(diff.inDays);
   }
 
   IconData _getDeviceIcon(String platform) {
@@ -212,7 +219,7 @@ class _ClipboardItemState extends State<ClipboardItem> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '图片',
+                    AppStrings.imageLabel,
                     style: theme.textTheme.titleSmall,
                   ),
                   const SizedBox(height: 4),
@@ -311,7 +318,9 @@ class _ClipboardItemState extends State<ClipboardItem> {
                   child: Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: Text(
-                      _isExpanded ? '折叠 ▲' : '展开 ▼',
+                      _isExpanded
+                          ? AppStrings.collapseContent
+                          : AppStrings.expandContent,
                       style: TextStyle(
                         fontSize: 12,
                         color: theme.colorScheme.primary,
@@ -386,7 +395,10 @@ class _ClipboardItemState extends State<ClipboardItem> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '${widget.entry.sourceDeviceName} · ${_formatTime(widget.entry.timestamp)}',
+                      AppStrings.deviceTimeSubtitle(
+                        widget.entry.sourceDeviceName,
+                        _formatTime(widget.entry.timestamp),
+                      ),
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.outline,
                       ),
@@ -405,7 +417,10 @@ class _ClipboardItemState extends State<ClipboardItem> {
                         children: [
                           Icon(Icons.push_pin, size: 12, color: Colors.orange),
                           SizedBox(width: 2),
-                          Text('置顶', style: TextStyle(fontSize: 10, color: Colors.orange)),
+                          Text(
+                            AppStrings.pinAction,
+                            style: TextStyle(fontSize: 10, color: Colors.orange),
+                          ),
                         ],
                       ),
                     ),
@@ -420,19 +435,21 @@ class _ClipboardItemState extends State<ClipboardItem> {
                   children: [
                     _ActionChip(
                       icon: widget.entry.isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                      label: widget.entry.isPinned ? '取消置顶' : '置顶',
+                      label: widget.entry.isPinned
+                          ? AppStrings.unpinAction
+                          : AppStrings.pinAction,
                       onTap: widget.onPin,
                     ),
                     const SizedBox(width: 4),
                     _ActionChip(
                       icon: Icons.copy_rounded,
-                      label: '复制',
+                      label: AppStrings.commonCopy,
                       onTap: widget.onCopy,
                     ),
                     const SizedBox(width: 4),
                     _ActionChip(
                       icon: Icons.delete_outline_rounded,
-                      label: '删除',
+                      label: AppStrings.commonDelete,
                       onTap: widget.onDelete,
                       isDestructive: true,
                     ),
@@ -484,9 +501,11 @@ class _FileEntryView extends StatelessWidget {
     final name = fileName ?? '';
     final dot = name.lastIndexOf('.');
     if (dot >= 0 && dot < name.length - 1) {
-      return '${name.substring(dot + 1).toUpperCase()} 文件';
+      return AppStrings.fileMetaExtension(
+        name.substring(dot + 1).toUpperCase(),
+      );
     }
-    return '文件';
+    return AppStrings.fileGenericLabel;
   }
 
   @override
@@ -529,7 +548,7 @@ class _FileEntryView extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      fileName ?? '未命名文件',
+                      fileName ?? AppStrings.fileNameUntitled,
                       style: theme.textTheme.titleSmall,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
@@ -603,8 +622,10 @@ class _FileProgressSection extends StatelessWidget {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '下载中 ${formatFileSize(progress.receivedBytes)} / '
-                    '${formatFileSize(total)}',
+                    AppStrings.fileDownloading(
+                      formatFileSize(progress.receivedBytes),
+                      formatFileSize(total),
+                    ),
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: cs.onSurfaceVariant,
                     ),
@@ -615,7 +636,7 @@ class _FileProgressSection extends StatelessWidget {
             if (onCancelDownload != null)
               IconButton(
                 onPressed: onCancelDownload,
-                tooltip: '取消下载',
+                tooltip: AppStrings.cancelDownloadTooltip,
                 visualDensity: VisualDensity.compact,
                 icon: Icon(
                   Icons.close_rounded,
@@ -635,7 +656,7 @@ class _FileProgressSection extends StatelessWidget {
             ),
             const SizedBox(width: 10),
             Text(
-              '处理中',
+              AppStrings.fileProcessing,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
               ),
@@ -647,7 +668,7 @@ class _FileProgressSection extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                progress.error ?? '下载失败',
+                progress.error ?? AppStrings.fileDownloadFailed,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodySmall?.copyWith(color: cs.error),
@@ -656,7 +677,7 @@ class _FileProgressSection extends StatelessWidget {
             if (onRetryDownload != null)
               IconButton(
                 onPressed: onRetryDownload,
-                tooltip: '重试下载',
+                tooltip: AppStrings.retryDownloadTooltip,
                 visualDensity: VisualDensity.compact,
                 icon: Icon(
                   Icons.refresh_rounded,
@@ -671,7 +692,7 @@ class _FileProgressSection extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                progress.error ?? '已取消',
+                progress.error ?? AppStrings.fileCancelled,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -682,7 +703,7 @@ class _FileProgressSection extends StatelessWidget {
             if (onRetryDownload != null)
               IconButton(
                 onPressed: onRetryDownload,
-                tooltip: '重试下载',
+                tooltip: AppStrings.retryDownloadTooltip,
                 visualDensity: VisualDensity.compact,
                 icon: Icon(
                   Icons.refresh_rounded,

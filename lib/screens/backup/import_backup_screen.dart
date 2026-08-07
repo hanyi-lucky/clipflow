@@ -7,6 +7,7 @@ import '../../models/backup_manifest.dart';
 import '../../providers/clipboard_provider.dart';
 import '../../services/backup_service.dart';
 import '../../services/encryption_service.dart';
+import '../../l10n/app_strings.dart';
 
 /// 迁移码导入：选 .clipflow-backup.json → 输旧密码 → 旧密钥解密 →
 /// 当前会话密钥重加密 → 上传（保留原始 ID/timestamp）→ 重新加载历史。
@@ -31,7 +32,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
     if (_importing) return;
     final file = await openFile(
       acceptedTypeGroups: const [
-        XTypeGroup(label: 'ClipFlow 备份', extensions: ['json']),
+        XTypeGroup(label: AppStrings.backupFileTypeLabel, extensions: ['json']),
       ],
     );
     if (file == null) return;
@@ -52,7 +53,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
       setState(() {
         _manifest = null;
         _fileName = null;
-        _error = '无法解析备份文件: $e';
+        _error = AppStrings.importParseFailed('$e');
       });
     }
   }
@@ -63,7 +64,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
 
     final oldPassword = _passwordController.text.trim();
     if (oldPassword.isEmpty) {
-      setState(() => _error = '请输入旧密码');
+      setState(() => _error = AppStrings.importEnterOldPassword);
       return;
     }
 
@@ -72,14 +73,14 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
     final cloudRepo = provider.cloudRepo;
     final storage = provider.storage;
     if (newKey == null || cloudRepo == null || storage == null) {
-      setState(() => _error = '未找到当前会话密钥，请返回解锁页重新解锁后再试');
+      setState(() => _error = AppStrings.sessionKeyMissing);
       return;
     }
 
     setState(() {
       _importing = true;
       _progress = 0;
-      _status = '正在导入...';
+      _status = AppStrings.importInProgress;
       _error = null;
       _result = null;
     });
@@ -116,14 +117,14 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
       setState(() {
         _importing = false;
         _progress = 1;
-        _status = '导入完成';
+        _status = AppStrings.backupImportDone;
         _result = result;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _importing = false;
-        _error = '导入失败: $e';
+        _error = AppStrings.importFailed('$e');
       });
     }
   }
@@ -141,7 +142,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
     final result = _result;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('导入备份')),
+      appBar: AppBar(title: const Text(AppStrings.importBackupTitle)),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -154,7 +155,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '迁移说明',
+                      AppStrings.importGuideTitle,
                       style: theme.textTheme.titleSmall?.copyWith(
                         color: theme.colorScheme.primary,
                         fontWeight: FontWeight.w600,
@@ -162,8 +163,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      '导入需输入「导出时的旧密码」：备份在本地用旧密码解密后，'
-                      '再用当前密码（新账户）重新加密上传，服务端只存密文。',
+                      AppStrings.importGuideBody,
                       style: TextStyle(
                         color: theme.colorScheme.onSurfaceVariant,
                         height: 1.5,
@@ -177,12 +177,21 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
             OutlinedButton.icon(
               onPressed: _importing ? null : _pickFile,
               icon: const Icon(Icons.folder_open),
-              label: Text(_fileName == null ? '选择备份文件' : '已选择：$_fileName'),
+              label: Text(
+                _fileName == null
+                    ? AppStrings.importChooseFile
+                    : AppStrings.importFileSelected(_fileName!),
+              ),
             ),
             if (manifest != null) ...[
               const SizedBox(height: 12),
               Text(
-                '备份共 ${manifest.entries.length} 条，来源：${manifest.sourceDevice.isEmpty ? '未知' : manifest.sourceDevice}',
+                AppStrings.importSummary(
+                  manifest.entries.length,
+                  manifest.sourceDevice.isEmpty
+                      ? AppStrings.sourceUnknown
+                      : manifest.sourceDevice,
+                ),
                 style: theme.textTheme.bodySmall,
               ),
             ],
@@ -193,7 +202,7 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
                 obscureText: true,
                 enabled: !_importing,
                 decoration: InputDecoration(
-                  labelText: '旧密码（导出时使用的密码）',
+                  labelText: AppStrings.oldPasswordLabel,
                   prefixIcon: const Icon(Icons.lock_outline_rounded),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -221,8 +230,10 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                '导入 ${result.imported} 条'
-                '${result.failed > 0 ? '，失败 ${result.failed} 条' : ''}',
+                AppStrings.importResultCount(result.imported) +
+                    (result.failed > 0
+                        ? AppStrings.importResultFailed(result.failed)
+                        : ''),
                 textAlign: TextAlign.center,
                 style: theme.textTheme.titleMedium,
               ),
@@ -263,7 +274,11 @@ class _ImportBackupScreenState extends State<ImportBackupScreen> {
                         ),
                       )
                     : const Icon(Icons.upload),
-                label: Text(_importing ? '导入中...' : '开始导入'),
+                label: Text(
+                  _importing
+                      ? AppStrings.importInProgressButton
+                      : AppStrings.importStartAction,
+                ),
               ),
             ),
           ],

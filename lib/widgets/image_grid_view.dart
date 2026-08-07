@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/clipboard_entry.dart';
 import '../screens/image_preview_screen.dart';
+import '../l10n/app_strings.dart';
 
 class ImageGridView extends StatelessWidget {
   final List<ClipboardEntry> entries;
@@ -14,8 +15,10 @@ class ImageGridView extends StatelessWidget {
     final timeStr = '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
 
     if (entryDay == today) return timeStr;
-    if (entryDay == today.subtract(const Duration(days: 1))) return '昨天 $timeStr';
-    return '${time.month}月${time.day}日 $timeStr';
+    if (entryDay == today.subtract(const Duration(days: 1))) {
+      return AppStrings.imageGridYesterday(timeStr);
+    }
+    return AppStrings.imageGridMonthDay(time.month, time.day, timeStr);
   }
 
   @override
@@ -31,14 +34,14 @@ class ImageGridView extends StatelessWidget {
               color: theme.colorScheme.outlineVariant),
             const SizedBox(height: 12),
             Text(
-              '暂无图片记录',
+              AppStrings.imageGridEmptyTitle,
               style: theme.textTheme.titleMedium?.copyWith(
                 color: theme.colorScheme.outline,
               ),
             ),
             const SizedBox(height: 8),
             Text(
-              '复制图片后自动同步到这里',
+              AppStrings.imageGridEmptyHint,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.outlineVariant,
               ),

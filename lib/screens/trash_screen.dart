@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/clipboard_entry.dart';
 import '../providers/clipboard_provider.dart';
 import '../widgets/clipboard_item.dart';
+import '../l10n/app_strings.dart';
 
 class TrashScreen extends StatefulWidget {
   const TrashScreen({super.key});
@@ -38,10 +39,14 @@ class _TrashScreenState extends State<TrashScreen> {
     final now = DateTime.now();
     final diff = now.difference(deletedTime);
 
-    if (diff.inMinutes < 1) return '刚刚删除';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前删除';
-    if (diff.inHours < 24) return '${diff.inHours}小时前删除';
-    return '${diff.inDays}天前删除';
+    if (diff.inMinutes < 1) return AppStrings.trashDeletedJustNow;
+    if (diff.inMinutes < 60) {
+      return AppStrings.trashDeletedMinutesAgo(diff.inMinutes);
+    }
+    if (diff.inHours < 24) {
+      return AppStrings.trashDeletedHoursAgo(diff.inHours);
+    }
+    return AppStrings.trashDeletedDaysAgo(diff.inDays);
   }
 
   String _formatRemainingTime(int deletedAt) {
@@ -50,11 +55,14 @@ class _TrashScreenState extends State<TrashScreen> {
     final now = DateTime.now();
     final remaining = expireTime.difference(now);
 
-    if (remaining.isNegative) return '即将清除';
+    if (remaining.isNegative) return AppStrings.trashExpiringSoon;
     if (remaining.inHours > 0) {
-      return '剩余 ${remaining.inHours} 小时 ${remaining.inMinutes % 60} 分钟';
+      return AppStrings.trashRemainingHoursMinutes(
+        remaining.inHours,
+        remaining.inMinutes % 60,
+      );
     }
-    return '剩余 ${remaining.inMinutes} 分钟';
+    return AppStrings.trashRemainingMinutes(remaining.inMinutes);
   }
 
   String _getContentPreview(String content) {
@@ -63,12 +71,12 @@ class _TrashScreenState extends State<TrashScreen> {
 
   Widget _buildTrashPreview(Map<String, dynamic> entry, ThemeData theme) {
     if (entry['type'] == ContentType.file.name) {
-      final fileName = entry['file_name'] as String? ?? '未命名文件';
+      final fileName = entry['file_name'] as String? ?? AppStrings.fileNameUntitled;
       final fileSize = (entry['file_size'] as num?)?.toInt();
       final mimeType = entry['mime_type'] as String?;
       final metaLabel = (mimeType?.trim().isNotEmpty ?? false)
           ? mimeType!
-          : '文件';
+          : AppStrings.fileGenericLabel;
       return Row(
         children: [
           Container(
@@ -142,7 +150,7 @@ class _TrashScreenState extends State<TrashScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('图片', style: theme.textTheme.titleSmall),
+                Text(AppStrings.imageLabel, style: theme.textTheme.titleSmall),
                 if (width != null && height != null) ...[
                   const SizedBox(height: 4),
                   Text(
@@ -189,14 +197,14 @@ class _TrashScreenState extends State<TrashScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('垃圾箱'),
+        title: const Text(AppStrings.trashTitle),
         centerTitle: true,
         actions: [
           if (_trashEntries.isNotEmpty) ...[
             IconButton(
               icon: const Icon(Icons.delete_sweep),
               onPressed: _emptyTrash,
-              tooltip: '倾倒垃圾桶',
+              tooltip: AppStrings.emptyTrashTitle,
             ),
             IconButton(
               icon: const Icon(Icons.refresh_rounded),
@@ -204,7 +212,7 @@ class _TrashScreenState extends State<TrashScreen> {
                 setState(() => _isLoading = true);
                 _loadTrash();
               },
-              tooltip: '刷新',
+              tooltip: AppStrings.commonRefresh,
             ),
           ],
         ],
@@ -223,14 +231,14 @@ class _TrashScreenState extends State<TrashScreen> {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    '垃圾箱为空',
+                    AppStrings.trashEmpty,
                     style: theme.textTheme.titleMedium?.copyWith(
                       color: theme.colorScheme.outline,
                     ),
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    '删除的记录将保留 24 小时',
+                    AppStrings.trashEmptyHint,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.outlineVariant,
                     ),
@@ -309,7 +317,7 @@ class _TrashScreenState extends State<TrashScreen> {
                           children: [
                             _TrashActionChip(
                               icon: Icons.restore_rounded,
-                              label: '恢复',
+                              label: AppStrings.commonRestore,
                               onTap: () => _restoreEntry(entry['id'] as String),
                             ),
                           ],
@@ -327,16 +335,16 @@ class _TrashScreenState extends State<TrashScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('倾倒垃圾桶'),
-        content: const Text('确定要永久删除垃圾箱中的所有记录吗？此操作不可恢复。'),
+        title: const Text(AppStrings.emptyTrashTitle),
+        content: const Text(AppStrings.emptyTrashConfirmBody),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
+            child: const Text(AppStrings.commonCancel),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('倾倒', style: TextStyle(color: Colors.red)),
+            child: const Text(AppStrings.dumpAction, style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -351,7 +359,7 @@ class _TrashScreenState extends State<TrashScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('已倾倒 $deleted 条记录'),
+              content: Text(AppStrings.trashDumpedCount(deleted)),
               duration: const Duration(seconds: 2),
             ),
           );
@@ -360,7 +368,7 @@ class _TrashScreenState extends State<TrashScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('倾倒失败: $e'),
+              content: Text(AppStrings.trashDumpFailed('$e')),
               duration: const Duration(seconds: 2),
             ),
           );
@@ -373,16 +381,16 @@ class _TrashScreenState extends State<TrashScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('恢复记录'),
-        content: const Text('确定要恢复这条记录吗？'),
+        title: const Text(AppStrings.restoreEntryTitle),
+        content: const Text(AppStrings.restoreEntryConfirmBody),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
+            child: const Text(AppStrings.commonCancel),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('恢复', style: TextStyle(color: Colors.green)),
+            child: const Text(AppStrings.commonRestore, style: TextStyle(color: Colors.green)),
           ),
         ],
       ),
@@ -396,7 +404,10 @@ class _TrashScreenState extends State<TrashScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已恢复'), duration: Duration(seconds: 2)),
+          const SnackBar(
+            content: Text(AppStrings.restoreSuccess),
+            duration: Duration(seconds: 2),
+          ),
         );
       }
     }

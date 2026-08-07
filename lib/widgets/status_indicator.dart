@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/clipboard_provider.dart';
+import '../l10n/app_strings.dart';
 
 class StatusIndicator extends StatelessWidget {
   const StatusIndicator({super.key});
@@ -52,7 +53,7 @@ class StatusIndicator extends StatelessWidget {
                 TextButton.icon(
                   onPressed: () => provider.refresh(),
                   icon: const Icon(Icons.refresh_rounded, size: 16),
-                  label: const Text('重试', style: TextStyle(fontSize: 13)),
+                  label: const Text(AppStrings.commonRetry, style: TextStyle(fontSize: 13)),
                   style: TextButton.styleFrom(
                     foregroundColor: status.color,
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),

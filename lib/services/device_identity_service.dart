@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 import 'package:device_info_plus/device_info_plus.dart';
+import '../l10n/app_strings.dart';
 
 class DeviceIdentity {
   final String platform;
@@ -44,13 +45,13 @@ String buildDefaultDeviceName({required String platform, String? model}) {
 
   switch (platform) {
     case 'android':
-      return 'Android · $trimmed';
+      return AppStrings.deviceNameAndroid(trimmed);
     case 'windows':
-      return 'Windows · $trimmed';
+      return AppStrings.deviceNameWindows(trimmed);
     case 'macos':
-      return 'Mac · $trimmed';
+      return AppStrings.deviceNameMac(trimmed);
     case 'ios':
-      return 'iOS · $trimmed';
+      return AppStrings.deviceNameIos(trimmed);
     default:
       return 'Unknown Device';
   }

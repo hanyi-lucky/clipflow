@@ -1,3 +1,5 @@
+import '../l10n/app_strings.dart';
+
 class ClipboardException implements Exception {
   final String? code;
   final String message;
@@ -23,7 +25,7 @@ class AuthException extends ClipboardException {
 class RateLimitedException extends ClipboardException {
   final int retryAfterMs;
   RateLimitedException(this.retryAfterMs)
-      : super('尝试过于频繁，请稍后再试', code: 'RATE_LIMITED');
+      : super(AppStrings.rateLimitedMessage, code: 'RATE_LIMITED');
 
   @override
   String toString() => 'RateLimitedException: $message (code: $code, retryAfterMs: $retryAfterMs)';

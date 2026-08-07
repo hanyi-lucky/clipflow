@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/clipboard_provider.dart';
+import '../l10n/app_strings.dart';
 
 class MergeBar extends StatelessWidget {
   const MergeBar({super.key});
@@ -35,16 +36,16 @@ class MergeBar extends StatelessWidget {
                 children: [
                   Icon(Icons.tune_rounded, size: 18, color: theme.colorScheme.outline),
                   const SizedBox(width: 8),
-                  Text('分隔符', style: theme.textTheme.bodyMedium?.copyWith(
+                  Text(AppStrings.mergeSeparatorLabel, style: theme.textTheme.bodyMedium?.copyWith(
                     fontWeight: FontWeight.w500,
                   )),
                   const SizedBox(width: 8),
                   SegmentedButton<String>(
                     segments: const [
-                      ButtonSegment(value: '\n', label: Text('换行')),
-                      ButtonSegment(value: ',', label: Text('逗号')),
-                      ButtonSegment(value: ';', label: Text('分号')),
-                      ButtonSegment(value: ' ', label: Text('空格')),
+                      ButtonSegment(value: '\n', label: Text(AppStrings.separatorNewline)),
+                      ButtonSegment(value: ',', label: Text(AppStrings.separatorComma)),
+                      ButtonSegment(value: ';', label: Text(AppStrings.separatorSemicolon)),
+                      ButtonSegment(value: ' ', label: Text(AppStrings.separatorSpace)),
                     ],
                     selected: {provider.mergeSeparator},
                     onSelectionChanged: (v) {
@@ -73,7 +74,7 @@ class MergeBar extends StatelessWidget {
                 child: provider.mergePreview.isEmpty
                     ? Center(
                         child: Text(
-                          '选择条目查看拼接预览',
+                          AppStrings.mergePreviewEmpty,
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.outline,
                           ),
@@ -92,7 +93,7 @@ class MergeBar extends StatelessWidget {
                 height: 44,
                 child: ElevatedButton.icon(
                   icon: const Icon(Icons.copy_rounded, size: 18),
-                  label: Text('复制拼接内容 (${provider.selectedIds.length}条)'),
+                  label: Text(AppStrings.mergeCopyCount(provider.selectedIds.length)),
                   onPressed: provider.selectedIds.isEmpty
                       ? null
                       : () => provider.copyMerged(),

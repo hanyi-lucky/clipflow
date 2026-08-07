@@ -4,6 +4,7 @@ import 'package:image/image.dart' as img;
 import 'package:crypto/crypto.dart';
 import '../core/constants.dart';
 import '../core/exceptions.dart';
+import '../l10n/app_strings.dart';
 
 /// 压缩后的图片：全图字节 + 缩略图字节 + 元数据
 class CompressedImage {
@@ -39,7 +40,7 @@ CompressedImage _compressInBackground(Map<String, dynamic> params) {
 
   final decoded = img.decodeImage(input);
   if (decoded == null) {
-    throw ImageCompressionException('无法解码图片数据');
+    throw ImageCompressionException(AppStrings.imageDecodeFailed);
   }
 
   final hasAlpha = decoded.numChannels == 4;
@@ -99,7 +100,7 @@ CompressedImage _compressInBackground(Map<String, dynamic> params) {
   // 该哈希在重编码后保持稳定，用于上传去重。
   final encodedDecoded = img.decodeImage(bytes);
   if (encodedDecoded == null) {
-    throw ImageCompressionException('无法解码压缩产物');
+    throw ImageCompressionException(AppStrings.imageCompressDecodeFailed);
   }
   final probe = img.copyResize(
     encodedDecoded,

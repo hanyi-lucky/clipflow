@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/clipboard_provider.dart';
 import '../models/device.dart';
+import '../l10n/app_strings.dart';
 
 class DeviceManagementSection extends StatefulWidget {
   const DeviceManagementSection({super.key});
@@ -64,7 +65,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '加载失败',
+                AppStrings.devicesLoadFailed,
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
               const SizedBox(height: 8),
@@ -76,7 +77,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
                   });
                   _loadDevices();
                 },
-                child: const Text('重试'),
+                child: const Text(AppStrings.commonRetry),
               ),
             ],
           ),
@@ -88,7 +89,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
       return const Center(
         child: Padding(
           padding: EdgeInsets.all(16.0),
-          child: Text('暂无设备'),
+          child: Text(AppStrings.devicesEmpty),
         ),
       );
     }
@@ -135,7 +136,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
-                '当前设备',
+                AppStrings.currentDeviceBadge,
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: colorScheme.onPrimaryContainer,
                 ),
@@ -145,7 +146,10 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
         ],
       ),
       subtitle: Text(
-        '${device.platform} · ${_formatLastSeen(device.lastSeen)}',
+        AppStrings.deviceSubtitle(
+          device.platform,
+          _formatLastSeen(device.lastSeen),
+        ),
         style: Theme.of(context).textTheme.bodySmall?.copyWith(
           color: colorScheme.onSurfaceVariant,
         ),
@@ -155,11 +159,11 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
         itemBuilder: (context) => [
           const PopupMenuItem(
             value: 'rename',
-            child: Text('重命名'),
+            child: Text(AppStrings.renameAction),
           ),
           const PopupMenuItem(
             value: 'remove',
-            child: Text('移除'),
+            child: Text(AppStrings.removeAction),
           ),
         ],
       ),
@@ -186,23 +190,23 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('重命名设备'),
+        title: const Text(AppStrings.renameDeviceTitle),
         content: TextField(
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(
-            labelText: '设备名称',
-            hintText: '例如：Android · Xiaomi 15',
+            labelText: AppStrings.deviceNameLabel,
+            hintText: AppStrings.deviceNameHint,
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
+            child: const Text(AppStrings.commonCancel),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('保存'),
+            child: const Text(AppStrings.commonSave),
           ),
         ],
       ),
@@ -221,14 +225,14 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
         }
 
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('设备已重命名')),
+          const SnackBar(content: Text(AppStrings.deviceRenamed)),
         );
 
         await _loadDevices();
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('重命名失败：$e')),
+            SnackBar(content: Text(AppStrings.deviceRenameFailed('$e'))),
           );
         }
       }
@@ -245,23 +249,23 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('移除设备'),
+        title: const Text(AppStrings.removeDeviceTitle),
         content: Text(
           isCurrentDevice
-              ? '移除当前设备后，该设备的 token 将立即失效，无法继续同步。确定要移除吗？'
-              : '确定要移除设备「${device.name}」吗？该设备的 token 将立即失效。',
+              ? AppStrings.removeCurrentDeviceBody
+              : AppStrings.removeDeviceBody(device.name),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
+            child: const Text(AppStrings.commonCancel),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
             style: TextButton.styleFrom(
               foregroundColor: Theme.of(context).colorScheme.error,
             ),
-            child: const Text('移除'),
+            child: const Text(AppStrings.removeAction),
           ),
         ],
       ),
@@ -275,7 +279,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
           if (isCurrentDevice) {
             // 当前设备被移除，退出登录
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('当前设备已移除，正在退出登录...')),
+              const SnackBar(content: Text(AppStrings.deviceRemovedSigningOut)),
             );
             // 导航到解锁页面
             Navigator.of(context).pushNamedAndRemoveUntil(
@@ -284,7 +288,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
             );
           } else {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('设备已移除')),
+              const SnackBar(content: Text(AppStrings.deviceRemoved)),
             );
             await _loadDevices();
           }
@@ -292,7 +296,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('移除失败：$e')),
+            SnackBar(content: Text(AppStrings.deviceRemoveFailed('$e'))),
           );
         }
       }
@@ -319,13 +323,13 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
     final diff = now.difference(lastSeen);
 
     if (diff.inMinutes < 1) {
-      return '刚刚在线';
+      return AppStrings.deviceOnlineJustNow;
     } else if (diff.inHours < 1) {
-      return '${diff.inMinutes}分钟前';
+      return AppStrings.deviceOnlineMinutesAgo(diff.inMinutes);
     } else if (diff.inDays < 1) {
-      return '${diff.inHours}小时前';
+      return AppStrings.deviceOnlineHoursAgo(diff.inHours);
     } else if (diff.inDays < 7) {
-      return '${diff.inDays}天前';
+      return AppStrings.deviceOnlineDaysAgo(diff.inDays);
     } else {
       // 手动格式化日期，避免依赖 intl 包
       final month = lastSeen.month.toString().padLeft(2, '0');
