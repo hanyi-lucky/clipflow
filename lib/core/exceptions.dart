@@ -41,3 +41,18 @@ class DecryptionException implements Exception {
 class ImageCompressionException extends ClipboardException {
   ImageCompressionException(super.message) : super(code: 'IMAGE_COMPRESS_ERROR');
 }
+
+/// 云拉取前置校验失败类型。
+enum CloudPullErrorType { sameAccount, emptyAccount }
+
+/// 云拉取前置校验异常（同账户 / 空账户），UI 据此映射明确文案。
+class CloudPullException extends ClipboardException {
+  final CloudPullErrorType type;
+  CloudPullException(this.type, String message)
+      : super(
+          message,
+          code: type == CloudPullErrorType.sameAccount
+              ? 'CLOUD_PULL_SAME_ACCOUNT'
+              : 'CLOUD_PULL_EMPTY_ACCOUNT',
+        );
+}

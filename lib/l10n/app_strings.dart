@@ -39,6 +39,8 @@ abstract final class AppStrings {
   static const String exportBackupSubtitle = '生成 .clipflow-backup.json 密文备份（含 salt，零明文）';
   static const String importBackupTitle = '导入备份';
   static const String importBackupSubtitle = '迁移码导入：输入旧密码，恢复到当前账户';
+  static const String cloudPullTitle = '从云端拉取';
+  static const String cloudPullSubtitle = '输入旧密码，直接把旧账户云端数据迁移到当前账户';
   static const String changePasswordInfoTitle = '改密码说明';
   static const String changePasswordInfoSubtitle = '改密码会进入新账户，旧数据如何找回？';
   static const String settingsSyncSection = '同步设置';
@@ -68,7 +70,7 @@ abstract final class AppStrings {
   static const String changePasswordDialogTitle = '改密码 = 换新账户';
   static const String changePasswordDialogBody = 'ClipFlow 用密码派生账户身份：密码不同 = 账户不同，旧数据不会自动带到新密码下。';
   static const String changePasswordStepsTitle = '改密码的正确步骤';
-  static const String changePasswordStepsBody = '① 改密码前，先在「导出备份」生成 .clipflow-backup.json；\n② 在解锁页点击「切换到其他账户」（确认后清除本机旧账户标记），再输入新密码（= 进入新账户）；\n③ 在新账户下「导入备份」，选择备份文件并输入旧密码；\n④ 数据恢复完成。';
+  static const String changePasswordStepsBody = '① 改密码前，先在「导出备份」生成 .clipflow-backup.json；\n② 在解锁页点击「切换到其他账户」（确认后清除本机旧账户标记），再输入新密码（= 进入新账户）；\n③ 在新账户下「导入备份」，选择备份文件并输入旧密码；\n④ 数据恢复完成。\n或在新账户设置页「从云端拉取」输入旧密码直接迁移。';
   static const String changePasswordNoteTitle = '注意';
   static const String changePasswordNoteBody = '旧账户数据仍保留在旧密码下，不会被删除。';
 
@@ -250,6 +252,18 @@ abstract final class AppStrings {
   static String backupExporting(int i, int total) => '正在导出 $i/$total';
   static String backupImporting(int i, int total) => '正在导入 $i/$total';
   static String backupPinRestoreFailed(String id, String e) => '$id (置顶恢复): $e';
+
+  // ===== 从云端拉取（旧账户迁移到当前账户） =====
+  static const String cloudPullGuideTitle = '迁移说明';
+  static const String cloudPullGuideBody = '输入旧账户的密码，旧账户云端密文将用旧密码解密、再用当前密码重新加密后写入当前账户，无需备份文件。';
+  static const String cloudPullStartAction = '开始拉取';
+  static const String cloudPullInProgress = '正在拉取...';
+  static const String cloudPullInProgressButton = '拉取中...';
+  static const String cloudPullFetchingLabel = '正在读取旧账户';
+  static String cloudPullFetching(int i, int total) => '正在读取旧账户 $i/$total';
+  static const String cloudPullDone = '拉取完成';
+  static const String cloudPullSameAccount = '旧密码与当前账户相同，无需拉取';
+  static const String cloudPullEmptyAccount = '未找到旧账户数据：旧密码错误或旧账户为空';
 
   // ===== Provider / 服务层用户可见错误 =====
   static const String decryptFailedPlaceholder = '[解密失败]';

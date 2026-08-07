@@ -1,5 +1,3 @@
-import 'dart:convert';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
@@ -9,6 +7,7 @@ import '../repositories/local_storage.dart';
 import '../services/encryption_service.dart';
 import '../services/auth_guard.dart';
 import '../core/hex_utils.dart';
+import '../core/user_id.dart';
 import '../core/exceptions.dart';
 import '../l10n/app_strings.dart';
 
@@ -91,8 +90,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
 
     try {
       // 从密码派生 userId：相同密码 → 相同 userId → 共享数据
-      final passwordHash = sha256.convert(utf8.encode('clipflow:$password')).toString();
-      final userId = 'user_${passwordHash.substring(0, 16)}';
+      final userId = deriveUserId(password);
 
       final storage = _storage ?? await LocalStorage.create();
 
