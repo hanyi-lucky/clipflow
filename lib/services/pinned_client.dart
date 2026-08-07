@@ -1,24 +1,26 @@
 import 'dart:io';
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
-/// ClipFlow 服务器域名身份（证书 subject 校验用）。
-const String clipflowServerDomain = 'api.yihanlife.ccwu.cc';
-
-/// 创建绑定 ClipFlow 服务器域名身份的 HTTP Client。
+/// ClipFlow 服务器自签证书（DER）的 SHA-256 指纹，用于指纹固定。
 ///
-/// 背景：API 直连固定 IP（`https://121.196.222.122`），TLS 使用 SNI=IP，
-/// 系统按 IP 校验域名证书必然 hostname 不匹配，会触发 `badCertificateCallback`。
-/// 这里按「证书 subject 含 ClipFlow 域名 + 签发者为 Let's Encrypt」放行
-/// （信任链仍由系统信任库校验）。等价于正常 HTTPS 的域名校验，且不受证书续期影响
-/// （续期后仍是同一域名的 Let's Encrypt 证书）。
+/// 服务器证书：`/opt/clipflow/tls/clipflow-server.crt`（自签，10 年有效，
+/// CN=121.196.222.122）。更换证书时必须同步更新此指纹并重发 App。
+const String pinnedServerCertFingerprintHex =
+    '07AA7BFC318C28E42F56999DCDC2568A0552E4D97F33DB26F752B1DC40C11139';
+
+/// 创建绑定 ClipFlow 服务器证书的 HTTP Client（指纹固定）。
+///
+/// API 直连固定 IP（`https://121.196.222.122`），服务器使用自签证书，
+/// 系统信任库无法校验，因此在此按「证书 DER SHA-256 == 内置指纹」放行。
+/// 这是最强的 MITM 防护：只有持有该服务器私钥的证书能通过，与信任库、
+/// 证书链、续期完全解耦（10 年内无需更新）。
 http.Client createPinnedHttpClient() {
   final inner = HttpClient()
     ..badCertificateCallback = (X509Certificate cert, String host, int port) {
-      final subject = cert.subject;
-      final issuer = cert.issuer;
-      return subject.contains(clipflowServerDomain) &&
-          issuer.contains("Let's Encrypt");
+      final fp = sha256.convert(cert.der).toString().toUpperCase();
+      return fp == pinnedServerCertFingerprintHex;
     };
   return IOClient(inner);
 }

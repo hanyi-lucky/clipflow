@@ -7,6 +7,7 @@ import 'providers/clipboard_provider.dart';
 import 'providers/settings_provider.dart';
 import 'services/app_info.dart';
 import 'services/crash_reporter.dart';
+import 'services/pinned_client.dart';
 import 'package:provider/provider.dart';
 
 Future<void> main() async {
