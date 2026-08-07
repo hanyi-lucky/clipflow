@@ -20,6 +20,8 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  /// 崩溃上报真机测试触发：关于页连点版本号 7 次抛一次异常（隐藏测试钩子）。
+  int _versionTapCount = 0;
   @override
   void initState() {
     super.initState();
@@ -286,6 +288,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   title: const Text(AppStrings.aboutVersion),
                   subtitle: Text(context.watch<AppInfo>().fullVersion),
                   leading: const Icon(Icons.info_outline),
+                  onTap: () {
+                    // 隐藏测试钩子：连点 7 次触发一次崩溃（供崩溃上报验收）。
+                    _versionTapCount++;
+                    if (_versionTapCount >= 7) {
+                      _versionTapCount = 0;
+                      throw StateError(
+                          'Manual crash trigger (tap version 7 times)');
+                    }
+                  },
                 ),
                 ListTile(
                   title: const Text(AppStrings.aboutLicense),

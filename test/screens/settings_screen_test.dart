@@ -169,4 +169,28 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(CloudPullScreen), findsOneWidget);
   });
+  testWidgets('关于页连点版本号 7 次触发一次崩溃异常（崩溃上报测试钩子）', (tester) async {
+    await useTallViewport(tester);
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    await tester.pumpWidget(buildApp(storage));
+    await tester.pumpAndSettle();
+
+    final versionTile = find.widgetWithText(ListTile, AppStrings.aboutVersion);
+    await tester.scrollUntilVisible(versionTile, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+
+    for (var i = 0; i < 7; i++) {
+      await tester.tap(versionTile);
+      await tester.pump();
+    }
+
+    final thrown = tester.takeException();
+    expect(thrown, isA<StateError>());
+    expect((thrown as StateError).message,
+        contains('Manual crash trigger'));
+  });
+
 }
