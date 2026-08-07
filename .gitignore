@@ -58,3 +58,4 @@ AGENTS.md
 
 # Local secrets (Cloudflare API token / Sentry DSN)
 API or DSN or other.md
+archive/
