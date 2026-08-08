@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:uuid/uuid.dart';
 
 import '../models/sync_operation.dart';
@@ -21,6 +22,7 @@ class SyncCoordinator {
   final Duration retryBaseDelay;
   final DateTime Function() _now;
   final Uuid _uuid;
+  final Future<void> Function(SyncOperation)? _onOperationSucceeded;
   bool _draining = false;
   bool _closed = false;
 
@@ -33,12 +35,14 @@ class SyncCoordinator {
     this.retryBaseDelay = const Duration(milliseconds: 500),
     DateTime Function()? now,
     Uuid? uuid,
+    Future<void> Function(SyncOperation)? onOperationSucceeded,
   })  : _syncService = syncService,
         _transport = transport,
         _outbox = outbox,
         _fileStore = fileStore,
         _now = now ?? DateTime.now,
-        _uuid = uuid ?? const Uuid();
+        _uuid = uuid ?? const Uuid(),
+        _onOperationSucceeded = onOperationSucceeded;
 
   factory SyncCoordinator.cloud({
     required String userId,
@@ -47,6 +51,7 @@ class SyncCoordinator {
     required OutboxStore outbox,
     required LocalFileStore fileStore,
     Duration retryBaseDelay = const Duration(milliseconds: 500),
+    Future<void> Function(SyncOperation)? onOperationSucceeded,
   }) {
     return SyncCoordinator(
       userId: userId,
@@ -55,6 +60,7 @@ class SyncCoordinator {
       outbox: outbox,
       fileStore: fileStore,
       retryBaseDelay: retryBaseDelay,
+      onOperationSucceeded: onOperationSucceeded,
     );
   }
 
@@ -236,6 +242,12 @@ class SyncCoordinator {
       await _transport.send(sending);
       _syncService.markUploadSucceeded(sending.dedupeKey);
       await _outbox.remove(userId, sending.operationId);
+      // 回执挂在 durable success 点之后：send 已返回、去重状态已写、
+      // manifest 已删。任何路径（direct upload* 内 drain、_syncTick
+      // 后台 drain 重试、dedupe 路径 drain、401 重放成功）的发送成功都
+      // 收敛到这里；回调异常绝不 rethrow，否则会把已删除 manifest 的
+      // 已成功操作重新写回 outbox → 下次 drain 重复上传。
+      await _notifySuccess(sending);
     } catch (error) {
       final attemptCount = sending.attemptCount + 1;
       final dead = _isDead(error);
@@ -253,6 +265,16 @@ class SyncCoordinator {
         await _fileStore.deleteEntry(updated.artifactId!);
       }
       rethrow;
+    }
+  }
+
+  Future<void> _notifySuccess(SyncOperation operation) async {
+    final callback = _onOperationSucceeded;
+    if (callback == null) return;
+    try {
+      await callback(operation);
+    } catch (error) {
+      debugPrint('[SYNC-COORDINATOR] Success callback failed: $error');
     }
   }
 

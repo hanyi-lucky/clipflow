@@ -304,7 +304,7 @@ void main() {
     );
 
     test(
-      'upload failure does not record signature and same file can retry',
+      'failed upload is retried by background drain and recorded in history',
       () async {
         final sourceBytes = List<int>.generate(8192, (i) => i % 251);
         final sourceFile = File('${tempDir.path}/retry.pdf');
@@ -327,12 +327,23 @@ void main() {
         );
 
         repo.failUploadOnce = true;
-        final provider = await createProvider();
+        final provider = await createProvider(
+          retryBaseDelay: const Duration(milliseconds: 10),
+        );
 
         await provider.debugFileCheck();
+        // 首次上传失败：操作进入 outbox retryable，本地无历史、签名不落地
         await waitFor(() => repo.uploadCalls.length == 1);
+        expect(
+          provider.history.any(
+            (e) => e.type == ContentType.file && e.fileName == 'retry.pdf',
+          ),
+          isFalse,
+        );
 
-        await provider.debugFileCheck();
+        // 不手动二次触发：后台 _syncTick drain 重试成功 → 成功回执补史。
+        // 顺带覆盖竞态收敛：drain 先成功后，若 debounce 再触发 _uploadFile，
+        // isFileHashUploaded 短路不再重复上传。
         await waitFor(
           () =>
               repo.uploadCalls.length == 2 &&
@@ -347,6 +358,7 @@ void main() {
         );
         expect(entry.fileName, 'retry.pdf');
         expect(entry.fileSize, sourceBytes.length);
+        expect(entry.id, repo.uploadCalls.last['historyId']);
 
         await settle();
         provider.dispose();

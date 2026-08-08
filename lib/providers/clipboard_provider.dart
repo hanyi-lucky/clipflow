@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/clipboard_entry.dart';
+import '../models/sync_operation.dart';
 import '../models/clipboard_file.dart';
 import '../models/clipboard_image.dart';
 import '../models/file_download_progress.dart';
@@ -313,6 +314,7 @@ class ClipboardProvider extends ChangeNotifier
       outbox: _outbox ?? LocalOutboxStore(),
       fileStore: _localFileStore,
       retryBaseDelay: _retryBaseDelay,
+      onOperationSucceeded: _onOperationSucceeded,
     );
 
     _monitor = ClipboardMonitor(
@@ -1004,6 +1006,119 @@ class ClipboardProvider extends ChangeNotifier
       _errorMessage = e.toString();
       _serverConnected = false;
       _setStatus(SyncStatus.error);
+    }
+  }
+
+  /// 发送成功回执：`_syncTick` 后台 drain 重试与 dedupe 路径的发送成功
+  /// 无法经 upload* 返回值通知 Provider，统一在此按 op.kind 三分流补账。
+  /// 直接路径的返回分支补账与回执并存，靠 `HistoryService.addEntry` 按
+  /// ID → image stableHash → file fileHash 三级去重收敛。
+  Future<void> _onOperationSucceeded(SyncOperation op) async {
+    if (_disposed || _syncService == null) return;
+    try {
+      switch (op.kind) {
+        case SyncOperationKind.text:
+          final encrypted = op.payload['content'] as String?;
+          if (encrypted == null || encrypted.isEmpty) return;
+          final decrypted = _capContent(
+            await _syncService!.decryptContent(encrypted),
+          );
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: op.operationId,
+              content: decrypted,
+              sourceDeviceId:
+                  op.payload['sourceDevice'] as String? ?? 'unknown',
+              sourceDeviceName:
+                  op.payload['sourceDeviceName'] as String? ?? 'Unknown',
+              sourcePlatform:
+                  op.payload['sourcePlatform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                (op.payload['timestamp'] as num?)?.toInt() ?? 0,
+              ),
+              type: ContentType.text,
+            ),
+          );
+          _saveHistory();
+          notifyListeners();
+          break;
+        case SyncOperationKind.image:
+          final fullEncrypted = op.payload['content'] as String?;
+          final thumbEncrypted = op.payload['thumb'] as String?;
+          if (fullEncrypted == null || fullEncrypted.isEmpty) return;
+          Uint8List? thumbBytes;
+          if (thumbEncrypted != null && thumbEncrypted.isNotEmpty) {
+            try {
+              thumbBytes = await _syncService!.decryptImage(thumbEncrypted);
+            } catch (_) {
+              thumbBytes = null;
+            }
+          }
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: op.operationId,
+              content: '',
+              sourceDeviceId:
+                  op.payload['sourceDevice'] as String? ?? 'unknown',
+              sourceDeviceName:
+                  op.payload['sourceDeviceName'] as String? ?? 'Unknown',
+              sourcePlatform:
+                  op.payload['sourcePlatform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                (op.payload['timestamp'] as num?)?.toInt() ?? 0,
+              ),
+              type: ContentType.image,
+              imageThumbBytes: thumbBytes,
+              imageThumbEncryptedBase64: thumbEncrypted,
+              imageWidth: (op.payload['width'] as num?)?.toInt(),
+              imageHeight: (op.payload['height'] as num?)?.toInt(),
+              imageFormat: op.payload['format'] as String?,
+              stableHash: op.payload['hash'] as String?,
+            ),
+          );
+          // 全图密文按 operationId 落盘：恢复全屏看图无需再拉服务器。
+          await _localImageStore.save(op.operationId, fullEncrypted);
+          _saveHistory();
+          notifyListeners();
+          break;
+        case SyncOperationKind.file:
+          final hash = op.payload['hash'] as String?;
+          if (hash == null || hash.isEmpty) return;
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: op.operationId,
+              content: '',
+              sourceDeviceId:
+                  op.payload['sourceDevice'] as String? ?? 'unknown',
+              sourceDeviceName:
+                  op.payload['sourceDeviceName'] as String? ?? 'Unknown',
+              sourcePlatform:
+                  op.payload['sourcePlatform'] as String? ?? 'unknown',
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                (op.payload['timestamp'] as num?)?.toInt() ?? 0,
+              ),
+              type: ContentType.file,
+              fileName: op.payload['fileName'] as String?,
+              fileSize: (op.payload['fileSize'] as num?)?.toInt(),
+              mimeType: op.payload['mimeType'] as String?,
+              fileHash: hash,
+            ),
+          );
+          // 文件 artifact 在 coordinator.uploadFile 入队时已 import，回执
+          // 不重复 import；payload 无 path/mtime，不记录文件签名（下次
+          // 剪贴板检测经 isFileHashUploaded 短路分支自动 recordFileSignature）。
+          await _localFileStore.enforceCacheLimit(
+            AppConstants.localFileCacheMaxBytes,
+            protectedIds: {op.operationId},
+          );
+          _saveHistory();
+          notifyListeners();
+          break;
+      }
+    } catch (error) {
+      // 回执异常只日志：绝不能向上传播进 coordinator 的失败分支，
+      // 否则已删除 manifest 的已成功操作会被重写回 outbox 重复上传。
+      debugPrint('[CLIP-PROVIDER] Operation success receipt failed: $error');
     }
   }
 
