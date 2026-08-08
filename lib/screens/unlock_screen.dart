@@ -150,6 +150,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
         deviceId: auth.currentDevice.id,
         deviceName: auth.currentDevice.name,
         encryptionKey: key,
+        userId: userId,
       );
 
       // 解锁成功后才写 userId 标记（供后续本地密码错误判定）并清除失败计数
@@ -204,6 +205,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
     if (confirmed != true) return;
     if (!mounted) return;
 
+    await context.read<ClipboardProvider>().resetAccountSync();
     await storage.clearAccountIdentity();
     _authGuard.reset();
     _passwordController.clear();

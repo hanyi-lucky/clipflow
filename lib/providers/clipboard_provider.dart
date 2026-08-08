@@ -12,6 +12,8 @@ import '../models/clipboard_file.dart';
 import '../models/clipboard_image.dart';
 import '../models/file_download_progress.dart';
 import '../services/sync_service.dart';
+import '../services/sync_coordinator.dart';
+import '../services/cloud_sync_transport.dart';
 import '../services/encryption_service.dart';
 import '../services/history_service.dart';
 import '../services/clipboard_monitor.dart';
@@ -20,6 +22,7 @@ import '../services/file_processing_service.dart';
 import '../services/image_clipboard_service.dart';
 import '../l10n/app_strings.dart';
 import '../services/image_compression_service.dart';
+import '../repositories/local_outbox_store.dart';
 import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
 import '../repositories/local_image_store.dart';
@@ -115,6 +118,7 @@ class ClipboardProvider extends ChangeNotifier
 
   ClipboardMonitor? _monitor;
   SyncService? _syncService;
+  SyncCoordinator? _syncCoordinator;
   CloudRepository? _cloudRepo;
   LocalStorage? _storage;
   SettingsProvider? _settingsProvider;
@@ -258,12 +262,27 @@ class ClipboardProvider extends ChangeNotifier
     _syncService?.updateDeviceName(name);
   }
 
+  /// 停止当前账户同步并清理其待发送操作，供切换账户使用。
+  Future<void> resetAccountSync() async {
+    _uploadDebounce?.cancel();
+    _syncTimer?.cancel();
+    _nextSyncTimer?.cancel();
+    await _syncCoordinator?.discardAccountOutbox();
+    await _syncCoordinator?.close();
+    _syncCoordinator = null;
+    await _monitor?.stop();
+    _monitor?.dispose();
+    _monitor = null;
+    _syncService = null;
+  }
+
   Future<void> initialize({
     required LocalStorage storage,
     required CloudRepository cloudRepo,
     required String deviceId,
     required String deviceName,
     required Uint8List encryptionKey,
+    String? userId,
   }) async {
     clearFilters();
     _storage = storage;
@@ -280,12 +299,24 @@ class ClipboardProvider extends ChangeNotifier
       devicePlatform: Platform.operatingSystem,
       key: encryptionKey,
     );
+    _syncCoordinator = SyncCoordinator.cloud(
+      userId: userId ?? storage.userId ?? 'user_$deviceId',
+      syncService: _syncService!,
+      transport: CloudSyncTransport(
+        repository: cloudRepo,
+        fileStore: _localFileStore,
+      ),
+      outbox: LocalOutboxStore(),
+      fileStore: _localFileStore,
+      retryBaseDelay: _retryBaseDelay,
+    );
 
     _monitor = ClipboardMonitor(
       onChanged: _onClipboardChanged,
       storage: storage,
     );
     _monitor!.setSyncService(_syncService!);
+    _monitor!.setSyncCoordinator(_syncCoordinator!);
     _monitor!.onContentSynced = _addSyncedToHistory;
     _monitor!.onImageChanged = _onImageClipboardChanged;
     _monitor!.onFilesChanged = _onFileClipboardChanged;
@@ -742,6 +773,7 @@ class ClipboardProvider extends ChangeNotifier
     _setStatus(SyncStatus.syncing);
 
     _pendingFileUploadPaths.add(path);
+    String? encryptedPath;
     try {
       if (file.errorCode != null) {
         _errorMessage = AppStrings.fileReadFailed('${file.errorCode}');
@@ -779,15 +811,17 @@ class ClipboardProvider extends ChangeNotifier
       }
 
       final size = file.size ?? await source.length();
-      final encryptedPath = await _localFileStore.newTempPath('.enc');
+      final preparedEncryptedPath =
+          await _localFileStore.newTempPath('.enc');
+      encryptedPath = preparedEncryptedPath;
       await _fileProcessingService.encryptFile(
         sourcePath: path,
-        encryptedPath: encryptedPath,
+        encryptedPath: preparedEncryptedPath,
         key: _syncService!.key,
       );
 
-      final result = await _syncService!.uploadFile(
-        encryptedPath: encryptedPath,
+      final result = await _syncCoordinator!.uploadFile(
+        encryptedPath: preparedEncryptedPath,
         fileName: file.name ?? path.split(Platform.pathSeparator).last,
         fileSize: size,
         mimeType: file.mimeType ?? 'application/octet-stream',
@@ -797,7 +831,7 @@ class ClipboardProvider extends ChangeNotifier
       if (result != null) {
         await _localFileStore.importEncryptedFile(
           result.historyId,
-          encryptedPath,
+          preparedEncryptedPath,
         );
         _historyService.addEntry(
           ClipboardEntry(
@@ -835,9 +869,12 @@ class ClipboardProvider extends ChangeNotifier
         }
       }
       try {
-        final tmp = File(encryptedPath);
-        if (await tmp.exists()) {
-          await tmp.delete();
+        final tempPath = encryptedPath;
+        if (tempPath != null) {
+          final tmp = File(tempPath);
+          if (await tmp.exists()) {
+            await tmp.delete();
+          }
         }
       } catch (e) {
         debugPrint('[CLIP-PROVIDER] Encrypted temp cleanup failed: $e');
@@ -847,6 +884,12 @@ class ClipboardProvider extends ChangeNotifier
       _setStatus(SyncStatus.connected);
     } catch (e) {
       _monitor?.clearFileSignature(file);
+      if (encryptedPath != null) {
+        try {
+          final temp = File(encryptedPath!);
+          if (await temp.exists()) await temp.delete();
+        } catch (_) {}
+      }
       _errorMessage = e.toString();
       _serverConnected = false;
       _setStatus(SyncStatus.error);
@@ -873,7 +916,7 @@ class ClipboardProvider extends ChangeNotifier
 
       // 去重键用跨重编码稳定的像素内容哈希（P1 根治回声）
       final imageHash = compressed.stableHash;
-      final result = await _syncService!.uploadImage(
+      final result = await _syncCoordinator!.uploadImage(
         bytes: compressed.bytes,
         thumbBytes: compressed.thumbBytes,
         width: compressed.width,
@@ -932,7 +975,7 @@ class ClipboardProvider extends ChangeNotifier
     _setStatus(SyncStatus.syncing);
 
     try {
-      final serverId = await _syncService!.uploadContent(truncatedContent);
+      final serverId = await _syncCoordinator!.uploadContent(truncatedContent);
 
       // 只有真正上传成功才创建本地历史记录（跳过从其他设备同步来的内容）
       if (serverId != null) {
@@ -995,6 +1038,11 @@ class ClipboardProvider extends ChangeNotifier
       return;
     }
 
+    try {
+      await _syncCoordinator!.drainOnce();
+    } catch (e) {
+      debugPrint('[CLIP-PROVIDER] Outbox drain failed: $e');
+    }
     await _performDownload();
     _scheduleNextSync();
   }
@@ -1012,7 +1060,7 @@ class ClipboardProvider extends ChangeNotifier
     if (_downloadInFlight) return;
     _downloadInFlight = true;
     try {
-      final result = await _syncService!.downloadLatestContent();
+      final result = await _syncCoordinator!.downloadLatestContent();
 
       // 处理删除同步：从本地历史中移除被其他设备删除的条目
       if (result != null && result.deletedIds.isNotEmpty) {
@@ -1064,7 +1112,7 @@ class ClipboardProvider extends ChangeNotifier
 
           _historyService.addEntry(
             ClipboardEntry(
-              id: const Uuid().v4(),
+              id: result.id ?? const Uuid().v4(),
               content: result.content,
               sourceDeviceId: result.sourceDeviceId,
               sourceDeviceName: result.sourceDeviceName,
@@ -1604,7 +1652,7 @@ class ClipboardProvider extends ChangeNotifier
       await _loadHistoryFromServer();
       // 下载最新 clipboard
       if (_syncService != null) {
-        final result = await _syncService!.downloadLatestContent();
+        final result = await _syncCoordinator!.downloadLatestContent();
         if (result != null && (result.hasContent || result.hasFile)) {
           if (result.type == ContentType.image) {
             _syncService!.markAsDownloadedHash(result.imageHash ?? '');
@@ -1919,6 +1967,7 @@ class ClipboardProvider extends ChangeNotifier
       _savePending = false;
     }
     _monitor?.removeListener(_onMonitorChanged);
+    _syncCoordinator?.close();
     _monitor?.stop();
     _monitor?.dispose();
     WidgetsBinding.instance.removeObserver(this);

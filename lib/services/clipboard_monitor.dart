@@ -12,6 +12,7 @@ import '../repositories/local_storage.dart';
 import '../services/file_clipboard_service.dart';
 import '../services/image_clipboard_service.dart';
 import '../services/sync_service.dart';
+import '../services/sync_coordinator.dart';
 
 typedef ClipboardChangeCallback = void Function(String content);
 typedef ImageClipboardChangeCallback = void Function(ClipboardImage image);
@@ -47,6 +48,7 @@ class ClipboardMonitor extends ChangeNotifier {
 
   // SyncService reference (set externally)
   SyncService? _syncService;
+  SyncCoordinator? _syncCoordinator;
 
   /// Callback when content is successfully uploaded (for adding to local history)
   void Function(String content, String serverId)? onContentSynced;
@@ -89,6 +91,10 @@ class ClipboardMonitor extends ChangeNotifier {
   /// Set the SyncService reference for syncClipboard() to use
   void setSyncService(SyncService syncService) {
     _syncService = syncService;
+  }
+
+  void setSyncCoordinator(SyncCoordinator coordinator) {
+    _syncCoordinator = coordinator;
   }
 
   /// Load persisted state from SharedPreferences
@@ -150,7 +156,7 @@ class ClipboardMonitor extends ChangeNotifier {
     _syncStatus = 'syncing';
     notifyListeners();
     debugPrint(
-      '[SYNC] syncClipboard started, _syncService=${_syncService != null ? "set" : "NULL"}',
+      '[SYNC] syncClipboard started, _syncCoordinator=${_syncCoordinator != null ? "set" : "NULL"}',
     );
 
     try {
@@ -254,9 +260,11 @@ class ClipboardMonitor extends ChangeNotifier {
       }
 
       // Upload
-      if (_syncService != null) {
+      if (_syncCoordinator != null || _syncService != null) {
         debugPrint('[SYNC] Uploading...');
-        final serverId = await _syncService!.uploadContent(text);
+        final serverId = _syncCoordinator != null
+            ? await _syncCoordinator!.uploadContent(text)
+            : await _syncService!.uploadContent(text);
         debugPrint('[SYNC] Upload result: $serverId');
         if (serverId != null) {
           _lastHash = hash;

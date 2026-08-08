@@ -480,6 +480,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     final storage = await LocalStorage.create();
     await auth.signOut();
+    await context.read<ClipboardProvider>().resetAccountSync();
     await storage.clearAccountIdentity();
     if (!mounted) return;
     Navigator.of(context).pushNamedAndRemoveUntil(

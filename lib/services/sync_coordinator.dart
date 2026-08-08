@@ -257,7 +257,7 @@ class SyncCoordinator {
   }
 
   int _nextRetryAt(int attemptCount) {
-    final exponent = (attemptCount - 1).clamp(0, 6);
+    final exponent = (attemptCount - 1).clamp(0, 6).toInt();
     final delay = retryBaseDelay.inMilliseconds * (1 << exponent);
     return _now().millisecondsSinceEpoch + delay.clamp(0, 30000).toInt();
   }
