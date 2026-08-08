@@ -570,10 +570,6 @@ void main() {
 
     test('image upload success receipt backfills history and image cache',
         () async {
-      final thumbBytes = Uint8List.fromList([61, 62, 63]);
-      final fullBytes = Uint8List.fromList(List.generate(2048, (i) => i % 251));
-      final thumbEnc = await encryption.encryptBytes(thumbBytes, key);
-      final fullEnc = await encryption.encryptBytes(fullBytes, key);
       final decoded = img.decodeImage(encodePng(120, 90))!;
       final reencoded = Uint8List.fromList(img.encodePng(decoded));
       // detectImage=true：检测到图片 → 压缩上传 → drain 成功 → 回执补史 +
