@@ -389,7 +389,12 @@ class SyncService {
   }
 
   Future<DownloadResult?> downloadLatestContent() async {
-    final current = await _repo.getCurrentClipboardWithDeletions();
+    return decodeCurrentClipboard(await _repo.getCurrentClipboardWithDeletions());
+  }
+
+  Future<DownloadResult?> decodeCurrentClipboard(
+    Map<String, dynamic>? current,
+  ) async {
     if (current == null) return null;
 
     // 提取 deletedIds 和 restoredEntries（每次轮询都需要，不受内容过滤影响）

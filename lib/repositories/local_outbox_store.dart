@@ -18,7 +18,7 @@ class LocalOutboxStore implements OutboxStore {
 
   Future<Directory> _userDirectory(String userId, {bool create = true}) async {
     final base = await _basePath();
-    final dir = Directory('${base.pathSafe}/clipflow_outbox/$userId');
+    final dir = Directory('$base/clipflow_outbox/$userId');
     if (create && !dir.existsSync()) {
       await dir.create(recursive: true);
     }
@@ -129,8 +129,4 @@ class LocalOutboxStore implements OutboxStore {
     if (target.existsSync()) await target.delete();
     await temp.rename(target.path);
   }
-}
-
-extension on String {
-  String get pathSafe => this;
 }
