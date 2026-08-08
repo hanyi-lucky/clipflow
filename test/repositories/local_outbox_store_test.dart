@@ -63,7 +63,7 @@ void main() {
   });
 
   test('isolates operations by user and ignores one corrupt manifest', () async {
-    final userOne = Directory('${directory.path}/user-1');
+    final userOne = Directory('${directory.path}/clipflow_outbox/user-1');
     await userOne.create(recursive: true);
     await File('${userOne.path}/bad.json').writeAsString('{not-json');
     await store.put(operation());
@@ -90,7 +90,7 @@ void main() {
   test('writes a JSON manifest containing no plaintext outside payload contract', () async {
     await store.put(operation());
 
-    final manifest = File('${directory.path}/user-1/op-1.json');
+    final manifest = File('${directory.path}/clipflow_outbox/user-1/op-1.json');
     final decoded = jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
 
     expect(decoded['operationId'], 'op-1');
