@@ -95,7 +95,10 @@ void main() {
       retryBaseDelay: const Duration(milliseconds: 10),
     );
 
-    expect(() => coordinator.uploadContent('retry-me'), throwsA(isA<SocketException>()));
+    await expectLater(
+      coordinator.uploadContent('retry-me'),
+      throwsA(isA<SocketException>()),
+    );
     final pending = await outbox.loadActive('user-1');
     expect(pending, hasLength(1));
     final operationId = pending.single.operationId;
@@ -119,7 +122,10 @@ void main() {
       fileStore: fileStore,
     );
 
-    expect(() => coordinator.uploadContent('same'), throwsA(isA<SocketException>()));
+    await expectLater(
+      coordinator.uploadContent('same'),
+      throwsA(isA<SocketException>()),
+    );
     final first = (await outbox.loadActive('user-1')).single.operationId;
     final second = await coordinator.uploadContent('same');
 
