@@ -23,6 +23,7 @@ import '../services/image_clipboard_service.dart';
 import '../l10n/app_strings.dart';
 import '../services/image_compression_service.dart';
 import '../repositories/local_outbox_store.dart';
+import '../repositories/outbox_store.dart';
 import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
 import '../repositories/local_image_store.dart';
@@ -89,11 +90,13 @@ class ClipboardProvider extends ChangeNotifier
   ClipboardProvider({
     LocalImageStore? imageStore,
     LocalFileStore? fileStore,
+    OutboxStore? outbox,
     FileProcessingService? fileProcessingService,
     @visibleForTesting
     Duration retryBaseDelay = const Duration(milliseconds: 500),
   }) : _localImageStore = imageStore ?? LocalImageStore(),
        _localFileStore = fileStore ?? LocalFileStore(),
+       _outbox = outbox,
        _fileProcessingService =
            fileProcessingService ?? FileProcessingService(),
        _retryBaseDelay = retryBaseDelay;
@@ -113,6 +116,7 @@ class ClipboardProvider extends ChangeNotifier
       ImageCompressionService();
   final LocalImageStore _localImageStore;
   final LocalFileStore _localFileStore;
+  final OutboxStore? _outbox;
   final FileProcessingService _fileProcessingService;
   final Duration _retryBaseDelay;
 
@@ -306,7 +310,7 @@ class ClipboardProvider extends ChangeNotifier
         repository: cloudRepo,
         fileStore: _localFileStore,
       ),
-      outbox: LocalOutboxStore(),
+      outbox: _outbox ?? LocalOutboxStore(),
       fileStore: _localFileStore,
       retryBaseDelay: _retryBaseDelay,
     );

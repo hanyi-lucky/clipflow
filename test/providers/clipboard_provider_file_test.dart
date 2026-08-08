@@ -12,6 +12,7 @@ import 'package:clipflow/models/file_download_progress.dart';
 import 'package:clipflow/providers/clipboard_provider.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
 import 'package:clipflow/repositories/local_file_store.dart';
+import 'package:clipflow/repositories/local_outbox_store.dart';
 import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/encryption_service.dart';
@@ -125,7 +126,14 @@ void main() {
   late LocalFileStore fileStore;
   late Directory tempDir;
 
+  /// 轮询 `_checkClipboard` 每 500ms 重复检测同一文件并重置 500ms debounce，
+  /// 与上传测试形成相位锁定（`_uploadFile` 永不触发）。armed 一次性检测让
+  /// debounce 稳定触发，poll 后续检测被忽略；echo 用例在变更 mtime 后重新
+  /// arm，验证「签名变化仍不重复上传」。
+  var filesArmed = true;
+
   setUp(() async {
+    filesArmed = true;
     SharedPreferences.setMockInitialValues({});
     encryption = EncryptionService();
     key = await encryption.deriveKey(password, salt);
@@ -159,8 +167,10 @@ void main() {
             case AppChannelMethods.hasImage:
               return hasImage;
             case AppChannelMethods.hasFiles:
-              return hasFiles;
+              return hasFiles && filesArmed;
             case AppChannelMethods.getFiles:
+              if (!filesArmed) return null;
+              filesArmed = false;
               return readBackFiles ?? files;
             case AppChannelMethods.setFiles:
               onSetFiles?.call();
@@ -184,6 +194,7 @@ void main() {
   }) async {
     final provider = ClipboardProvider(
       fileStore: fileStore,
+      outbox: LocalOutboxStore(directoryPath: tempDir.path),
       retryBaseDelay: retryBaseDelay,
     );
     await provider.initialize(
@@ -373,6 +384,7 @@ void main() {
       sourceFile.setLastModifiedSync(
         DateTime.fromMillisecondsSinceEpoch(1700000001000),
       );
+      filesArmed = true;
       await provider.debugFileCheck();
       await Future.delayed(const Duration(milliseconds: 700));
 
