@@ -8,6 +8,7 @@ import 'package:clipflow/models/clipboard_entry.dart';
 import 'package:clipflow/providers/clipboard_provider.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
 import 'package:clipflow/repositories/local_image_store.dart';
+import 'package:clipflow/repositories/local_outbox_store.dart';
 import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/encryption_service.dart';
@@ -105,14 +106,23 @@ void main() {
     return Uint8List.fromList(img.encodePng(image));
   }
 
-  /// mock 原生图片通道：hasImage 恒真，getImage 返回重编码后的字节
-  void mockImageChannel({required Uint8List readBackBytes}) {
+  /// mock 原生图片通道：默认 hasImage=false（不触发上传，避免轮询污染
+  /// 下载/恢复断言）；detectImage=true 时返回重编码字节触发上传。
+  void mockImageChannel({
+    required Uint8List readBackBytes,
+    bool detectImage = false,
+  }) {
+    var imageDetectionsLeft = detectImage ? 1 : 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(AppChannelNames.clipboard),
       (call) async {
-        if (call.method == AppChannelMethods.hasImage) return true;
+        if (call.method == AppChannelMethods.hasImage) {
+          return imageDetectionsLeft > 0;
+        }
         if (call.method == AppChannelMethods.getImage) {
+          if (imageDetectionsLeft <= 0) return null;
+          imageDetectionsLeft--;
           return {
             'bytes': readBackBytes,
             'format': 'png',
@@ -158,7 +168,10 @@ void main() {
   }
 
   Future<ClipboardProvider> createProvider() async {
-    final provider = ClipboardProvider(imageStore: imageStore);
+    final provider = ClipboardProvider(
+      imageStore: imageStore,
+      outbox: LocalOutboxStore(directoryPath: tempDir.path),
+    );
     await provider.initialize(
       storage: storage,
       cloudRepo: repo,
@@ -180,6 +193,35 @@ void main() {
   /// 等待 sync loop 异步链结束，避免 dispose 后定时器/异步任务报错
   Future<void> settle() =>
       Future.delayed(const Duration(milliseconds: 200));
+
+  Future<void> waitFor(
+    bool Function() condition, {
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (condition()) return;
+      await Future.delayed(const Duration(milliseconds: 30));
+    }
+    fail('condition not met within $timeout');
+  }
+
+  /// 等待全图密文缓存落盘（恢复条目先 addEntry 后 save，断言前必须轮询）。
+  ///
+  /// [LocalImageStore.save] 直接截断重写目标文件，并发 [load] 可能读到
+  /// 半写/空内容，因此必须等到非空（且与期望值一致时）才返回。
+  Future<String> waitForImageCache(String entryId, {String? expected}) async {
+    for (var i = 0; i < 120; i++) {
+      final cached = await imageStore.load(entryId);
+      if (cached != null &&
+          cached.isNotEmpty &&
+          (expected == null || cached == expected)) {
+        return cached;
+      }
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+    fail('image cache for $entryId never appeared');
+  }
 
   Map<String, dynamic> imageRow(
     String id,
@@ -408,7 +450,8 @@ void main() {
       expect(restored.imageWidth, equals(640));
       expect(restored.imageHeight, equals(480));
       expect(restored.imageFormat, equals('jpeg'));
-      expect(await imageStore.load('hist-restore-1'), equals(fullEnc.toBase64()));
+      // 恢复条目先入史后落盘：缓存出现后再断言，避免异步竞态
+      expect(await waitForImageCache('hist-restore-1'), equals(fullEnc.toBase64()));
 
       await settle();
       provider.dispose();
@@ -482,7 +525,71 @@ void main() {
         provider.history.where((e) => e.id == 'hist-refresh-1'),
         hasLength(1),
       );
-      expect(await imageStore.load('hist-refresh-1'), equals(fullEnc.toBase64()));
+      expect(
+        await waitForImageCache('hist-refresh-1', expected: fullEnc.toBase64()),
+        equals(fullEnc.toBase64()),
+      );
+
+      await settle();
+      provider.dispose();
+    });
+
+    test('text upload success receipt backfills decrypted history', () async {
+      // 平台剪切板一次性提供文本：轮询后续读到 null，不再重置 500ms debounce
+      var textArmed = true;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.getData' && textArmed) {
+          textArmed = false;
+          return <String, Object?>{'text': 'receipt text'};
+        }
+        return null;
+      });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      final provider = await createProvider();
+      await provider.debugFileCheck();
+
+      // drain 发送成功后，回执把解密文本补进本地历史
+      await waitFor(
+        () => provider.history.any(
+          (e) => e.type == ContentType.text && e.content == 'receipt text',
+        ),
+      );
+      final entry =
+          provider.history.firstWhere((e) => e.type == ContentType.text);
+      expect(entry.content, 'receipt text');
+      expect(entry.id, isNotEmpty);
+
+      await settle();
+      provider.dispose();
+    });
+
+    test('image upload success receipt backfills history and image cache',
+        () async {
+      final thumbBytes = Uint8List.fromList([61, 62, 63]);
+      final fullBytes = Uint8List.fromList(List.generate(2048, (i) => i % 251));
+      final thumbEnc = await encryption.encryptBytes(thumbBytes, key);
+      final fullEnc = await encryption.encryptBytes(fullBytes, key);
+      final decoded = img.decodeImage(encodePng(120, 90))!;
+      final reencoded = Uint8List.fromList(img.encodePng(decoded));
+      // detectImage=true：检测到图片 → 压缩上传 → drain 成功 → 回执补史 +
+      // 全图密文按 operationId 落盘
+      mockImageChannel(readBackBytes: reencoded, detectImage: true);
+
+      final provider = await createProvider();
+      await provider.debugFileCheck();
+
+      await waitFor(() => provider.history.any((e) => e.type == ContentType.image));
+      final entry =
+          provider.history.firstWhere((e) => e.type == ContentType.image);
+      expect(entry.imageThumbBytes, isNotNull);
+      expect(entry.stableHash, isNotEmpty);
+      final cached = await waitForImageCache(entry.id);
+      expect(cached, isNotEmpty);
 
       await settle();
       provider.dispose();
