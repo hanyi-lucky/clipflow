@@ -8,6 +8,7 @@ import '../core/hex_utils.dart';
 import '../core/exceptions.dart';
 import '../core/constants.dart';
 import '../models/clipboard_entry.dart';
+import '../models/sync_operation.dart';
 
 /// 包含从服务器下载的内容及其来源设备信息
 class DownloadResult {
@@ -98,6 +99,18 @@ class FileUploadResult {
   const FileUploadResult({required this.historyId});
 }
 
+class PreparedSyncOperation {
+  final SyncOperationKind kind;
+  final String dedupeKey;
+  final Map<String, dynamic> payload;
+
+  const PreparedSyncOperation({
+    required this.kind,
+    required this.dedupeKey,
+    required this.payload,
+  });
+}
+
 class SyncService {
   final CloudRepository _repo;
   final EncryptionService _encryption;
@@ -169,6 +182,98 @@ class SyncService {
         _deviceName = deviceName,
         _devicePlatform = devicePlatform,
         _key = key;
+
+  bool isContentHashUploaded(String hash) => _lastUploadedHash == hash;
+
+  Future<PreparedSyncOperation?> prepareContent({
+    required String content,
+    required String operationId,
+    DateTime? timestamp,
+  }) async {
+    final hash = sha256.convert(utf8.encode(content)).toString();
+    if (hash == _lastUploadedHash) return null;
+    final encrypted = await _encryption.encrypt(content, _key);
+    final data = <String, dynamic>{
+      'content': encrypted.toBase64(),
+      'hash': hash,
+      'sourceDevice': _deviceId,
+      'sourceDeviceName': _deviceName,
+      'sourcePlatform': _devicePlatform,
+      'timestamp': (timestamp ?? DateTime.now()).millisecondsSinceEpoch,
+      'type': 'text',
+      'historyId': operationId,
+    };
+    return PreparedSyncOperation(
+      kind: SyncOperationKind.text,
+      dedupeKey: hash,
+      payload: data,
+    );
+  }
+
+  Future<PreparedSyncOperation?> prepareImage({
+    required Uint8List bytes,
+    required Uint8List thumbBytes,
+    required int width,
+    required int height,
+    required String format,
+    required String stableHash,
+    required String operationId,
+    DateTime? timestamp,
+  }) async {
+    if (stableHash == _lastUploadedHash) return null;
+    final encrypted = await _encryption.encryptBytes(bytes, _key);
+    final encryptedThumb = await _encryption.encryptBytes(thumbBytes, _key);
+    final data = <String, dynamic>{
+      'content': encrypted.toBase64(),
+      'thumb': encryptedThumb.toBase64(),
+      'hash': stableHash,
+      'sourceDevice': _deviceId,
+      'sourceDeviceName': _deviceName,
+      'sourcePlatform': _devicePlatform,
+      'timestamp': (timestamp ?? DateTime.now()).millisecondsSinceEpoch,
+      'type': 'image',
+      'width': width,
+      'height': height,
+      'format': format,
+      'historyId': operationId,
+    };
+    return PreparedSyncOperation(
+      kind: SyncOperationKind.image,
+      dedupeKey: stableHash,
+      payload: data,
+    );
+  }
+
+  Future<PreparedSyncOperation?> prepareFile({
+    required String plaintextHash,
+    required String operationId,
+    required String fileName,
+    required int fileSize,
+    required String mimeType,
+    required int timestamp,
+  }) async {
+    if (isFileHashUploaded(plaintextHash)) return null;
+    final marker = (await _encryption.encrypt('', _key)).toBase64();
+    return PreparedSyncOperation(
+      kind: SyncOperationKind.file,
+      dedupeKey: 'file:$plaintextHash',
+      payload: {
+        'hash': plaintextHash,
+        'fileName': fileName,
+        'fileSize': fileSize,
+        'mimeType': mimeType,
+        'marker': marker,
+        'sourceDevice': _deviceId,
+        'sourceDeviceName': _deviceName,
+        'sourcePlatform': _devicePlatform,
+        'timestamp': timestamp,
+      },
+    );
+  }
+
+  void markUploadSucceeded(String dedupeKey) {
+    _lastUploadedHash = dedupeKey;
+  }
 
   /// 上传内容到服务器。返回服务器分配的历史记录 ID，null 表示跳过（重复内容）
   Future<String?> uploadContent(String content) async {
@@ -376,6 +481,7 @@ class SyncService {
         timestamp: timestamp,
         deletedIds: deletedIds,
         restoredEntries: restoredRaw,
+        id: current['history_id'] as String?,
       );
     } catch (e) {
       throw DecryptionException('Failed to decrypt content: $e');
