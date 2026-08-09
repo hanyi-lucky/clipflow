@@ -359,7 +359,7 @@ void main() {
       },
     );
 
-    test('preReadFiles triggers callback without recorded signature', () async {
+    test('preReadFiles in-flight guard suppresses repeated callback until signature cleared', () async {
       final events = <List<ClipboardFile>>[];
       final monitor = ClipboardMonitor(onChanged: (_) {});
       monitor.onFilesChanged = events.add;
@@ -368,9 +368,14 @@ void main() {
       ];
 
       await monitor.syncClipboard(preReadFiles: files);
+      // 在途守卫：上传中（未 recordFileSignature）同签名不再重复触发，
+      // 修复桌面文件首传相位锁（决策 5）。
       await monitor.syncClipboard(preReadFiles: files);
+      expect(events, hasLength(1));
 
-      // 未记录签名时，同一次复制内容每次都会触发回调
+      // 失败清在途后可重试（成功/失败语义不变）
+      monitor.clearFileSignature(files.first);
+      await monitor.syncClipboard(preReadFiles: files);
       expect(events, hasLength(2));
     });
 

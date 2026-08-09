@@ -35,6 +35,12 @@ class ClipboardMonitor extends ChangeNotifier {
   static const int _maxIgnoreFileHashes = 16;
   final Set<String> _ignoreFileHashes = {};
   final Map<String, String> _lastFileSignatures = {};
+
+  /// 文件在途签名守卫：`_handleFiles` 触发上传后、`recordFileSignature`
+  /// （成功）或 `clearFileSignature`（失败）之前，同签名不再触发
+  /// `onFilesChanged`。修复桌面文件首传相位锁：轮询 tick 恒先于 debounce
+  /// 执行时，不再每 tick 重建 debounce 导致首传被锁死/间歇延迟。
+  final Set<String> _pendingFileSignatures = {};
   DateTime? _lastSyncTime;
   bool _autoSyncOnResume = true;
   bool _notificationSync = true;
@@ -331,15 +337,18 @@ class ClipboardMonitor extends ChangeNotifier {
   }
 
   /// 仅在上传/写入成功后记录文件签名，防止同一次复制被重复上传。
+  /// 同时移出在途集合（上传结束，后续同签名由已处理签名短路）。
   void recordFileSignature(ClipboardFile file) {
     if (file.path == null || file.path!.isEmpty) return;
+    _pendingFileSignatures.remove(_fileSignature(file));
     _lastFileSignatures[file.path!] = _fileSignature(file);
     _trimFileSignatures();
   }
 
-  /// 上传失败时清除签名，允许同路径同大小同 mtime 的文件再次上传。
+  /// 上传失败时清除签名与在途标记，允许同路径同大小同 mtime 的文件再次上传。
   void clearFileSignature(ClipboardFile file) {
     if (file.path == null || file.path!.isEmpty) return;
+    _pendingFileSignatures.remove(_fileSignature(file));
     _lastFileSignatures.remove(file.path);
   }
 
@@ -598,6 +607,13 @@ class ClipboardMonitor extends ChangeNotifier {
       debugPrint('[CLIP-MON] File too large: ${first.size} bytes');
       return;
     }
+    // 在途守卫：同签名已在上传中 → 不再触发（不重置 Provider 的 debounce）。
+    final signature = _fileSignature(first);
+    if (_pendingFileSignatures.contains(signature)) {
+      debugPrint('[CLIP-MON] File signature in-flight, skipping');
+      return;
+    }
+    _pendingFileSignatures.add(signature);
     onFilesChanged?.call(files);
   }
 
@@ -612,6 +628,8 @@ class ClipboardMonitor extends ChangeNotifier {
   }
 
   void _loadFileState() {
+    // 重启不残留：在途集合只存内存，进程重启后旧在途签名一律清空。
+    _pendingFileSignatures.clear();
     if (_storage == null) return;
     final hashes = _storage!.monitorIgnoreFileHashes;
     _ignoreFileHashes.clear();
