@@ -7,6 +7,8 @@ import 'package:clipflow/core/constants.dart';
 import 'package:clipflow/models/sync_operation.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
 import 'package:clipflow/repositories/local_file_store.dart';
+import 'package:clipflow/repositories/lan_outbox_store.dart';
+import 'package:clipflow/services/lan_diagnostics.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/lan_discovery_service.dart';
 import 'package:clipflow/services/lan_handshake_service.dart';
@@ -262,14 +264,33 @@ void main() {
 
   LanSyncManager createManager({
     Duration fetchTimeout = const Duration(milliseconds: 50),
-    LocalFileStore? fileStore,
+    LocalFileStore? fileStoreOverride,
+    LanOutboxStore? outboxStore,
+    Duration? retrySweepInterval,
+    Duration? retryBaseDelay,
   }) {
     return LanSyncManager(
       discovery: discovery,
       transport: transport,
       fetchTimeout: fetchTimeout,
-      fileStore: fileStore,
+      // 默认用 tempDir 版 fileStore，避免测试环境 path_provider 不可用。
+      fileStore: fileStoreOverride ?? fileStore,
+      outboxStore: outboxStore ?? LanOutboxStore(directoryPath: tempDir.path),
+      retrySweepInterval: retrySweepInterval,
+      retryBaseDelay: retryBaseDelay,
     );
+  }
+
+  Future<void> waitFor(
+    Future<bool> Function() condition, {
+    String? message,
+  }) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    while (DateTime.now().isBefore(deadline)) {
+      if (await condition()) return;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    fail(message ?? 'condition not met within timeout');
   }
 
   Future<String> importArtifact(String entryId, List<int> bytes) async {
@@ -684,7 +705,7 @@ void main() {
   group('LanSyncManager.pushOperation file', () {
     test('file ≤15MiB 且 artifact 存在 → pushFile 文件行（enc_file_name、无明文 file_name/mime_type）', () async {
       discovery.candidatesResult = [_peer('peer-b')];
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       await manager.start(
         userId: 'user_test',
         deviceId: 'device-a',
@@ -724,7 +745,7 @@ void main() {
 
     test('file 明文 >15MiB → 跳过 LAN（Cloud-only）', () async {
       discovery.candidatesResult = [_peer('peer-b')];
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       await manager.start(
         userId: 'user_test',
         deviceId: 'device-a',
@@ -745,7 +766,7 @@ void main() {
 
     test('file artifact 缺失 → 跳过 LAN', () async {
       discovery.candidatesResult = [_peer('peer-b')];
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       await manager.start(
         userId: 'user_test',
         deviceId: 'device-a',
@@ -765,7 +786,7 @@ void main() {
 
     test('文件不回推来源设备（peer.deviceId == source_device 跳过）', () async {
       discovery.candidatesResult = [_peer('device-a'), _peer('peer-c')];
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       await manager.start(
         userId: 'user_test',
         deviceId: 'device-a',
@@ -786,7 +807,7 @@ void main() {
 
     test('同 historyId 二次 file push 去重', () async {
       discovery.candidatesResult = [_peer('peer-b')];
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       await manager.start(
         userId: 'user_test',
         deviceId: 'device-a',
@@ -814,7 +835,7 @@ void main() {
 
   group('LanSyncManager file push 接收', () {
     test('_handleFilePushReceived：.enc 落盘后触发 onPushReceived；重复 historyId 不重触发', () async {
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       await manager.start(
         userId: 'user_test',
         deviceId: 'device-a',
@@ -857,7 +878,7 @@ void main() {
     });
 
     test('未启动时收到文件 push → 忽略不触发', () async {
-      final manager = createManager(fileStore: fileStore);
+      final manager = createManager(fileStoreOverride: fileStore);
       var notifyCount = 0;
       manager.onPushReceived = () {
         notifyCount++;
@@ -876,6 +897,300 @@ void main() {
       }, encPath);
       expect(notifyCount, 0);
       expect(await manager.fetchLatestContent(), isNull);
+    });
+  });
+
+  group('LanSyncManager ACK / 待确认表 / 重试', () {
+    test('旧 peer（无 acks）→ push 不落 outbox、无待确认', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      final manager = createManager(outboxStore: outbox);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.peerSupportsAcksResult = false;
+      transport.pushResult = LanPushResult.delivered;
+
+      await manager.pushOperation(_textOp(operationId: 't-old', timestamp: 1));
+
+      expect(transport.pushedTo, ['peer-b']);
+      expect(await outbox.loadActive('user_test'), isEmpty);
+      await manager.stop();
+    });
+
+    test('新 peer（acks）delivered → outbox 先持久化后删除', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      final manager = createManager(outboxStore: outbox);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.peerSupportsAcksResult = true;
+      transport.pushResult = LanPushResult.delivered;
+
+      await manager.pushOperation(_textOp(operationId: 't-ack', timestamp: 1));
+
+      expect(transport.pushedTo, ['peer-b']);
+      // 最终无残留 outbox 条目（delivered → remove-on-ack）
+      expect(await outbox.loadActive('user_test'), isEmpty);
+      await manager.stop();
+    });
+
+    test('超时 pending → 重试绕过发送侧去重 → delivered 清 outbox', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      final manager = createManager(
+        outboxStore: outbox,
+        retrySweepInterval: const Duration(milliseconds: 30),
+        retryBaseDelay: const Duration(milliseconds: 30),
+      );
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.peerSupportsAcksResult = true;
+      transport.pushResult = LanPushResult.pending;
+
+      await manager.pushOperation(_textOp(operationId: 't-retry', timestamp: 1));
+      expect(transport.pushedTo, hasLength(1));
+      expect(await outbox.loadActive('user_test'), hasLength(1));
+
+      // 重试发生：第二次 push 同 historyId（_knownHistoryIds 已登记也必须重推）
+      transport.pushResult = LanPushResult.delivered;
+      await waitFor(() async => (await outbox.loadActive('user_test')).isEmpty);
+      expect(transport.pushedTo, hasLength(2));
+      expect(transport.pushedRows.map((r) => r['history_id']), contains('t-retry'));
+      await manager.stop();
+    });
+
+    test('pending 持续 → 重试耗尽（≤maxAttempts）→ give-up 删 outbox', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      final manager = createManager(
+        outboxStore: outbox,
+        retrySweepInterval: const Duration(milliseconds: 20),
+        retryBaseDelay: const Duration(milliseconds: 20),
+      );
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.peerSupportsAcksResult = true;
+      transport.pushResult = LanPushResult.pending;
+
+      await manager.pushOperation(_textOp(operationId: 't-giveup', timestamp: 1));
+
+      await waitFor(() async => (await outbox.loadActive('user_test')).isEmpty);
+      // 初始 1 + 重试 ≤ lanPushMaxAttempts 次；重试确实发生（>1）
+      expect(transport.pushedTo.length, greaterThan(1));
+      expect(
+        transport.pushedTo.length,
+        lessThanOrEqualTo(1 + LanConstants.lanPushMaxAttempts),
+      );
+      await manager.stop();
+    });
+
+    test('重启恢复：持久化 outbox 重新加载并重试；stop 不删持久化条目', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      final manager1 = createManager(
+        outboxStore: outbox,
+        retrySweepInterval: const Duration(milliseconds: 30),
+        retryBaseDelay: const Duration(milliseconds: 30),
+      );
+      await manager1.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.peerSupportsAcksResult = true;
+      transport.pushResult = LanPushResult.pending;
+      await manager1.pushOperation(_textOp(operationId: 't-restore', timestamp: 1));
+      expect(await outbox.loadActive('user_test'), hasLength(1));
+
+      await manager1.stop();
+      // LAN 关闭/重启保留持久化 outbox（账户切换才 clearPersistedOutbox）
+      expect(await outbox.loadActive('user_test'), hasLength(1));
+
+      // 新 manager 模拟重启：start 恢复 outbox → 重试 → delivered → 删除
+      transport.pushedTo.clear();
+      transport.pushResult = LanPushResult.delivered;
+      final manager2 = createManager(
+        outboxStore: outbox,
+        retrySweepInterval: const Duration(milliseconds: 30),
+        retryBaseDelay: const Duration(milliseconds: 30),
+      );
+      await manager2.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      await waitFor(() async => (await outbox.loadActive('user_test')).isEmpty);
+      expect(transport.pushedRows.map((r) => r['history_id']), contains('t-restore'));
+      await manager2.stop();
+    });
+
+    test('恢复条目登记 _knownHistoryIds 防回声', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      await outbox.put(LanOutboxEntry(
+        userId: 'user_test',
+        peerId: 'peer-b',
+        historyId: 't-echo',
+        kind: 'text',
+        row: <String, dynamic>{
+          'history_id': 't-echo',
+          'type': 'text',
+          'content': 'enc',
+          'source_device': 'device-a',
+          'source_device_name': 'Mac A',
+          'source_platform': 'macos',
+          'timestamp': 5,
+        },
+        enqueuedAtMs: 1,
+      ));
+      final manager = createManager(outboxStore: outbox);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      // 对端 latestResponse 返回同 historyId → 恢复登记后视为重复，不再返回
+      transport.fetchResults['peer-b'] = Future.value(<String, dynamic>{
+        'history_id': 't-echo',
+        'type': 'text',
+        'content': 'enc',
+        'source_device': 'peer-b',
+        'source_device_name': 'Peer B',
+        'source_platform': 'macos',
+        'timestamp': 5,
+        '_deletedIds': <String>[],
+        '_restoredEntries': <Map<String, dynamic>>[],
+      });
+      expect(await manager.fetchLatestContent(), isNull);
+      await manager.stop();
+    });
+
+    test('恢复时缺 artifact 的文件条目被丢弃', () async {
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      await outbox.put(LanOutboxEntry(
+        userId: 'user_test',
+        peerId: 'peer-b',
+        historyId: 'f-missing',
+        kind: 'file',
+        row: <String, dynamic>{'history_id': 'f-missing', 'type': 'file'},
+        artifactId: 'f-missing',
+        enqueuedAtMs: 1,
+      ));
+      final manager = createManager(outboxStore: outbox);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      expect(await outbox.loadActive('user_test'), isEmpty);
+      await manager.stop();
+    });
+
+    test('clearPersistedOutbox 只清指定用户（账户切换）', () async {
+      final outbox = LanOutboxStore(directoryPath: tempDir.path);
+      await outbox.put(LanOutboxEntry(
+        userId: 'user_test',
+        peerId: 'peer-b',
+        historyId: 'h-u1',
+        kind: 'text',
+        row: <String, dynamic>{'history_id': 'h-u1'},
+        enqueuedAtMs: 1,
+      ));
+      await outbox.put(LanOutboxEntry(
+        userId: 'user_other',
+        peerId: 'peer-b',
+        historyId: 'h-u2',
+        kind: 'text',
+        row: <String, dynamic>{'history_id': 'h-u2'},
+        enqueuedAtMs: 1,
+      ));
+      final manager = createManager(outboxStore: outbox);
+      await manager.clearPersistedOutbox('user_test');
+      expect(await outbox.loadActive('user_test'), isEmpty);
+      expect(await outbox.loadActive('user_other'), hasLength(1));
+    });
+  });
+
+  group('LanSyncManager 诊断计数', () {
+    test('fetch hit/miss + pushSent 埋点；start/stop reset 清零', () async {
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final d = manager.diagnostics;
+      expect(d.lanFetchMiss, 0);
+      expect(d.lanFetchHit, 0);
+
+      // 无 peer → miss
+      await manager.fetchLatestContent();
+      expect(d.lanFetchMiss, 1);
+
+      // push sent（旧 peer 无 acks）
+      discovery.candidatesResult = [_peer('peer-b')];
+      transport.peerSupportsAcksResult = false;
+      await manager.pushOperation(_textOp(operationId: 'd-push', timestamp: 1));
+      expect(d.pushSent, 1);
+      expect(d.pushReceived, 0);
+
+      // 网络命中新 historyId
+      transport.fetchResults['peer-b'] = Future.value(<String, dynamic>{
+        'history_id': 'd-new',
+        'type': 'text',
+        'content': 'enc',
+        'source_device': 'peer-b',
+        'source_device_name': 'Peer B',
+        'source_platform': 'macos',
+        'timestamp': 100,
+        '_deletedIds': <String>[],
+        '_restoredEntries': <Map<String, dynamic>>[],
+      });
+      final row = await manager.fetchLatestContent();
+      expect(row, isNotNull);
+      expect(d.lanFetchHit, 1);
+      expect(d.lanFetchMiss, 1);
+
+      // stop → reset
+      await manager.stop();
+      expect(d.pushSent, 0);
+      expect(d.lanFetchHit, 0);
+      expect(d.lanFetchMiss, 0);
+    });
+
+    test('handshakeRejected 汇入 fallbackReason', () async {
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final d = manager.diagnostics;
+      transport.connectError = LanHandshakeException(
+        'wrongAccount',
+        'peer proof does not match our account key',
+      );
+      discovery.candidatesResult = [_peer('peer-b')];
+      await manager.fetchLatestContent();
+      // fake transport 绕过真实握手，handshakeRejected 计数由握手服务负责
+      // （lan_handshake_service_test 覆盖）；此处断言 manager 汇入 fallback。
+      expect(
+        d.fallbackCount(LanFallbackReason.handshakeRejected),
+        greaterThan(0),
+      );
+      await manager.stop();
     });
   });
 }

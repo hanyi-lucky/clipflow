@@ -8,7 +8,9 @@ import '../core/constants.dart';
 import '../models/sync_operation.dart';
 import '../repositories/cloud_repository.dart';
 import '../repositories/local_file_store.dart';
+import '../repositories/lan_outbox_store.dart';
 import '../services/cloudbase_service.dart';
+import 'lan_diagnostics.dart';
 import 'lan_discovery_service.dart';
 import 'lan_handshake_service.dart';
 import 'lan_network_channel.dart';
@@ -33,8 +35,18 @@ class LanSyncManager {
     LanTransport? transport,
     LanHandshakeService? handshakeService,
     LocalFileStore? fileStore,
+    LanOutboxStore? outboxStore,
+    LanDiagnostics? diagnostics,
     @visibleForTesting Duration fetchTimeout = LanConstants.lanFetchTimeout,
+    @visibleForTesting Duration? retrySweepInterval,
+    @visibleForTesting Duration? retryBaseDelay,
   })  : _fetchTimeout = fetchTimeout,
+        _retrySweepInterval =
+            retrySweepInterval ?? LanConstants.lanRetrySweepInterval,
+        _retryBaseDelay =
+            retryBaseDelay ?? LanConstants.lanPushRetryBaseDelay,
+        _outboxStore = outboxStore ?? LanOutboxStore(),
+        _diagnostics = diagnostics ?? LanDiagnostics(),
         _discovery = discovery ?? LanDiscoveryService(),
         _fileStore = fileStore ?? LocalFileStore(),
         _transport = transport ??
@@ -64,13 +76,22 @@ class LanSyncManager {
   final LanDiscoveryService _discovery;
   final LanTransport _transport;
   final LocalFileStore _fileStore;
+  final LanOutboxStore _outboxStore;
+  final LanDiagnostics _diagnostics;
   final Duration _fetchTimeout;
+  final Duration _retrySweepInterval;
+  final Duration _retryBaseDelay;
 
   bool _enabled = false;
   bool _disposed = false;
   String? _userId;
   String? _deviceId;
   Uint8List? _accountKey;
+
+  /// 待确认表（纯内存）：per(peerId, historyId) → 重试状态。
+  /// 持久化副本在 LAN outbox（remove-on-ack）；本表负责超时重试调度。
+  final Map<String, Map<String, _PendingAckEntry>> _pendingAcks = {};
+  Timer? _retryTimer;
 
   /// 本机最新 row（server-shape，仅密文行）：可应答 peers 的 latestRequest。
   Map<String, dynamic>? _latestRow;
@@ -88,6 +109,21 @@ class LanSyncManager {
   void Function()? onPushReceived;
 
   bool get isEnabled => _enabled;
+
+  /// 诊断计数（本会话累计；LAN 启停/切账户清零）。
+  LanDiagnostics get diagnostics => _diagnostics;
+
+  /// 诊断 UI「清零」按钮。
+  void resetDiagnostics() => _diagnostics.reset();
+
+  /// 账户切换：删除指定用户的持久化 LAN outbox（LAN 开关关闭不调用）。
+  Future<void> clearPersistedOutbox(String userId) async {
+    try {
+      await _outboxStore.clearPersistedOutbox(userId);
+    } catch (e) {
+      debugPrint('[LAN] clear persisted outbox failed: $e');
+    }
+  }
 
   /// 启动 LAN：广播 + 浏览 + responder 服务。任何失败（平台不支持/权限
   /// 缺失/异常）都静默降级为 disabled，绝不抛给调用方。
@@ -119,6 +155,10 @@ class LanSyncManager {
       _deviceId = deviceId;
       _accountKey = accountKey;
       _enabled = true;
+      // 重启恢复：把持久化 LAN outbox 载入待确认表（缺 artifact 的文件条目
+      // 丢弃），并登记 _knownHistoryIds 防回声；随后 sweeper 重试未 ack 条目。
+      await _restoreOutbox(userId);
+      _startRetrySweeper();
       debugPrint('[LAN] manager started on port $port');
     } on LanNetworkException catch (e) {
       debugPrint('[LAN] start disabled: ${e.code}');
@@ -149,6 +189,195 @@ class LanSyncManager {
     _knownHistoryIds.clear();
     _roundRobinIndex = 0;
     _pushPending = false;
+    // 内存态清理：待确认表 + 重试定时器 + 诊断计数。
+    // 注意：**不得**删持久化 outbox——LAN 开关关闭保留，
+    // 只有账户切换才经 clearPersistedOutbox 清理。
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _pendingAcks.clear();
+    _diagnostics.reset();
+  }
+
+  /// 待确认表条目（内存态）：持有持久化 outbox 条目的引用 + 下次重试时间。
+  /// [LanOutboxEntry.attempts] 记录已失败（含重试）次数；重试**绕过**
+  /// `_knownHistoryIds` 发送侧去重——首次 `_registerHistoryId` 已登记，
+  /// 重试若再过该守卫会被拦截（explorer 明确的 bug 源）。
+  void _registerPending(LanOutboxEntry entry) {
+    final perPeer = _pendingAcks.putIfAbsent(entry.peerId, () => {});
+    final existing = perPeer[entry.historyId];
+    if (existing == null) {
+      // 初次失败：attempts=1，下次重试退避 base*2^0。
+      entry.attempts = 1;
+      perPeer[entry.historyId] = _PendingAckEntry(
+        entry: entry,
+        nextAttemptAtMs:
+            DateTime.now().millisecondsSinceEpoch + _backoffMs(entry.attempts),
+      );
+    }
+    _evictPendingIfNeeded();
+  }
+
+  /// 重试 sweeper：周期扫描待确认表，到点重试（绕过发送侧去重）。
+  /// give-up 条件：重试次数超过 [LanConstants.lanPushMaxAttempts] 或条目
+  /// 超过 [LanConstants.lanPendingAckTtl] 硬上限 → 删 outbox（拉取 backstop
+  /// + Cloud 权威兜底收敛，无需无限重试）。
+  void _startRetrySweeper() {
+    _retryTimer?.cancel();
+    _retryTimer = Timer.periodic(_retrySweepInterval, (_) {
+      unawaited(_retryPendingPushes());
+    });
+  }
+
+  Future<void> _retryPendingPushes() async {
+    if (!_enabled || _disposed || _userId == null) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (final peerEntry in List.of(_pendingAcks.entries)) {
+      final peerId = peerEntry.key;
+      final perPeer = peerEntry.value;
+      for (final pending in List.of(perPeer.values)) {
+        if (pending.nextAttemptAtMs > nowMs) continue;
+        final entry = pending.entry;
+        if (nowMs - entry.enqueuedAtMs >
+            LanConstants.lanPendingAckTtl.inMilliseconds) {
+          await _giveUpPending(peerId, entry);
+          continue;
+        }
+        if (entry.attempts > LanConstants.lanPushMaxAttempts) {
+          await _giveUpPending(peerId, entry);
+          continue;
+        }
+        // 重试：绕过 _registerHistoryId（核心修复）。
+        entry.attempts++;
+        pending.nextAttemptAtMs = nowMs + _backoffMs(entry.attempts);
+        final LanPushResult result;
+        try {
+          if (entry.kind == 'file') {
+            final artifactId = entry.artifactId;
+            final encPath = artifactId == null
+                ? null
+                : await _fileStore.loadEncryptedPath(artifactId);
+            if (encPath == null) {
+              // artifact 已被容量清理逐出 → 放弃（Cloud 权威兜底）。
+              await _giveUpPending(peerId, entry);
+              continue;
+            }
+            result = await _transport.pushFile(
+              peerId,
+              entry.row,
+              encryptedPath: encPath,
+              encSize: entry.encSize ?? 0,
+            );
+            _diagnostics.pushSent++;
+          } else {
+            result = await _transport.push(peerId, entry.row);
+            _diagnostics.pushSent++;
+          }
+        } catch (e) {
+          debugPrint('[LAN] retry push to $peerId failed: $e');
+          continue;
+        }
+        if (result == LanPushResult.delivered) {
+          await _removePending(peerId, entry);
+        }
+      }
+    }
+  }
+
+  Future<void> _giveUpPending(String peerId, LanOutboxEntry entry) async {
+    _pendingAcks[peerId]?.remove(entry.historyId);
+    if ((_pendingAcks[peerId]?.isEmpty ?? false)) _pendingAcks.remove(peerId);
+    await _safeOutboxRemove(entry);
+    debugPrint('[LAN] give up push ${entry.historyId} to $peerId');
+  }
+
+  Future<void> _removePending(String peerId, LanOutboxEntry entry) async {
+    _pendingAcks[peerId]?.remove(entry.historyId);
+    if ((_pendingAcks[peerId]?.isEmpty ?? false)) _pendingAcks.remove(peerId);
+    await _safeOutboxRemove(entry);
+  }
+
+  /// 重试退避：attempts=1 → base；2 → 2×base；3 → 4×base（指数）。
+  int _backoffMs(int attempts) {
+    final shift = (attempts - 1).clamp(0, 10);
+    return _retryBaseDelay.inMilliseconds * (1 << shift);
+  }
+
+  /// 待确认表上限 [LanConstants.lanPendingAckMaxEntries]（LRU：淘汰最旧）。
+  void _evictPendingIfNeeded() {
+    var total = _pendingAcks.values.fold<int>(
+      0,
+      (sum, perPeer) => sum + perPeer.length,
+    );
+    while (total > LanConstants.lanPendingAckMaxEntries) {
+      _PendingAckEntry? oldest;
+      String? oldestPeer;
+      for (final peerEntry in _pendingAcks.entries) {
+        for (final pending in peerEntry.value.values) {
+          if (oldest == null ||
+              pending.entry.enqueuedAtMs < oldest.entry.enqueuedAtMs) {
+            oldest = pending;
+            oldestPeer = peerEntry.key;
+          }
+        }
+      }
+      if (oldest == null || oldestPeer == null) break;
+      _pendingAcks[oldestPeer]?.remove(oldest.entry.historyId);
+      if ((_pendingAcks[oldestPeer]?.isEmpty ?? false)) {
+        _pendingAcks.remove(oldestPeer);
+      }
+      unawaited(_safeOutboxRemove(oldest.entry));
+      total--;
+    }
+  }
+
+  /// 重启恢复：持久化 outbox → 待确认表 + 防回声登记 + 最新行刷新。
+  /// 文件条目缺 artifact（本地 .enc 已清理）→ 直接丢弃。
+  Future<void> _restoreOutbox(String userId) async {
+    final entries = await _safeOutboxLoad(userId);
+    for (final entry in entries) {
+      if (entry.kind == 'file') {
+        final artifactId = entry.artifactId;
+        final encPath = artifactId == null
+            ? null
+            : await _fileStore.loadEncryptedPath(artifactId);
+        if (encPath == null) {
+          await _safeOutboxRemove(entry);
+          debugPrint('[LAN] drop restored file outbox ${entry.historyId}: '
+              'artifact missing');
+          continue;
+        }
+      }
+      if (entry.historyId.isNotEmpty) {
+        _knownHistoryIds.add(entry.historyId); // 防回声
+      }
+      _updateLatestRow(entry.row);
+      _registerPending(entry);
+    }
+  }
+
+  Future<void> _safeOutboxPut(LanOutboxEntry entry) async {
+    try {
+      await _outboxStore.put(entry);
+    } catch (e) {
+      debugPrint('[LAN] outbox put failed: $e');
+    }
+  }
+
+  Future<void> _safeOutboxRemove(LanOutboxEntry entry) async {
+    try {
+      await _outboxStore.remove(entry.userId, entry.peerId, entry.historyId);
+    } catch (e) {
+      debugPrint('[LAN] outbox remove failed: $e');
+    }
+  }
+
+  Future<List<LanOutboxEntry>> _safeOutboxLoad(String userId) async {
+    try {
+      return await _outboxStore.loadActive(userId);
+    } catch (e) {
+      debugPrint('[LAN] outbox load failed: $e');
+      return [];
+    }
   }
 
   /// 拉取最新 row：刚收到 push → 命中本机缓存；否则 round-robin 向
@@ -158,11 +387,16 @@ class LanSyncManager {
     // 刚收到 push：直接命中本机缓存（LAN 加速，不再走一轮网络）。
     if (_pushPending && _latestRow != null) {
       _pushPending = false;
+      _diagnostics.lanFetchHit++;
       return _sanitizeLanRow(_latestRow!);
     }
     await _ensureConnectedPeers();
     final peerIds = _transport.verifiedPeerIds;
-    if (peerIds.isEmpty) return null;
+    if (peerIds.isEmpty) {
+      _diagnostics.lanFetchMiss++;
+      _diagnostics.recordFallback(LanFallbackReason.noPeer);
+      return null;
+    }
     var tried = 0;
     for (var i = 0; i < peerIds.length && tried < LanConstants.maxVerifiedPeers; i++) {
       final peerId = peerIds[(_roundRobinIndex + i) % peerIds.length];
@@ -173,18 +407,28 @@ class LanSyncManager {
               _fetchTimeout,
               onTimeout: () {
                 // 超时：会话可能处于脏状态，丢弃让下一轮重连。
+                _diagnostics.lanFetchMiss++;
+                _diagnostics.recordFallback(LanFallbackReason.fetchTimeout);
                 _transport.dropSession(peerId);
                 return null;
               },
             );
       } catch (e) {
+        _diagnostics.lanFetchMiss++;
+        _diagnostics.recordFallback(LanFallbackReason.fetchError);
         _transport.dropSession(peerId);
         row = null;
       }
       if (row == null) continue;
       final duplicate = _registerHistoryId(row['history_id']);
       _updateLatestRow(row);
-      if (duplicate) continue; // 已见过的行，不重复返回
+      if (duplicate) {
+        // 已见过的行，不重复返回
+        _diagnostics.lanFetchMiss++;
+        _diagnostics.recordFallback(LanFallbackReason.duplicate);
+        continue;
+      }
+      _diagnostics.lanFetchHit++;
       return _sanitizeLanRow(_latestRow!);
     }
     _roundRobinIndex = (_roundRobinIndex + 1) % peerIds.length;
@@ -212,6 +456,7 @@ class LanSyncManager {
       } on LanHandshakeException catch (e) {
         // 错账户/票据拒绝：黑名单冷却，避免反复握手。
         debugPrint('[LAN] handshake to ${peer.deviceId} rejected: ${e.reason}');
+        _diagnostics.recordFallback(LanFallbackReason.handshakeRejected);
         _discovery.markHandshakeRejected(peer.deviceId);
       } catch (e) {
         debugPrint('[LAN] connect to ${peer.deviceId} failed: $e');
@@ -242,12 +487,44 @@ class LanSyncManager {
       if (_registerHistoryId(row['history_id'])) return; // 已推过，去重
       _updateLatestRow(row);
       final sourceDevice = row['source_device'] as String? ?? '';
+      final historyId = row['history_id'] as String? ?? '';
+      final kind = op.kind == SyncOperationKind.image ? 'image' : 'text';
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
       for (final peerId in _transport.verifiedPeerIds) {
         if (peerId == sourceDevice) continue; // 不向来源设备回推
+        // 旧 peer（无 acks）：Phase 2.2 写后即返回，不落 outbox。
+        if (!_transport.supportsAcks(peerId)) {
+          try {
+            await _transport.push(peerId, row);
+            _diagnostics.pushSent++;
+          } catch (e) {
+            debugPrint('[LAN] push to $peerId failed: $e');
+          }
+          continue;
+        }
+        // 新 peer：先持久化 outbox（crash-safe），再 push。
+        final entry = LanOutboxEntry(
+          userId: _userId!,
+          peerId: peerId,
+          historyId: historyId,
+          kind: kind,
+          row: row,
+          enqueuedAtMs: nowMs,
+        );
+        await _safeOutboxPut(entry);
+        final LanPushResult result;
         try {
-          await _transport.push(peerId, row);
+          result = await _transport.push(peerId, row);
+          _diagnostics.pushSent++;
         } catch (e) {
           debugPrint('[LAN] push to $peerId failed: $e');
+          _registerPending(entry);
+          continue;
+        }
+        if (result == LanPushResult.delivered) {
+          await _safeOutboxRemove(entry); // remove-on-ack
+        } else {
+          _registerPending(entry); // pending/noSession → 待确认重试
         }
       }
     } catch (e) {
@@ -269,17 +546,54 @@ class LanSyncManager {
     _updateLatestRow(row);
     final encSize = await File(encPath).length();
     final sourceDevice = row['source_device'] as String? ?? '';
+    final historyId = row['history_id'] as String? ?? '';
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     for (final peerId in _transport.verifiedPeerIds) {
       if (peerId == sourceDevice) continue; // 不向来源设备回推
+      if (!_transport.supportsAcks(peerId)) {
+        // 旧 peer：Phase 2.2 写后即返回，不落 outbox。
+        try {
+          await _transport.pushFile(
+            peerId,
+            row,
+            encryptedPath: encPath,
+            encSize: encSize.toInt(),
+          );
+          _diagnostics.pushSent++;
+        } catch (e) {
+          debugPrint('[LAN] pushFile to $peerId failed: $e');
+        }
+        continue;
+      }
+      final entry = LanOutboxEntry(
+        userId: _userId!,
+        peerId: peerId,
+        historyId: historyId,
+        kind: 'file',
+        row: row,
+        artifactId: artifactId,
+        encSize: encSize.toInt(),
+        enqueuedAtMs: nowMs,
+      );
+      await _safeOutboxPut(entry);
+      final LanPushResult result;
       try {
-        await _transport.pushFile(
+        result = await _transport.pushFile(
           peerId,
           row,
           encryptedPath: encPath,
           encSize: encSize.toInt(),
         );
+        _diagnostics.pushSent++;
       } catch (e) {
         debugPrint('[LAN] pushFile to $peerId failed: $e');
+        _registerPending(entry);
+        continue;
+      }
+      if (result == LanPushResult.delivered) {
+        await _safeOutboxRemove(entry); // remove-on-ack
+      } else {
+        _registerPending(entry);
       }
     }
   }
@@ -287,6 +601,7 @@ class LanSyncManager {
   /// 收到 peer push 帧：去重 → 更新缓存 → 通知 Provider 立即下载。
   void _handlePushReceived(Map<String, dynamic> row) {
     if (!_enabled || _disposed) return;
+    _diagnostics.pushReceived++;
     final duplicate = _registerHistoryId(row['history_id']);
     _updateLatestRow(row);
     if (duplicate) return; // 重复 push 不重复通知
@@ -298,6 +613,7 @@ class LanSyncManager {
   /// 去重 → 更新缓存 → 置 _pushPending（下一次 fetch 命中本地文件行）。
   void _handleFilePushReceived(Map<String, dynamic> row, String encPath) {
     if (!_enabled || _disposed) return;
+    _diagnostics.pushReceived++;
     final duplicate = _registerHistoryId(row['history_id']);
     _updateLatestRow(row);
     if (duplicate) return; // 重复 push 不重复通知
@@ -388,4 +704,12 @@ class LanSyncManager {
       '_restoredEntries': <Map<String, dynamic>>[],
     };
   }
+}
+
+/// 待确认表条目：outbox 条目引用 + 下次重试时间（内存态）。
+class _PendingAckEntry {
+  _PendingAckEntry({required this.entry, required this.nextAttemptAtMs});
+
+  final LanOutboxEntry entry;
+  int nextAttemptAtMs;
 }

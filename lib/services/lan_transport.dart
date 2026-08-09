@@ -631,7 +631,6 @@ class LanTransport {
         'type': 'push',
         'row': row,
       });
-      _diagnostics?.pushSent++;
       if (!session.peerSupportsAcks) {
         return LanPushResult.delivered; // 旧 peer：写后即返回
       }
@@ -671,7 +670,6 @@ class LanTransport {
         encryptedPath: encryptedPath,
         encSize: encSize,
       );
-      _diagnostics?.pushSent++;
       if (!session.peerSupportsAcks) {
         return LanPushResult.delivered; // 旧 peer：写后即返回
       }
