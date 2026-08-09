@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/settings_provider.dart';
@@ -86,6 +87,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   subtitle: const Text(AppStrings.autoSyncSubtitle),
                   value: settings.autoSync,
                   onChanged: (v) => settings.setAutoSync(v),
+                ),
+                const Divider(height: 1, indent: 16),
+                SwitchListTile(
+                  title: const Text(AppStrings.lanAccelerationTitle),
+                  subtitle: const Text(AppStrings.lanAccelerationSubtitle),
+                  value: settings.lanAcceleration,
+                  secondary: const Icon(Icons.wifi_tethering),
+                  onChanged: (v) async {
+                    // Android 13+ 开启前先请求 NEARBY_WIFI_DEVICES；
+                    // 拒绝 → 置回 false 并提示（LAN 降级，不阻塞 Cloud）。
+                    if (v && Platform.isAndroid) {
+                      final status =
+                          await ph.Permission.nearbyWifiDevices.request();
+                      if (!status.isGranted) {
+                        await settings.setLanAcceleration(false);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(AppStrings.lanPermissionDenied),
+                            ),
+                          );
+                        }
+                        return;
+                      }
+                    }
+                    await settings.setLanAcceleration(v);
+                    await ClipboardProvider.of(
+                      context,
+                      listen: false,
+                    ).setLanAcceleration(v);
+                  },
                 ),
                 ListTile(
                   title: const Text(AppStrings.historyLimitTitle),

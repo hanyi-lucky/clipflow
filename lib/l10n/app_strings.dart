@@ -30,6 +30,9 @@ abstract final class AppStrings {
   static const String settingsGeneralSection = '通用';
   static const String autoSyncTitle = '自动同步';
   static const String autoSyncSubtitle = '检测到新内容时自动同步到云端';
+  static const String lanAccelerationTitle = '局域网加速';
+  static const String lanAccelerationSubtitle = '同一 Wi-Fi 下优先经局域网快速同步文本与图片，失败自动回退云端';
+  static const String lanPermissionDenied = '未获得局域网权限，已回退云端同步';
   static const String historyLimitTitle = '历史记录保留';
   static String historyLimitCount(int limit) => '$limit条';
   static const String settingsDevicesSection = '设备管理';

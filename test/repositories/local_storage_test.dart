@@ -47,4 +47,15 @@ void main() {
     expect(storage.historyLimit, 100);
     expect(storage.themeMode, ThemeMode.dark);
   });
+
+  test('lanAcceleration 默认开启，可持久化关闭/开启', () async {
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    expect(storage.lanAcceleration, isTrue);
+    await storage.setLanAcceleration(false);
+    expect(storage.lanAcceleration, isFalse);
+    await storage.setLanAcceleration(true);
+    expect(storage.lanAcceleration, isTrue);
+  });
 }

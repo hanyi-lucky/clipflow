@@ -193,4 +193,26 @@ void main() {
         contains('Manual crash trigger'));
   });
 
+  testWidgets('设置页「通用」区显示局域网加速开关，关闭后持久化', (tester) async {
+    await useTallViewport(tester);
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    await tester.pumpWidget(buildApp(storage));
+    await tester.pumpAndSettle();
+
+    // 开关存在且默认开启
+    expect(find.text(AppStrings.lanAccelerationTitle), findsOneWidget);
+    expect(find.text(AppStrings.lanAccelerationSubtitle), findsOneWidget);
+    final tileFinder = find.ancestor(
+      of: find.text(AppStrings.lanAccelerationTitle),
+      matching: find.byType(SwitchListTile),
+    );
+    expect(tester.widget<SwitchListTile>(tileFinder).value, isTrue);
+
+    // 关闭 → 树内 SettingsProvider 状态翻转（持久化由 provider/local_storage 单测覆盖）
+    await tester.tap(find.text(AppStrings.lanAccelerationTitle));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(tileFinder).value, isFalse);
+  });
 }
