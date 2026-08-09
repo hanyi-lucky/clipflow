@@ -176,9 +176,7 @@ class _NoopHandshake extends LanHandshakeService {
 /// 最小 fake Cloud：只覆写 LAN 票据两个方法，让真实握手组合路径
 /// （manager 默认构造的 handshake）无需连真实服务器即可完成。
 class _FakeCloudRepository extends CloudRepository {
-  _FakeCloudRepository({this.userId = 'user_test'}) : super(CloudBaseService());
-
-  final String userId;
+  _FakeCloudRepository() : super(CloudBaseService());
 
   @override
   Future<Map<String, dynamic>> getLanTicket({required String deviceId}) async {
@@ -192,7 +190,7 @@ class _FakeCloudRepository extends CloudRepository {
   Future<Map<String, dynamic>> verifyLanTicket({required String ticket}) async {
     final deviceId = ticket.replaceFirst('fake-ticket-', '');
     return <String, dynamic>{
-      'userId': userId,
+      'userId': 'user_test',
       'deviceId': deviceId,
       'expiresAtMs': DateTime.now().millisecondsSinceEpoch + 5 * 60 * 1000,
     };
