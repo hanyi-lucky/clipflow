@@ -115,6 +115,15 @@ class _FakeLanSyncManager extends LanSyncManager {
   Future<void> stop() async {
     stopCalls++;
   }
+
+  int clearPersistedCalls = 0;
+  String? clearedUserId;
+
+  @override
+  Future<void> clearPersistedOutbox(String userId) async {
+    clearPersistedCalls++;
+    clearedUserId = userId;
+  }
 }
 
 /// 内存 outbox：避免 resetAccountSync 触发 path_provider 真实通道。
@@ -444,6 +453,9 @@ void main() {
 
       await provider.resetAccountSync();
       expect(lanManager.stopCalls, 1);
+      // 切账户同时清理持久化 LAN outbox（旧账户 userId）
+      expect(lanManager.clearPersistedCalls, 1);
+      expect(lanManager.clearedUserId, 'user_device-test');
 
       // dispose 后再 stop 一次不抛（幂等）
       final lanManager2 = _FakeLanSyncManager();

@@ -361,8 +361,15 @@ class ClipboardProvider extends ChangeNotifier
     _syncTimer?.cancel();
     _nextSyncTimer?.cancel();
     // 先停 LAN（stop + null），再关协调器：避免 push 回调与旧账户并发。
+    final oldLanUserId = _lanUserId;
+    final lanManager = _lanManager;
     await _stopLanManager();
     _fileBreaker.clear(); // 切账户 → 清熔断
+    // 账户切换：清理旧用户持久化 LAN outbox（LAN 开关关闭不清理；
+    // 目录与云 outbox clipflow_outbox 隔离）。
+    if (lanManager != null && oldLanUserId != null) {
+      await lanManager.clearPersistedOutbox(oldLanUserId);
+    }
     await _syncCoordinator?.discardAccountOutbox();
     await _syncCoordinator?.close();
     _syncCoordinator = null;
