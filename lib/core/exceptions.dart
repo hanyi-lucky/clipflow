@@ -38,6 +38,22 @@ class DecryptionException implements Exception {
   String toString() => 'DecryptionException: $message';
 }
 
+/// 文件密文解密后明文 SHA-256 与行元数据 hash 不一致（发错文件/损坏 artifact）。
+class FileHashMismatchException implements Exception {
+  final String message;
+  FileHashMismatchException(this.message);
+  @override
+  String toString() => 'FileHashMismatchException: $message';
+}
+
+/// 文件密文解密后明文大小与行元数据 file_size 不一致。
+class FileSizeMismatchException implements Exception {
+  final String message;
+  FileSizeMismatchException(this.message);
+  @override
+  String toString() => 'FileSizeMismatchException: $message';
+}
+
 class ImageCompressionException extends ClipboardException {
   ImageCompressionException(super.message) : super(code: 'IMAGE_COMPRESS_ERROR');
 }

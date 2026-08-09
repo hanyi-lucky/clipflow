@@ -301,7 +301,10 @@ class ClipboardProvider extends ChangeNotifier
     }
     try {
       manager = _injectedLanManager ??
-          LanSyncManager(cloudRepository: _cloudRepo!);
+          LanSyncManager(
+            cloudRepository: _cloudRepo!,
+            fileStore: _localFileStore,
+          );
       _lanManager = manager;
       await manager.start(
         userId: _lanUserId ??
@@ -1272,7 +1275,9 @@ class ClipboardProvider extends ChangeNotifier
           if (lanRow != null) {
             final lanResult =
                 await _syncService!.decodeCurrentClipboard(lanRow);
-            if (lanResult != null && lanResult.hasContent) {
+            // 文件行 content 为空串（元数据行），须按 hasFile 交付
+            if (lanResult != null &&
+                (lanResult.hasContent || lanResult.hasFile)) {
               await _applyDownloadResult(lanResult);
               lanDelivered = true;
             }
@@ -1634,30 +1639,43 @@ class ClipboardProvider extends ChangeNotifier
     progress.cancelToken ??= FileTransferCancelToken();
     final cancelToken = progress.cancelToken!;
     String? decryptedTempPath;
+    String? encryptedPath;
     try {
-      if (_cloudRepo == null) throw Exception('Cloud repository unavailable');
       final fileName = result.fileName ?? 'file';
       progress.fileName = fileName;
       progress.status = FileTransferStatus.downloading;
       notifyListeners();
 
-      final response = await _cloudRepo!.downloadFile(entryId);
-      if (progress.status == FileTransferStatus.cancelled) return;
+      // ① 本地优先：LAN 交付 / 历史 Cloud 缓存已落盘 `<historyId>.enc` →
+      //    跳过 Cloud（同一 historyId，幂等锚点不变）。不存在才走 Cloud。
+      encryptedPath = await _localFileStore.loadEncryptedPath(entryId);
+      if (encryptedPath == null) {
+        if (_cloudRepo == null) {
+          throw Exception('Cloud repository unavailable');
+        }
+        final response = await _cloudRepo!.downloadFile(entryId);
+        if (progress.status == FileTransferStatus.cancelled) return;
 
-      progress.totalBytes = response.contentLength;
-      notifyListeners();
-      final encryptedPath = await _localFileStore.saveEncryptedFromStream(
-        entryId: entryId,
-        stream: response.stream,
-        onProgress: (received) {
-          progress.receivedBytes = received;
-          notifyListeners();
-        },
-        cancelToken: cancelToken,
-      );
-      if (encryptedPath == null) return; // 取消时 store 已删除 .part
-      if (progress.status == FileTransferStatus.cancelled) return;
+        progress.totalBytes = response.contentLength;
+        notifyListeners();
+        encryptedPath = await _localFileStore.saveEncryptedFromStream(
+          entryId: entryId,
+          stream: response.stream,
+          onProgress: (received) {
+            progress.receivedBytes = received;
+            notifyListeners();
+          },
+          cancelToken: cancelToken,
+        );
+        if (encryptedPath == null) return; // 取消时 store 已删除 .part
+        if (progress.status == FileTransferStatus.cancelled) return;
+      } else {
+        // 本地密文已有（LAN 交付/历史缓存）：仅展示总大小，不重复拉取
+        progress.totalBytes = await File(encryptedPath).length();
+        notifyListeners();
+      }
 
+      // ② 共享处理块：解密 → 明文 hash/size 校验 → 入缓存 → 写剪贴板
       progress.status = FileTransferStatus.processing;
       notifyListeners();
       decryptedTempPath = await _localFileStore.newTempPath('_decrypted');
@@ -1667,6 +1685,26 @@ class ClipboardProvider extends ChangeNotifier
         key: _syncService!.key,
       );
       if (progress.status == FileTransferStatus.cancelled) return;
+
+      // 新校验：明文 SHA-256 与行 hash、明文大小与行 file_size 一致
+      //（防发错文件/损坏 artifact；行缺元数据时跳过，保持向后兼容）。
+      final expectedHash = result.fileHash;
+      if (expectedHash != null &&
+          expectedHash.isNotEmpty &&
+          plaintextHash != expectedHash) {
+        throw FileHashMismatchException(
+          'plaintext hash mismatch for file $entryId',
+        );
+      }
+      final expectedSize = result.fileSize;
+      if (expectedSize != null) {
+        final plaintextLength = await File(decryptedTempPath).length();
+        if (plaintextLength != expectedSize) {
+          throw FileSizeMismatchException(
+            'plaintext size mismatch for file $entryId',
+          );
+        }
+      }
 
       progress.decryptedHash = plaintextHash;
       final plaintextPath = await _localFileStore.movePlaintextIntoCache(
@@ -1717,6 +1755,24 @@ class ClipboardProvider extends ChangeNotifier
       );
     } catch (e) {
       if (progress.status == FileTransferStatus.cancelled) return;
+      // ③ 解密/hash/size 校验失败（坏 .enc）→ 删本地 .enc，重试走 Cloud
+      //    同一 historyId；setFiles 等瞬态失败保留 .enc，重试复用本地密文。
+      if (e is FileHashMismatchException ||
+          e is FileSizeMismatchException ||
+          e is DecryptionException ||
+          e is EncryptionException) {
+        final badPath = encryptedPath;
+        if (badPath != null) {
+          try {
+            final badFile = File(badPath);
+            if (await badFile.exists()) {
+              await badFile.delete();
+            }
+          } catch (_) {
+            // 删除失败降级：下次仍走本地解密路径
+          }
+        }
+      }
       progress.error = e.toString();
       progress.retryCount += 1;
       if (!_disposed && progress.retryCount < 3) {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -416,7 +417,7 @@ void main() {
           key,
         );
         repo.downloadBytes = encrypted.toBytes();
-        final fileHash = 'file-hash-download-1';
+        final fileHash = sha256.convert(plaintext).toString();
         mockFileChannel(
           hasFiles: false,
           setFilesResult: true,
@@ -484,7 +485,7 @@ void main() {
           id: 'hist-echo-1',
           fileName: 'photo.png',
           fileSize: plaintext.length,
-          fileHash: 'file-hash-echo',
+          fileHash: sha256.convert(plaintext).toString(),
         );
         mockFileChannel(
           hasFiles: false,
@@ -539,7 +540,7 @@ void main() {
           id: 'hist-fail-1',
           fileName: 'fail.bin',
           fileSize: plaintext.length,
-          fileHash: 'file-hash-fail',
+          fileHash: sha256.convert(plaintext).toString(),
         );
 
         final provider = await createProvider(
@@ -587,7 +588,7 @@ void main() {
         id: 'hist-recover-1',
         fileName: 'recovered.txt',
         fileSize: plaintext.length,
-        fileHash: 'file-hash-recover',
+        fileHash: sha256.convert(plaintext).toString(),
       );
 
       final provider = await createProvider(
@@ -623,7 +624,7 @@ void main() {
           id: 'hist-race-1',
           fileName: 'race.bin',
           fileSize: plaintext.length,
-          fileHash: 'file-hash-race',
+          fileHash: sha256.convert(plaintext).toString(),
         );
 
         final provider = await createProvider();
@@ -686,7 +687,7 @@ void main() {
           id: 'hist-cancel-1',
           fileName: 'cancel.bin',
           fileSize: plaintext.length,
-          fileHash: 'file-hash-cancel',
+          fileHash: sha256.convert(plaintext).toString(),
         );
 
         final provider = await createProvider();
@@ -748,7 +749,7 @@ void main() {
         id: 'hist-cancel-retry-1',
         fileName: 'retry-cancel.bin',
         fileSize: plaintext.length,
-        fileHash: 'file-hash-retry-cancel',
+        fileHash: sha256.convert(plaintext).toString(),
       );
 
       final provider = await createProvider(
@@ -791,7 +792,7 @@ void main() {
           id: 'hist-retry-blocked-1',
           fileName: 'blocked.bin',
           fileSize: plaintext.length,
-          fileHash: 'file-hash-blocked',
+          fileHash: sha256.convert(plaintext).toString(),
         );
 
         final provider = await createProvider(
@@ -813,7 +814,7 @@ void main() {
           id: 'hist-active-1',
           fileName: 'active.bin',
           fileSize: plaintext.length,
-          fileHash: 'file-hash-active',
+          fileHash: sha256.convert(plaintext).toString(),
           timestamp: 1700000001000,
         );
 
@@ -869,7 +870,7 @@ void main() {
         id: 'hist-meta-1',
         fileName: 'meta.pdf',
         fileSize: plaintext.length,
-        fileHash: 'file-hash-meta',
+        fileHash: sha256.convert(plaintext).toString(),
       );
 
       final provider = await createProvider(
@@ -894,7 +895,7 @@ void main() {
       final entry = provider.history.firstWhere((e) => e.id == 'hist-meta-1');
       expect(entry.fileName, 'meta.pdf');
       expect(entry.fileSize, plaintext.length);
-      expect(entry.fileHash, 'file-hash-meta');
+      expect(entry.fileHash, sha256.convert(plaintext).toString());
       expect(entry.mimeType, 'application/pdf');
       expect(entry.sourceDeviceName, 'Phone B');
       final progress = provider.fileDownloadProgress('hist-meta-1')!;
