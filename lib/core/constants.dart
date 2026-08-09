@@ -60,4 +60,13 @@ class LanConstants {
 
   /// 握手失败 peer 的黑名单冷却时长。
   static const Duration lanBlacklistCooldown = Duration(seconds: 60);
+
+  /// 会话空闲超时：超过该时长无任何帧则断开，需重新握手。
+  static const Duration lanSessionIdleTimeout = Duration(minutes: 5);
+
+  /// 单次 LAN fetch 的 peer 级超时（round-robin 内每个 peer 的上限）。
+  static const Duration lanFetchTimeout = Duration(milliseconds: 300);
+
+  /// 发起方连接（TLS 建连）超时。
+  static const Duration lanConnectTimeout = Duration(seconds: 2);
 }

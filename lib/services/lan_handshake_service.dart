@@ -192,12 +192,16 @@ class LanHandshakeService {
     required String userId,
     required Uint8List accountKey,
     Duration? timeout,
+    LanFrameConnection? existingConnection,
   }) async {
     final frameTimeout = timeout ?? LanConstants.lanHandshakeTimeout;
     final lanAuthKey = deriveLanAuthKey(accountKey);
     final myNonce = _nonceGenerator();
     // 超时视图必须在构造时应用一次并复用（socket.timeout 返回单订阅流）。
-    final connection = LanFrameConnection(socket, timeout: frameTimeout);
+    // 复用调用方传入的连接（如 LanTransport 的长会话连接），保证握手后
+    // 同一 socket 上还能继续读帧（Socket 是单订阅流，不能二次 listen）。
+    final connection = existingConnection ??
+        LanFrameConnection(socket, timeout: frameTimeout);
 
     Map<String, dynamic> helloMessage() => <String, dynamic>{
           'v': LanConstants.lanProtoVersion,
