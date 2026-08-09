@@ -281,6 +281,18 @@ class CloudBaseService {
     return response;
   }
 
+  // --- LAN 握手票据（Phase 2.1，仅 additive；复用 _callApi 的 401 自动重登 + 429 解析）---
+
+  /// 获取 LAN 握手短时票据（服务端 HMAC 票据，5min TTL）。
+  Future<Map<String, dynamic>> fetchLanTicket({required String deviceId}) async {
+    return _callApi('POST', '/lan/ticket', body: {'deviceId': deviceId});
+  }
+
+  /// 校验 LAN 握手票据（服务端实时复查 removed_at，返回 userId/deviceId）。
+  Future<Map<String, dynamic>> verifyLanTicket({required String ticket}) async {
+    return _callApi('POST', '/lan/ticket/verify', body: {'ticket': ticket});
+  }
+
   /// 恢复已删除的历史记录
   Future<void> restoreHistoryEntry(String entryId) async {
     final result = await _callApi('POST', '/history/$entryId/restore');

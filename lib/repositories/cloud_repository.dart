@@ -78,6 +78,20 @@ class CloudRepository {
     await _cloud.updateDocument('history', entryId, data);
   }
 
+  // --- LAN 握手票据（Phase 2.1，仅 additive）---
+
+  /// 获取 LAN 握手短时票据（HMAC 短时票据）。
+  Future<Map<String, dynamic>> getLanTicket({required String deviceId}) async {
+    final result = await _cloud.fetchLanTicket(deviceId: deviceId);
+    return result['data'] as Map<String, dynamic>? ?? const <String, dynamic>{};
+  }
+
+  /// 校验 LAN 握手票据（返回 `data`：userId/deviceId/expiresAtMs）。
+  Future<Map<String, dynamic>> verifyLanTicket({required String ticket}) async {
+    final result = await _cloud.verifyLanTicket(ticket: ticket);
+    return result['data'] as Map<String, dynamic>? ?? const <String, dynamic>{};
+  }
+
   // --- 垃圾箱 ---
 
   /// 获取剪切板内容（含 deletedIds，用于同步删除）
