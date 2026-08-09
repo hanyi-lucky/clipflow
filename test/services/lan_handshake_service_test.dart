@@ -235,4 +235,43 @@ void main() {
     final second = await runPair(a: a, b: b, keyA: accountKey, keyB: accountKey);
     expect(rejectionReasons(second), contains('replayNonce'));
   });
+  test('新↔新握手：双方 peerSupportsAcks=true（hello 携带 acks:1）', () async {
+    final a = LanHandshakeService(cloudRepository: _FakeCloudRepository());
+    final b = LanHandshakeService(cloudRepository: _FakeCloudRepository());
+    final result = await runPair(a: a, b: b, keyA: accountKey, keyB: accountKey);
+    expect(result.aError, isNull, reason: 'initiator error: ${result.aError}');
+    expect(result.bError, isNull, reason: 'responder error: ${result.bError}');
+    expect(result.aSession?.peerSupportsAcks, isTrue);
+    expect(result.bSession?.peerSupportsAcks, isTrue);
+  });
+
+  test('旧 peer（hello 无 acks 字段）→ 新端 peerSupportsAcks=false', () async {
+    // 旧端 helloBuilder 省略 acks，模拟 Phase 2.2 及更早的 peer。
+    final oldPeer = LanHandshakeService(
+      cloudRepository: _FakeCloudRepository(),
+      helloBuilder: ({required String deviceId, required String nonce}) {
+        return <String, dynamic>{
+          'v': 1,
+          'type': 'hello',
+          'deviceId': deviceId,
+          'nonce': nonce,
+        };
+      },
+    );
+    final newPeer = LanHandshakeService(
+      cloudRepository: _FakeCloudRepository(),
+    );
+    final result = await runPair(
+      a: newPeer,
+      b: oldPeer,
+      keyA: accountKey,
+      keyB: accountKey,
+    );
+    expect(result.aError, isNull, reason: 'new side error: ${result.aError}');
+    expect(result.bError, isNull, reason: 'old side error: ${result.bError}');
+    // 新端（initiator a）看到旧端 hello 无 acks → 不支持
+    expect(result.aSession?.peerSupportsAcks, isFalse);
+    // 旧端（responder b）看到新端 hello 带 acks → 新端支持（但旧端自身不会发 ack）
+    expect(result.bSession?.peerSupportsAcks, isTrue);
+  });
 }

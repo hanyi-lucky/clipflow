@@ -4,9 +4,11 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show Hmac, sha256;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../core/constants.dart';
 import '../repositories/cloud_repository.dart';
+import 'lan_diagnostics.dart';
 import 'lan_protocol.dart';
 
 /// LAN 握手失败。
@@ -43,11 +45,25 @@ class LanVerifiedTicket {
 
 /// 握手成功后建立的会话（fetch/push 期间复用，过期需重握手）。
 class LanSession {
-  LanSession({required this.peerDeviceId, required this.expiresAtMs});
+  LanSession({
+    required this.peerDeviceId,
+    required this.expiresAtMs,
+    required this.peerSupportsAcks,
+  });
 
   final String peerDeviceId;
   final int expiresAtMs;
+
+  /// 对端 hello 是否携带 `acks:1`（Phase 2.3 fileAck 能力协商）。
+  /// 旧 peer（无该字段）→ false → 本端不回 ack、不等待 ack，维持 Phase 2.2 语义。
+  final bool peerSupportsAcks;
 }
+
+/// 测试 seam：自定义 hello 帧（模拟旧 peer 缺 acks 字段等）。
+typedef LanHelloBuilder = Map<String, dynamic> Function({
+  required String deviceId,
+  required String nonce,
+});
 
 /// A3 双向挑战握手（Cloud-backed LAN acceleration）。
 ///
@@ -69,11 +85,17 @@ class LanHandshakeService {
   LanHandshakeService({
     required CloudRepository cloudRepository,
     String Function()? nonceGenerator,
+    LanDiagnostics? diagnostics,
+    @visibleForTesting LanHelloBuilder? helloBuilder,
   })  : _cloud = cloudRepository,
-        _nonceGenerator = nonceGenerator ?? _defaultNonce;
+        _nonceGenerator = nonceGenerator ?? _defaultNonce,
+        _diagnostics = diagnostics,
+        _helloBuilder = helloBuilder;
 
   final CloudRepository _cloud;
   final String Function() _nonceGenerator;
+  final LanDiagnostics? _diagnostics;
+  final LanHelloBuilder? _helloBuilder;
   final Set<String> _seenNonces = <String>{};
   final List<String> _seenNonceOrder = <String>[];
   static const int _maxSeenNonces = 1024;
@@ -153,12 +175,12 @@ class LanHandshakeService {
     try {
       data = await _cloud.getLanTicket(deviceId: deviceId);
     } catch (e) {
-      throw LanHandshakeException('ticketRejected', 'failed to fetch LAN ticket: $e');
+      throw _reject('ticketRejected', 'failed to fetch LAN ticket: $e');
     }
     final ticket = data['ticket'];
     final expiresAtMs = data['expiresAtMs'];
     if (ticket is! String || ticket.isEmpty || expiresAtMs is! int) {
-      throw LanHandshakeException('ticketRejected', 'server returned malformed LAN ticket');
+      throw _reject('ticketRejected', 'server returned malformed LAN ticket');
     }
     return LanTicket(ticket, expiresAtMs);
   }
@@ -168,13 +190,13 @@ class LanHandshakeService {
     try {
       data = await _cloud.verifyLanTicket(ticket: ticket);
     } catch (e) {
-      throw LanHandshakeException('ticketRejected', 'ticket verification failed: $e');
+      throw _reject('ticketRejected', 'ticket verification failed: $e');
     }
     final userId = data['userId'];
     final deviceId = data['deviceId'];
     final expiresAtMs = data['expiresAtMs'];
     if (userId is! String || deviceId is! String || expiresAtMs is! int) {
-      throw LanHandshakeException(
+      throw _reject(
         'ticketRejected',
         'server returned malformed verification result',
       );
@@ -203,37 +225,48 @@ class LanHandshakeService {
     final connection = existingConnection ??
         LanFrameConnection(socket, timeout: frameTimeout);
 
-    Map<String, dynamic> helloMessage() => <String, dynamic>{
-          'v': LanConstants.lanProtoVersion,
-          'type': 'hello',
-          'deviceId': deviceId,
-          'nonce': myNonce,
-        };
+    Map<String, dynamic> helloMessage() {
+      final builder = _helloBuilder;
+      if (builder != null) {
+        return builder(deviceId: deviceId, nonce: myNonce);
+      }
+      return <String, dynamic>{
+        'v': LanConstants.lanProtoVersion,
+        'type': 'hello',
+        'deviceId': deviceId,
+        'nonce': myNonce,
+        // 可忽略字段：旧 peer 忽略多余字段（Phase 2.3 fileAck 能力协商）。
+        'acks': LanConstants.lanCapabilityAcks,
+      };
+    }
 
     String peerNonce;
     String peerDeviceId;
+    bool peerSupportsAcks = false;
     try {
       if (isInitiator) {
         connection.write(helloMessage());
         final peerHello = await connection.read();
         peerNonce = _stringField(peerHello, 'nonce');
         peerDeviceId = _stringField(peerHello, 'deviceId');
+        peerSupportsAcks = peerHello['acks'] == LanConstants.lanCapabilityAcks;
       } else {
         final peerHello = await connection.read();
         peerNonce = _stringField(peerHello, 'nonce');
         peerDeviceId = _stringField(peerHello, 'deviceId');
+        peerSupportsAcks = peerHello['acks'] == LanConstants.lanCapabilityAcks;
         connection.write(helloMessage());
       }
     } on LanProtocolException catch (e) {
-      throw LanHandshakeException('protocol', 'hello exchange failed: ${e.message}');
+      throw _reject('protocol', 'hello exchange failed: ${e.message}');
     }
     if (!claimNonce(peerNonce)) {
-      throw LanHandshakeException('replayNonce', 'peer nonce replayed: $peerNonce');
+      throw _reject('replayNonce', 'peer nonce replayed: $peerNonce');
     }
 
     final myTicket = await fetchTicket(deviceId: deviceId);
     if (myTicket.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
-      throw LanHandshakeException('expiredTicket', 'own ticket already expired');
+      throw _reject('expiredTicket', 'own ticket already expired');
     }
 
     final initiatorNonce = isInitiator ? myNonce : peerNonce;
@@ -279,12 +312,14 @@ class LanHandshakeService {
     } on LanHandshakeException {
       rethrow;
     } on LanProtocolException catch (e) {
-      throw LanHandshakeException('protocol', 'auth exchange failed: ${e.message}');
+      throw _reject('protocol', 'auth exchange failed: ${e.message}');
     }
 
+    _diagnostics?.handshakeSuccess++;
     return LanSession(
       peerDeviceId: peerVerified.deviceId,
       expiresAtMs: peerVerified.expiresAtMs,
+      peerSupportsAcks: peerSupportsAcks,
     );
   }
 
@@ -306,14 +341,14 @@ class LanHandshakeService {
       ticket: peerTicket,
       proof: peerProof,
     )) {
-      throw LanHandshakeException('wrongAccount', 'peer proof does not match our account key');
+      throw _reject('wrongAccount', 'peer proof does not match our account key');
     }
     final verified = await verifyTicket(peerTicket);
     if (verified.userId != userId) {
-      throw LanHandshakeException('wrongAccount', 'peer belongs to a different account');
+      throw _reject('wrongAccount', 'peer belongs to a different account');
     }
     if (verified.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
-      throw LanHandshakeException('expiredTicket', 'peer ticket expired');
+      throw _reject('expiredTicket', 'peer ticket expired');
     }
     return verified;
   }
@@ -324,5 +359,11 @@ class LanHandshakeService {
       throw LanProtocolException('missing or invalid field: $key');
     }
     return value;
+  }
+
+  /// 握手拒绝统一出口：计数（按 reason）后抛 [LanHandshakeException]。
+  Never _reject(String reason, String message) {
+    _diagnostics?.handshakeRejected++;
+    throw LanHandshakeException(reason, message);
   }
 }

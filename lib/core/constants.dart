@@ -19,6 +19,10 @@ class AppConstants {
   static const int maxFileBytes = 50 * 1024 * 1024; // 明文上限
   static const int fileChunkSize = 1024 * 1024; // 流式加解密/哈希 IO 块
   static const int localFileCacheMaxBytes = 1536 * 1024 * 1024; // 1.5GB
+  // 文件下载重下熔断（Phase 2.3）：坏 artifact 连续失败上限与冷却时长。
+  // 只拦「永久毒行」的跨 tick 自动重下，瞬态网络失败不受影响。
+  static const int fileBreakerMaxFailures = 3;
+  static const Duration fileBreakerCooldown = Duration(seconds: 60);
 }
 
 /// 图片文件扩展名，与 macOS/Windows 原生通道保持一致。
@@ -82,5 +86,34 @@ class LanConstants {
   static const int lanMaxFileChunks = 128;
 
   /// mDNS 能力位：t=文本 / i=图片 / f=文件。仅展示/未来分流用，不参与认证。
+
+  /// hello 能力协商：`acks: 1` 表示支持 fileAck 帧（Phase 2.3）。
+  /// 旧 peer 忽略多余字段；版本仍 1，原生插件零改动。
+  static const int lanCapabilityAcks = 1;
+
+  /// text/image push 后等待 fileAck 的超时（对端帧到达即回 ack）。
+  static const Duration lanAckTimeoutText = Duration(milliseconds: 500);
+
+  /// file push 后等待 fileAck 的超时（对端 `.enc` 原子落盘后才回 ack）。
+  static const Duration lanAckTimeoutFile = Duration(seconds: 5);
+
+  /// ack-wait 获取 per-session reader slot 的有界等待上限。
+  /// fetchLatest 遇 busy slot 跳过不排队（否则 300ms 超时会杀死文件 ack-wait）。
+  static const Duration lanAckSlotWait = Duration(milliseconds: 200);
+
+  /// push 重试基础退避：1s/2s/4s 指数（attempts=1 起）。
+  static const Duration lanPushRetryBaseDelay = Duration(seconds: 1);
+
+  /// push 重试最大次数（超过 give-up 并删 outbox，拉取 backstop + Cloud 兜底）。
+  static const int lanPushMaxAttempts = 3;
+
+  /// 待确认表硬 TTL：超过即放弃（拉取 backstop 收敛，无需无限重试）。
+  static const Duration lanPendingAckTtl = Duration(seconds: 30);
+
+  /// 待确认表最大条目数（LRU 淘汰）。
+  static const int lanPendingAckMaxEntries = 64;
+
+  /// 重试 sweeper 周期（start 后约 1s 先 drain 一次）。
+  static const Duration lanRetrySweepInterval = Duration(seconds: 1);
   static const String lanCaps = 't/i/f';
 }
