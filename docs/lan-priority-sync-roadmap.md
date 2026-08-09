@@ -11,6 +11,7 @@
   - 基础层 ①-⑤：`e85b60f`（常量/证书/TLS/协议）、`2cf5333`（server 票据 2 端点）、`828c6fb`（cloud additive）、`e0fbfeb`（握手服务）、`e4d0635`（双端原生插件）
   - 集成层 ⑥-⑨：`d254708`（发现/传输/管理器）、`40bc84b`（Provider LAN-first+push）、`f9d6260`（文件相位锁修复）、`0bdc2a1`（设置开关）
   - 整改：`5ae7b85`（FakeAsync 回归测试）、`2b8da67`（initialize 不阻塞 LAN 启动）
+- Android 插件修复提交：`16f0e58`（stopAll 拆分 stopAdvertisement/stopDiscovery）、`b6eec75`（修复 Phase 2.1 遗留 4 处编译错误）
 - 当前工作树：干净。
 
 ## 已完成的 Phase 2.1 内容
@@ -46,14 +47,15 @@
 
 ### 明确未覆盖 / 前置（非阻塞）
 
-1. **[置信度 88] Android 原生缺陷**：`LanNetworkPlugin.kt` `browse()` 内调用 `stopAll()` 会注销刚注册的 mDNS 广告 → Android-Android 互相发现不到、Android-macOS 单向。建议 **2.2 前修复**（将 stopAll 拆为「停广告/停发现」两个原语）。
-2. **macOS 双实例实证**：需双 bundle ID 构建 + 真实 Wi-Fi + 双 GUI 实例，当前环境未做；LAN 端到端真实链路（<500ms push）仍待实证。
-3. **生产部署**：`LAN_TICKET_SECRET` 需写入环境变量（否则重启后票据失效，客户端自动重取，无感）。
-4. **Android 真机**：权限降级、后台保活、锁屏、网络切换，归 2.4。
+1. **Android 插件缺陷已修复**（`16f0e58`/`b6eec75`，终审通过）：browse/advertise 解耦、stopAll 语义保留、并修复 Phase 2.1 遗留 4 处编译错误（该 Kotlin 文件此前从未编译通过；gradle 全量编译 + flutter build apk 通过）。
+2. **Android 真机 mDNS 双向可见性**（Android-Android / Android-macOS、advertise+browse 共存）未在设备实测 → 归 2.4。
+3. **macOS 双实例实证**：需双 bundle ID 构建 + 真实 Wi-Fi + 双 GUI 实例，当前环境未做；LAN 端到端真实链路（<500ms push）仍待实证。
+4. **生产部署**：`LAN_TICKET_SECRET` 需写入环境变量（否则重启后票据失效，客户端自动重取，无感）。
+5. **Android 真机**：权限降级、后台保活、锁屏、网络切换，归 2.4。
 
 ## Phase 2.2 预定范围（LAN 文件 ≤15MiB）
 
-1. 先修复 Android `LanNetworkPlugin.kt` browse() 注销广告缺陷。
+1. Android 插件缺陷已在 2.1 收尾修复；真机验证归 2.4。
 2. 帧上限预留已设计（16MiB），LAN 文件传输复用同一帧协议与握手。
 3. 文件推送/拉取 + artifact 处理；保留 Cloud 权威与 history 唯一性（operationId/ACK）。
 4. 诊断计数字段（2.3 预留）继续埋点。
