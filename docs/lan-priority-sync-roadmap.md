@@ -1,7 +1,7 @@
 # ClipFlow 局域网优先同步改造交接记录
 
 > 最后更新：2026-08-09（Asia/Shanghai）
-> 当前状态：Phase 2.1（文本/图片 LAN 加速）已完成并验收通过；未部署到生产。
+> 当前状态：Phase 2.2（LAN 文件 ≤15MiB）已完成并验收通过；未部署到生产。
 
 ## 当前 Git 状态
 
@@ -12,6 +12,7 @@
   - 集成层 ⑥-⑨：`d254708`（发现/传输/管理器）、`40bc84b`（Provider LAN-first+push）、`f9d6260`（文件相位锁修复）、`0bdc2a1`（设置开关）
   - 整改：`5ae7b85`（FakeAsync 回归测试）、`2b8da67`（initialize 不阻塞 LAN 启动）
 - Android 插件修复提交：`16f0e58`（stopAll 拆分 stopAdvertisement/stopDiscovery）、`b6eec75`（修复 Phase 2.1 遗留 4 处编译错误）
+- Phase 2.2 提交（4 个，`97a5dca` ~ `d8f8209`）：`97a5dca`（常量+enc_file_name）、`6fa8c8d`（fileStart/fileChunk 分块帧）、`4460234`（LanSyncManager 文件 push/收）、`d8f8209`（Provider 本地 .enc 优先+Cloud 兜底）
 - 当前工作树：干净。
 
 ## 已完成的 Phase 2.1 内容
@@ -26,6 +27,15 @@
 6. 设置页「局域网加速」开关（默认开）+ Android 权限（NEARBY_WIFI_DEVICES 运行时请求，拒绝降级）+ macOS Info.plist（NSLocalNetworkUsageDescription/NSBonjourServices）。
 7. 服务端新增 2 个端点（只增不改）：取票/校验；`LAN_TICKET_SECRET` 支持 env 或启动随机。
 
+## 已完成的 Phase 2.2 内容（LAN 文件 ≤15MiB）
+
+1. 分块文件帧：`fileStart`/`fileChunk`（1MiB 分块、`lanMaxFileChunks=128`），`lan_protocol` 编解码与 16MiB 帧上限零改动；半途失败删 `.part` 安全丢弃回 Cloud。
+2. 元数据最小化：`hash/fileSize/source_*/timestamp/history_id` 明文；`marker` 随行；**fileName 加密为 `enc_file_name`**；mimeType 省略走 Cloud 兜底。
+3. `LanSyncManager` 注入 `LocalFileStore`：push 从 artifact 流式读密文分块发送，接收端原子落盘 `.enc` 后才触发下载。
+4. Provider `_runFileDownload` 本地 `.enc` 优先 + Cloud 兜底（同一 historyId，明文 SHA-256/size 校验，坏 `.enc` 删后回 Cloud）。
+5. 幂等/防回声：historyId=operationId=artifactId；`_knownHistoryIds` + `_fileDownloads` 双层防重 + `markAsDownloadedFileHash` + `_suppressWrittenFileEcho`；≤15MiB 走 LAN、>15MiB 走 Cloud；push 不回推来源、绝不 rethrow。
+6. 服务端零改动；caps 加 `f` 位。
+
 ## 明确尚未实现
 
 - Phase 2.2：LAN 文件传输（≤15MiB）；
@@ -34,11 +44,11 @@
 - Phase 2.5：独立 RFC（LAN-only/durable cursor/OSS/6GB）；
 - mDNS 广播黑名单/白名单细节已按设计实现。
 
-## 当前验证结果（Phase 2.1，2026-08-09）
+## 当前验证结果（Phase 2.2，2026-08-09）
 
 ### 已通过
 
-- `flutter test` 全量：**388/388**（含 LAN 协议/TLS/握手/管理器/Provider LAN-first/文件相位锁回归）。
+- `flutter test` 全量：**414/414**（含 LAN 协议/TLS/握手/管理器/Provider LAN-first/文件相位锁/文件分块帧回归）。
 - `flutter test test/screens/cloud_pull_screen_test.dart`：4/4 无挂起（此前 FakeAsync 挂起已修复）。
 - `flutter analyze`：0 error（11 warning + 67 info，均为基线既有）。
 - `server/smoke-test.sh`：**SMOKE TEST PASSED**（27 组，含 LAN 取票/校验/设备移除 403）。
@@ -52,14 +62,14 @@
 3. **macOS 双实例实证**：需双 bundle ID 构建 + 真实 Wi-Fi + 双 GUI 实例，当前环境未做；LAN 端到端真实链路（<500ms push）仍待实证。
 4. **生产部署**：`LAN_TICKET_SECRET` 需写入环境变量（否则重启后票据失效，客户端自动重取，无感）。
 5. **Android 真机**：权限降级、后台保活、锁屏、网络切换，归 2.4。
+6. **低置信防御缺口**（置信度 40，2.3 处理）：LAN 行 hash 与 artifact 不符时可能反复重下，建议 2.3 加熔断。
 
-## Phase 2.2 预定范围（LAN 文件 ≤15MiB）
+## Phase 2.3 预定范围（LAN 可靠性/ACK/指标）
 
-1. Android 插件缺陷已在 2.1 收尾修复；真机验证归 2.4。
-2. 帧上限预留已设计（16MiB），LAN 文件传输复用同一帧协议与握手。
-3. 文件推送/拉取 + artifact 处理；保留 Cloud 权威与 history 唯一性（operationId/ACK）。
-4. 诊断计数字段（2.3 预留）继续埋点。
-5. macOS 双实例实证补做。
+1. **必须前置**：真机双实例实证（≤15MiB push 交付 + 粘贴文件名正确 + >15MiB Cloud-only + 无回声环）；生产写入 `LAN_TICKET_SECRET`。
+2. fileAck 帧、持久化 LAN outbox、诊断计数（discovered/handshakeSuccess/handshakeRejected/lanFetchHit/lanFetchMiss/pushSent/pushReceived/fallbackReason）埋点消费。
+3. LAN 行 hash 与 artifact 不符的重下熔断。
+4. macOS 双实例实证补做。
 
 ## 重要约束
 
