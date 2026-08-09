@@ -33,6 +33,7 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var context: Context
     private var nsdManager: NsdManager? = null
     private var registeredServiceInfo: NsdServiceInfo? = null
+    private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var eventSink: EventChannel.EventSink? = null
     private val serviceType = "_clipflow._tcp."
@@ -111,9 +112,9 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             serviceName = deviceId
             serviceType = this@LanNetworkPlugin.serviceType
             setPort(port)
-            setAttribute("proto", "1".toByteArray())
-            setAttribute("device", deviceId.toByteArray())
-            setAttribute("caps", caps.toByteArray())
+            setAttribute("proto", "1")
+            setAttribute("device", deviceId)
+            setAttribute("caps", caps)
         }
         val registrationListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(info: NsdServiceInfo) {
@@ -129,6 +130,7 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
             override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {}
         }
+        this.registrationListener = registrationListener
         try {
             manager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
         } catch (e: SecurityException) {
@@ -207,9 +209,10 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private fun stopAdvertisement() {
         val manager = nsdManager ?: return
         try {
-            registeredServiceInfo?.let { manager.unregisterService(it) }
+            registrationListener?.let { manager.unregisterService(it) }
         } catch (_: Exception) {
         }
+        registrationListener = null
         registeredServiceInfo = null
     }
 
