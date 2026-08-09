@@ -8,11 +8,78 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../core/constants.dart';
 import '../repositories/cloud_repository.dart';
 import '../services/cloudbase_service.dart';
+import 'lan_diagnostics.dart';
 import 'lan_handshake_service.dart';
 import 'lan_protocol.dart';
 import 'lan_tls.dart';
 
-/// 会话级传输状态（内部结构：socket + 复用帧连接）。
+/// push/pushFile 的交付结果（Phase 2.3 ACK）。
+enum LanPushResult {
+  /// 对端已确认（支持 acks 且收到匹配 fileAck）；或不支持 acks 的旧 peer
+  /// 写后即返回（Phase 2.2 语义）。
+  delivered,
+
+  /// 写帧成功但未在超时内收到匹配 fileAck（或会话丢失）→ 待确认表重试。
+  pending,
+
+  /// 无该 peer 的 initiator 会话（静默跳过，与 Phase 2.2 一致）。
+  noSession,
+}
+
+/// 构造 fileAck 帧：只携带 `historyId`（= operationId，非敏感）与 `status:'ok'`。
+/// 红线：不含 userId/密码/token/K_lan/salt/指纹/文件名明文等任何敏感字段。
+Map<String, dynamic> buildFileAckFrame(String historyId) {
+  return <String, dynamic>{
+    'v': LanConstants.lanProtoVersion,
+    'type': 'fileAck',
+    'historyId': historyId,
+    'status': 'ok',
+  };
+}
+
+/// 判定帧是否为匹配 [historyId] 的 fileAck（status == 'ok'）。
+/// 不匹配 / status 非 ok / 非 fileAck → 协议违规（调用方应断会话自愈）。
+bool isMatchingFileAck(Map<String, dynamic> frame, String historyId) {
+  return frame['type'] == 'fileAck' &&
+      frame['historyId'] == historyId &&
+      frame['status'] == 'ok';
+}
+
+/// 会话级 reader slot：同一时刻只允许一个读方（fetchLatest / ack-wait）。
+///
+/// - fetchLatest 用 [tryAcquire]：busy 立即返回 false，跳过该 peer 本轮
+///   （绝不排队、绝不 dropSession——否则 300ms 超时会把文件 ack-wait 杀死）；
+/// - ack-wait 用有界 [acquire]（≤ lanAckSlotWait），超时 → pending 重试。
+class LanReaderSlot {
+  bool _busy = false;
+
+  bool get busy => _busy;
+
+  /// 非阻塞 try-acquire；成功返回 true。
+  bool tryAcquire() {
+    if (_busy) return false;
+    _busy = true;
+    return true;
+  }
+
+  /// 有界等待获取；[timeout] 为 null 时等价 [tryAcquire]。
+  Future<bool> acquire({Duration? timeout}) async {
+    if (tryAcquire()) return true;
+    if (timeout == null) return false;
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      if (tryAcquire()) return true;
+    }
+    return false;
+  }
+
+  void release() {
+    _busy = false;
+  }
+}
+
+/// 会话级传输状态（内部结构：socket + 复用帧连接 + 读串行化 slot）。
 ///
 /// `LanFrameConnection` 必须与握手共用同一实例：`Socket` 是单订阅流，
 /// 握手结束后不能在同一个 socket 上再创建新的读取器。
@@ -23,6 +90,7 @@ class _LanSession {
     required this.socket,
     required this.connection,
     required this.isInitiator,
+    required this.peerSupportsAcks,
   });
 
   final String peerDeviceId;
@@ -30,6 +98,13 @@ class _LanSession {
   final Socket socket;
   final LanFrameConnection connection;
   final bool isInitiator;
+
+  /// 对端 hello 是否携带 `acks:1`（Phase 2.3）。旧 peer → false →
+  /// 本端不回 ack、不等待 ack（Phase 2.2 写后即返回语义）。
+  final bool peerSupportsAcks;
+
+  /// 读串行化：fetchLatest 与 ack-wait 互斥（单订阅流硬约束）。
+  final LanReaderSlot readerSlot = LanReaderSlot();
 }
 
 /// 单会话文件接收状态机：`fileStart`/`fileChunk` 帧校验 + 流式落盘。
@@ -250,12 +325,15 @@ Future<void> writeFileFrames({
 class LanTransport {
   LanTransport({
     LanHandshakeService? handshakeService,
+    LanDiagnostics? diagnostics,
     DateTime Function()? now,
   })  : _handshake =
-            handshakeService ?? LanHandshakeService(cloudRepository: CloudRepository(CloudBaseService())),
+            handshakeService ?? LanHandshakeService(cloudRepository: CloudRepository(CloudBaseService()), diagnostics: diagnostics),
+        _diagnostics = diagnostics,
         _now = now ?? DateTime.now;
 
   final LanHandshakeService _handshake;
+  final LanDiagnostics? _diagnostics;
   final DateTime Function() _now;
   SecureServerSocket? _server;
   final Map<String, _LanSession> _initiatorSessions = {};
@@ -360,16 +438,30 @@ class LanTransport {
           )
           .timeout(LanConstants.lanHandshakeTimeout);
       sessionPeerId = session.peerDeviceId;
+      final peerSupportsAcks = session.peerSupportsAcks;
       _responderSessions[sessionPeerId] = _LanSession(
         peerDeviceId: session.peerDeviceId,
         expiresAtMs: session.expiresAtMs,
         socket: socket,
         connection: connection,
         isInitiator: false,
+        peerSupportsAcks: peerSupportsAcks,
       );
       fileReceiver = LanFileReceiver(
         sink: fileSink,
-        onComplete: (row, encPath) => onFilePushReceived?.call(row, encPath),
+        onComplete: (row, encPath) {
+          // `.enc` 原子落盘完成 → 通知下载 → 对支持 acks 的 peer 回 fileAck
+          //（文件 ack 语义必须是「真实落盘」，不能是「帧到达」）。
+          onFilePushReceived?.call(row, encPath);
+          if (peerSupportsAcks) {
+            try {
+              connection.write(buildFileAckFrame(row['history_id'] as String? ?? ''));
+              _diagnostics?.ackSent++;
+            } catch (e) {
+              debugPrint('[LAN-TRANSPORT] fileAck write failed: $e');
+            }
+          }
+        },
       );
       // 会话帧循环：latestRequest → 应答；push → 通知；fileStart/fileChunk
       // → 文件分块重组；未知帧 → 断链。文件帧违规 → 中止 + 断会话。
@@ -386,6 +478,19 @@ class LanTransport {
           final row = frame['row'];
           if (row is Map<String, dynamic>) {
             onPushReceived?.call(row);
+            // 仅对支持 acks 的新 peer 回 fileAck；旧 initiator（hello 无 acks）
+            // 不发，否则其 fetchLatest 会读到滞留 fileAck 误判 latestResponse
+            // 类型不符 → 无谓断链（老兼容缺口必须堵住）。
+            if (session.peerSupportsAcks) {
+              try {
+                connection.write(
+                  buildFileAckFrame(row['history_id'] as String? ?? ''),
+                );
+                _diagnostics?.ackSent++;
+              } catch (e) {
+                debugPrint('[LAN-TRANSPORT] fileAck write failed: $e');
+              }
+            }
           }
         } else if (type == 'fileStart') {
           if (!fileReceiver.handleFileStart(frame)) break;
@@ -456,6 +561,7 @@ class LanTransport {
         socket: socket,
         connection: connection,
         isInitiator: true,
+        peerSupportsAcks: session.peerSupportsAcks,
       );
     } catch (e) {
       socket.destroy();
@@ -473,9 +579,14 @@ class LanTransport {
   ///
   /// peer 无内容时返回 null（会话保持健康）；超时/帧错误会丢弃该会话并
   /// 返回 null（调用方无需区分——下一轮会自动重连）。
+  ///
+  /// 读串行化：ack-wait 占用 reader slot 时**直接跳过本轮**（返回 null），
+  /// 绝不排队、绝不 dropSession——否则 fetchLatest 的 300ms 超时会杀死
+  /// 文件 ack-wait（15MiB 文件永无法经 LAN 交付，轮询 500ms 必杀）。
   Future<Map<String, dynamic>?> fetchLatest(String peerDeviceId) async {
     final session = _initiatorSessions[peerDeviceId];
     if (session == null) return null;
+    if (!session.readerSlot.tryAcquire()) return null; // busy：跳过该 peer
     try {
       session.connection.write(<String, dynamic>{
         'v': LanConstants.lanProtoVersion,
@@ -495,38 +606,64 @@ class LanTransport {
     } on SocketException {
       _dropInitiatorSession(peerDeviceId);
       return null;
+    } finally {
+      session.readerSlot.release();
     }
   }
 
-  /// 向 [peerDeviceId] 推送一行（写后即返回，无持久 ACK；2.3 再做 ACK）。
-  Future<void> push(String peerDeviceId, Map<String, dynamic> row) async {
+  /// 该 peer 的 initiator 会话是否支持 acks（hello 携带 `acks:1`）。
+  /// 旧 peer / 无会话 → false（Phase 2.2 写后即返回语义）。
+  bool supportsAcks(String peerDeviceId) =>
+      _initiatorSessions[peerDeviceId]?.peerSupportsAcks ?? false;
+
+  /// 向 [peerDeviceId] 推送一行。
+  ///
+  /// - 旧 peer（无 acks）：写后即返回 [LanPushResult.delivered]（Phase 2.2）；
+  /// - 新 peer：获取 reader slot（≤ lanAckSlotWait）→ 读 fileAck
+  ///   （text/image 超时 lanAckTimeoutText）→ 匹配 delivered / 超时 pending；
+  /// - 无会话 → [LanPushResult.noSession]（静默跳过）。
+  Future<LanPushResult> push(String peerDeviceId, Map<String, dynamic> row) async {
     final session = _initiatorSessions[peerDeviceId];
-    if (session == null) return;
+    if (session == null) return LanPushResult.noSession;
     try {
       session.connection.write(<String, dynamic>{
         'v': LanConstants.lanProtoVersion,
         'type': 'push',
         'row': row,
       });
+      _diagnostics?.pushSent++;
+      if (!session.peerSupportsAcks) {
+        return LanPushResult.delivered; // 旧 peer：写后即返回
+      }
+      return await _awaitFileAck(
+        session,
+        row['history_id'] as String? ?? '',
+        LanConstants.lanAckTimeoutText,
+      );
     } on LanProtocolException {
       _dropInitiatorSession(peerDeviceId);
+      return LanPushResult.pending;
     } on SocketException {
       _dropInitiatorSession(peerDeviceId);
+      return LanPushResult.pending;
     }
   }
 
   /// 向 [peerDeviceId] 推送文件密文：`fileStart` + N×`fileChunk`（1MiB 分块）。
   ///
-  /// 与 [push] 同为 best-effort（写后即返回，无 ACK）；帧错/网络错只断该
-  /// 会话。密文从 [encryptedPath] 流式读取，绝不整文件进内存。
-  Future<void> pushFile(
+  /// - 旧 peer（无 acks）：写后即返回 [LanPushResult.delivered]（Phase 2.2）；
+  /// - 新 peer：写帧阶段不占 reader slot（纯写，与 fetchLatest 的 write+read
+  ///   可安全交叠，TCP 保序）；仅最终 ack-read 占 slot，等待对端 `.enc` 原子
+  ///   落盘后的 fileAck（超时 lanAckTimeoutFile）。
+  /// - 帧错/网络错只断该会话。密文从 [encryptedPath] 流式读取，绝不整文件进内存。
+  Future<LanPushResult> pushFile(
     String peerDeviceId,
     Map<String, dynamic> row, {
     required String encryptedPath,
     required int encSize,
   }) async {
     final session = _initiatorSessions[peerDeviceId];
-    if (session == null) return;
+    if (session == null) return LanPushResult.noSession;
     try {
       await writeFileFrames(
         write: session.connection.write,
@@ -534,10 +671,56 @@ class LanTransport {
         encryptedPath: encryptedPath,
         encSize: encSize,
       );
+      _diagnostics?.pushSent++;
+      if (!session.peerSupportsAcks) {
+        return LanPushResult.delivered; // 旧 peer：写后即返回
+      }
+      return await _awaitFileAck(
+        session,
+        row['history_id'] as String? ?? '',
+        LanConstants.lanAckTimeoutFile,
+      );
     } on LanProtocolException {
       _dropInitiatorSession(peerDeviceId);
+      return LanPushResult.pending;
     } on SocketException {
       _dropInitiatorSession(peerDeviceId);
+      return LanPushResult.pending;
+    }
+  }
+
+  /// 等待匹配 fileAck：占 reader slot（≤ lanAckSlotWait）→ 读帧 → 判定。
+  /// 匹配 → delivered；超时 → pending（重试）；不匹配/协议错 → 断会话自愈。
+  Future<LanPushResult> _awaitFileAck(
+    _LanSession session,
+    String historyId,
+    Duration timeout,
+  ) async {
+    final acquired = await session.readerSlot.acquire(
+      timeout: LanConstants.lanAckSlotWait,
+    );
+    if (!acquired) return LanPushResult.pending;
+    try {
+      // 短超时用 Future.timeout 包裹 read()（LanFrameConnection 的 socket
+      // 超时视图在构造时固定为会话空闲超时，不能重建连接）。
+      final response = await session.connection.read().timeout(timeout);
+      if (isMatchingFileAck(response, historyId)) {
+        _diagnostics?.ackReceived++;
+        return LanPushResult.delivered;
+      }
+      // 协议违规（historyId 不匹配 / status 非 ok / 其它帧类型）→ 断会话自愈。
+      _dropInitiatorSession(session.peerDeviceId);
+      return LanPushResult.pending;
+    } on TimeoutException {
+      return LanPushResult.pending;
+    } on LanProtocolException {
+      _dropInitiatorSession(session.peerDeviceId);
+      return LanPushResult.pending;
+    } on SocketException {
+      _dropInitiatorSession(session.peerDeviceId);
+      return LanPushResult.pending;
+    } finally {
+      session.readerSlot.release();
     }
   }
 

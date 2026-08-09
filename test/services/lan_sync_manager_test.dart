@@ -120,10 +120,18 @@ class _FakeTransport extends LanTransport {
     return fetchResults[peerDeviceId] ?? Future.value(null);
   }
 
+  LanPushResult pushResult = LanPushResult.delivered;
+  LanPushResult pushFileResult = LanPushResult.delivered;
+  bool peerSupportsAcksResult = false;
+
   @override
-  Future<void> push(String peerDeviceId, Map<String, dynamic> row) async {
+  bool supportsAcks(String peerDeviceId) => peerSupportsAcksResult;
+
+  @override
+  Future<LanPushResult> push(String peerDeviceId, Map<String, dynamic> row) async {
     pushedTo.add(peerDeviceId);
     pushedRows.add(row);
+    return pushResult;
   }
 
   final List<String> pushedFilesTo = [];
@@ -132,7 +140,7 @@ class _FakeTransport extends LanTransport {
   final List<int> pushedFileSizes = [];
 
   @override
-  Future<void> pushFile(
+  Future<LanPushResult> pushFile(
     String peerDeviceId,
     Map<String, dynamic> row, {
     required String encryptedPath,
@@ -142,6 +150,7 @@ class _FakeTransport extends LanTransport {
     pushedFileRows.add(row);
     pushedFilePaths.add(encryptedPath);
     pushedFileSizes.add(encSize);
+    return pushFileResult;
   }
 
   @override
