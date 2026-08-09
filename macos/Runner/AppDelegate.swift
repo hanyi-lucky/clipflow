@@ -7,7 +7,27 @@ class AppDelegate: FlutterAppDelegate {
   override func applicationDidFinishLaunching(_ notification: Notification) {
     // 注册图片剪切板原生插件（必须放在 super 之前，super 之后的代码不会执行）
     registerImagePlugin()
+    // 注册 LAN 网络原生插件（mDNS 广告/浏览）
+    registerLanNetworkPlugin()
     super.applicationDidFinishLaunching(notification)
+  }
+
+  /// 注册 LAN 网络原生插件：与 ImageClipboardPlugin 同款多级兜底获取 FlutterViewController。
+  private func registerLanNetworkPlugin() {
+    if let controller = mainFlutterWindow?.contentViewController as? FlutterViewController {
+      doRegisterLan(controller)
+      return
+    }
+    for window in NSApp.windows {
+      if let controller = window.contentViewController as? FlutterViewController {
+        doRegisterLan(controller)
+        return
+      }
+    }
+  }
+
+  private func doRegisterLan(_ controller: FlutterViewController) {
+    LanNetworkPlugin().register(with: controller.engine.binaryMessenger)
   }
 
   /// 注册图片剪切板原生插件：直接绑定 engine 的 binaryMessenger，

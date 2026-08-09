@@ -28,5 +28,11 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ClipFlow 需要访问本地网络，以便在同一 Wi-Fi 下与你的其他设备快速同步剪切板内容</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_clipflow._tcp</string>
+	</array>
 </dict>
 </plist>

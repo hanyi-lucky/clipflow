@@ -1,8 +1,18 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- LAN 加速（Phase 2.1）：mDNS 发现所需权限。NsdManager 不需要
+         CHANGE_WIFI_MULTICAST_STATE/MulticastLock；Android 13+ 运行时需
+         NEARBY_WIFI_DEVICES（neverForLocation，仅用于局域网设备发现，
+         不用于定位）。 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu"/>
     <application
         android:label="ClipFlow"
         android:name="${applicationName}"
