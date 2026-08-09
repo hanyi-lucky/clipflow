@@ -406,12 +406,13 @@ class ClipboardProvider extends ChangeNotifier
     // Register lifecycle observer
     WidgetsBinding.instance.addObserver(this);
 
-    // LAN 加速：默认按设置开启；start 内部失败只降级禁用，不阻塞解锁。
-    // 必须在 _startSyncLoop 之前完成，保证首次 _performDownload 时 LAN
-    // 已就绪或已禁用。
+    // LAN 加速：默认按设置开启；启动不阻塞解锁（fire-and-forget）。
+    // 首次 _performDownload 时若 LAN 尚未就绪，走 Cloud 兜底，正确性不变；
+    // start 内部失败只降级禁用。setLanAcceleration(true) 仍 await，
+    // 属用户主动操作（设置页开关），不在 widget 测试启动路径上。
     _lanUserId = userId ?? storage.userId ?? 'user_$deviceId';
     if (_settingsProvider?.lanAcceleration ?? true) {
-      await _startLanManager();
+      unawaited(_startLanManager());
     }
 
     // Only start sync loop if background sync is enabled (or no settings yet)
