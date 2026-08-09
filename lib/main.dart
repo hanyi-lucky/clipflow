@@ -11,25 +11,29 @@ import 'services/pinned_client.dart';
 import 'package:provider/provider.dart';
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
   // 版本/机型一次性加载，供设置页与崩溃上报共用
   final appInfo = await AppInfo.load();
   final crashReporter = CrashReporter.instance..init(appInfo: appInfo);
   unawaited(crashReporter.cacheDeviceModel());
   // 全局错误捕获：先上报、后保持默认行为（红屏照常 / PlatformDispatcher 返回 false）
   crashReporter.installGlobalHandlers();
+  // ensureInitialized 必须在 runZonedGuarded 同一 zone 内调用，
+  // 否则 debug 模式报 Zone mismatch（Binding 初始化 zone 与 runApp zone 不一致）。
   runZonedGuarded(
-    () => runApp(
-      MultiProvider(
-        providers: [
-          ChangeNotifierProvider(create: (_) => AuthProvider()),
-          ChangeNotifierProvider(create: (_) => SettingsProvider()),
-          ChangeNotifierProvider(create: (_) => ClipboardProvider()),
-          Provider<AppInfo>.value(value: appInfo),
-        ],
-        child: const _ClipFlowBootstrap(),
-      ),
-    ),
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
+      runApp(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider(create: (_) => AuthProvider()),
+            ChangeNotifierProvider(create: (_) => SettingsProvider()),
+            ChangeNotifierProvider(create: (_) => ClipboardProvider()),
+            Provider<AppInfo>.value(value: appInfo),
+          ],
+          child: const _ClipFlowBootstrap(),
+        ),
+      );
+    },
     (error, stack) => crashReporter.report(error, stack),
   );
 }

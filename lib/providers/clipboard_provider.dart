@@ -133,6 +133,11 @@ class ClipboardProvider extends ChangeNotifier
 
   /// LAN 加速门面（null = 禁用；生命周期随账户/Provider 收敛）。
   LanSyncManager? _lanManager;
+
+  /// 【实验性】纯 LAN 同步模式：内容上传/下载完全走 LAN，跳过云端内容读写。
+  /// 仅文本路径；握手票据仍走服务端。默认关闭（B 方案：代码保留 + 文档说明，
+  /// 设置页开关待下一轮接入）。已知局限：对端离线无兜底、历史仅本地、无删除/恢复。
+  static bool lanOnlyMode = false;
   final LanSyncManager? _injectedLanManager;
   String? _lanUserId;
 
@@ -424,6 +429,10 @@ class ClipboardProvider extends ChangeNotifier
     _monitor!.onContentSynced = _addSyncedToHistory;
     _monitor!.onImageChanged = _onImageClipboardChanged;
     _monitor!.onFilesChanged = _onFileClipboardChanged;
+    // 【临时实验】纯 LAN 模式：Android 原生监听路径也走 LAN（覆盖云端上传）。
+    if (lanOnlyMode) {
+      _monitor!.uploadOverride = _lanOnlyUploadText;
+    }
     _monitor!.loadState();
     // Forward monitor state changes to UI
     _monitor!.addListener(_onMonitorChanged);
@@ -1088,23 +1097,44 @@ class ClipboardProvider extends ChangeNotifier
     _setStatus(SyncStatus.syncing);
 
     try {
-      final serverId = await _syncCoordinator!.uploadContent(truncatedContent);
+      if (lanOnlyMode) {
+        // 实验：纯 LAN 上传——本地加密 + 直推 LAN peer + 本地历史（不写云端）。
+        final operationId = await _lanOnlyUploadText(truncatedContent);
+        if (operationId != null) {
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: operationId,
+              content: truncatedContent,
+              sourceDeviceId: _syncService!.deviceId,
+              sourceDeviceName: _syncService!.deviceName,
+              sourcePlatform: Platform.operatingSystem,
+              timestamp: DateTime.now(),
+              type: ContentType.text,
+            ),
+          );
+          _saveHistory();
+          notifyListeners();
+        }
+      } else {
+        final serverId =
+            await _syncCoordinator!.uploadContent(truncatedContent);
 
-      // 只有真正上传成功才创建本地历史记录（跳过从其他设备同步来的内容）
-      if (serverId != null) {
-        _historyService.addEntry(
-          ClipboardEntry(
-            id: serverId,
-            content: truncatedContent,
-            sourceDeviceId: _syncService!.deviceId,
-            sourceDeviceName: _syncService!.deviceName,
-            sourcePlatform: Platform.operatingSystem,
-            timestamp: DateTime.now(),
-            type: ContentType.text,
-          ),
-        );
-        _saveHistory();
-        notifyListeners();
+        // 只有真正上传成功才创建本地历史记录（跳过从其他设备同步来的内容）
+        if (serverId != null) {
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: serverId,
+              content: truncatedContent,
+              sourceDeviceId: _syncService!.deviceId,
+              sourceDeviceName: _syncService!.deviceName,
+              sourcePlatform: Platform.operatingSystem,
+              timestamp: DateTime.now(),
+              type: ContentType.text,
+            ),
+          );
+          _saveHistory();
+          notifyListeners();
+        }
       }
 
       _serverConnected = true;
@@ -1114,6 +1144,33 @@ class ClipboardProvider extends ChangeNotifier
       _serverConnected = false;
       _setStatus(SyncStatus.error);
     }
+  }
+
+  /// 【临时实验】纯 LAN 文本上传：本地加密 + 直推 LAN peer，返回 operationId。
+  /// 不写云端；由 Provider 上传路径与 ClipboardMonitor.uploadOverride 共用。
+  Future<String?> _lanOnlyUploadText(String content) async {
+    if (_syncService == null || _lanManager == null) return null;
+    final operationId = const Uuid().v4();
+    final prepared = await _syncService!.prepareContent(
+      content: content,
+      operationId: operationId,
+    );
+    if (prepared == null) return null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final op = SyncOperation(
+      operationId: operationId,
+      userId: _lanUserId ?? _storage?.userId ?? 'user_${_syncService!.deviceId}',
+      kind: prepared.kind,
+      state: SyncOperationState.pending,
+      dedupeKey: prepared.dedupeKey,
+      createdAtMs: now,
+      updatedAtMs: now,
+      attemptCount: 0,
+      nextAttemptAtMs: now,
+      payload: prepared.payload,
+    );
+    await _lanManager!.pushOperation(op);
+    return operationId;
   }
 
   /// 发送成功回执：`_syncTick` 后台 drain 重试与 dedupe 路径的发送成功
@@ -1316,6 +1373,14 @@ class ClipboardProvider extends ChangeNotifier
 
       // ② Cloud 权威兜底（每 tick 照常执行）：删除/恢复权威源 + 内容兜底。
       //    LAN 已交付的内容经 decodeCurrentClipboard 时间戳游标自然过滤。
+      //    实验纯 LAN 模式下跳过云端内容兜底（LAN 交付即完成）。
+      if (lanOnlyMode) {
+        if (lanDelivered) {
+          _consecutiveFailures = 0;
+          _serverConnected = true;
+          _setStatus(SyncStatus.connected);
+        }
+      } else {
       try {
         final result = await _syncCoordinator!.downloadLatestContent();
         await _applyDownloadResult(result);
@@ -1341,6 +1406,7 @@ class ClipboardProvider extends ChangeNotifier
             }
           }
         }
+      }
       }
     } finally {
       _downloadInFlight = false;

@@ -29,6 +29,10 @@ class ClipboardMonitor extends ChangeNotifier {
   MethodChannel? _androidChannel;
   LocalStorage? _storage;
 
+  /// 【临时实验】上传覆盖回调：非空时 syncClipboard 用它代替云端上传
+  /// （纯 LAN 模式由 Provider 注入：本地加密 + LAN 直推，返回 operationId）。
+  Future<String?> Function(String text)? uploadOverride;
+
   // New sync state
   static const int _maxIgnoreHashes = 10;
   final Set<String> _ignoreHashes = {};
@@ -266,11 +270,14 @@ class ClipboardMonitor extends ChangeNotifier {
       }
 
       // Upload
-      if (_syncCoordinator != null || _syncService != null) {
+      if (uploadOverride != null || _syncCoordinator != null ||
+          _syncService != null) {
         debugPrint('[SYNC] Uploading...');
-        final serverId = _syncCoordinator != null
-            ? await _syncCoordinator!.uploadContent(text)
-            : await _syncService!.uploadContent(text);
+        final serverId = uploadOverride != null
+            ? await uploadOverride!(text)
+            : (_syncCoordinator != null
+                ? await _syncCoordinator!.uploadContent(text)
+                : await _syncService!.uploadContent(text));
         debugPrint('[SYNC] Upload result: $serverId');
         if (serverId != null) {
           _lastHash = hash;

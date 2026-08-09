@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -36,6 +38,7 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var eventSink: EventChannel.EventSink? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val serviceType = "_clipflow._tcp."
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -119,11 +122,11 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val registrationListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(info: NsdServiceInfo) {
                 registeredServiceInfo = info
-                result.success(null)
+                mainHandler.post { result.success(null) }
             }
 
             override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
-                result.error("registerFailed", "mDNS register failed: $errorCode", null)
+                mainHandler.post { result.error("registerFailed", "mDNS register failed: $errorCode", null) }
             }
 
             override fun onServiceUnregistered(info: NsdServiceInfo) {}
@@ -149,45 +152,51 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         stopDiscovery()
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
-                result.success(null)
+                mainHandler.post { result.success(null) }
             }
 
             override fun onDiscoveryStopped(serviceType: String) {}
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                try {
-                    manager.resolveService(
-                        serviceInfo,
-                        object : NsdManager.ResolveListener {
-                            override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
-                                // 单个服务解析失败仅忽略，不中断发现
-                            }
-
-                            override fun onServiceResolved(info: NsdServiceInfo) {
-                                val txt = HashMap<String, String>()
-                                for ((key, value) in info.attributes) {
-                                    txt[key] = String(value)
+                mainHandler.post {
+                    try {
+                        manager.resolveService(
+                            serviceInfo,
+                            object : NsdManager.ResolveListener {
+                                override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+                                    // 单个服务解析失败仅忽略，不中断发现
                                 }
-                                eventSink?.success(
-                                    mapOf(
-                                        "name" to info.serviceName,
-                                        "host" to (info.host?.hostAddress ?: ""),
-                                        "port" to info.port,
-                                        "txt" to txt
-                                    )
-                                )
+
+                                override fun onServiceResolved(info: NsdServiceInfo) {
+                                    val txt = HashMap<String, String>()
+                                    for ((key, value) in info.attributes) {
+                                        txt[key] = String(value)
+                                    }
+                                    // NsdManager 回调运行在其内部 ServiceHandler 线程（ConnectivityThread），
+                                    // 必须 post 到主线程后再发 EventChannel 事件（Flutter JNI 要求主线程）。
+                                    mainHandler.post {
+                                        eventSink?.success(
+                                            mapOf(
+                                                "name" to info.serviceName,
+                                                "host" to (info.host?.hostAddress ?: ""),
+                                                "port" to info.port,
+                                                "txt" to txt
+                                            )
+                                        )
+                                    }
+                                }
                             }
-                        }
-                    )
-                } catch (e: Exception) {
-                    // resolve 异常仅忽略
+                        )
+                    } catch (e: Exception) {
+                        // resolve 异常仅忽略
+                    }
                 }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                result.error("browseFailed", "mDNS browse failed: $errorCode", null)
+                mainHandler.post { result.error("browseFailed", "mDNS browse failed: $errorCode", null) }
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
