@@ -113,6 +113,15 @@ class LanSyncManager {
   /// 诊断计数（本会话累计；LAN 启停/切账户清零）。
   LanDiagnostics get diagnostics => _diagnostics;
 
+  /// 测试专用：访问默认构造内部创建的真实 discovery/transport。
+  /// 组合测试据此验证「默认构造 → 子服务共享 manager 单例 diagnostics」
+  /// 的生产接线（Phase 2.3 修复：三处 `diagnostics: _diagnostics` 注入）。
+  @visibleForTesting
+  LanDiscoveryService get debugDiscovery => _discovery;
+
+  @visibleForTesting
+  LanTransport get debugTransport => _transport;
+
   /// 诊断 UI「清零」按钮。
   void resetDiagnostics() => _diagnostics.reset();
 

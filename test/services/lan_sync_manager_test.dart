@@ -173,6 +173,32 @@ class _NoopHandshake extends LanHandshakeService {
   _NoopHandshake() : super(cloudRepository: CloudRepository(CloudBaseService()));
 }
 
+/// 最小 fake Cloud：只覆写 LAN 票据两个方法，让真实握手组合路径
+/// （manager 默认构造的 handshake）无需连真实服务器即可完成。
+class _FakeCloudRepository extends CloudRepository {
+  _FakeCloudRepository({this.userId = 'user_test'}) : super(CloudBaseService());
+
+  final String userId;
+
+  @override
+  Future<Map<String, dynamic>> getLanTicket({required String deviceId}) async {
+    return <String, dynamic>{
+      'ticket': 'fake-ticket-$deviceId',
+      'expiresAtMs': DateTime.now().millisecondsSinceEpoch + 5 * 60 * 1000,
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> verifyLanTicket({required String ticket}) async {
+    final deviceId = ticket.replaceFirst('fake-ticket-', '');
+    return <String, dynamic>{
+      'userId': userId,
+      'deviceId': deviceId,
+      'expiresAtMs': DateTime.now().millisecondsSinceEpoch + 5 * 60 * 1000,
+    };
+  }
+}
+
 LanPeer _peer(String deviceId, {int port = 10000, DateTime? seen}) {
   return LanPeer(
     deviceId: deviceId,
@@ -1217,4 +1243,138 @@ void main() {
       await manager.stop();
     });
   });
+
+  group('默认构造组合接线（真实 discovery/handshake/transport 共享单例 diagnostics）', () {
+    test('默认构造不显式注入：discovered/handshakeSuccess/handshakeRejected/ackSent/ackReceived 计数经 manager.diagnostics 可见', () async {
+      final fakeCloud = _FakeCloudRepository();
+      final accountKey =
+          Uint8List.fromList(List<int>.generate(32, (i) => i));
+      // 默认构造：不注入 discovery/transport/handshakeService/diagnostics，
+      // 仅注入 CloudRepository（真实握手需要票据）与测试环境必需的
+      // fileStore/outboxStore（path_provider 在单测不可用）。
+      final manager = LanSyncManager(
+        cloudRepository: fakeCloud,
+        fileStore: fileStore,
+        outboxStore: LanOutboxStore(directoryPath: tempDir.path),
+        fetchTimeout: const Duration(milliseconds: 50),
+      );
+      final d = manager.diagnostics;
+      expect(d.discovered, 0);
+      expect(d.handshakeSuccess, 0);
+      expect(d.handshakeRejected, 0);
+      expect(d.ackSent, 0);
+      expect(d.ackReceived, 0);
+
+      // ① discovered：默认构造的 discovery 与 manager.diagnostics 同一实例。
+      manager.debugDiscovery.handleDiscoveryEvent(<String, dynamic>{
+        'name': 'Mac-B',
+        'host': '192.168.1.8',
+        'port': 45679,
+        'txt': <String, dynamic>{
+          'proto': '${LanConstants.lanProtoVersion}',
+          'device': 'device-b',
+          'caps': 't/i',
+        },
+      });
+      expect(d.discovered, 1);
+
+      // ② handshakeSuccess + ③ ackReceived：manager 默认构造的 transport
+      // 作为 initiator 连接真实 peer（真实 TLS + 真实握手 + fileAck 回执）。
+      final peerDiag = LanDiagnostics();
+      final peer = LanTransport(
+        handshakeService: LanHandshakeService(
+          cloudRepository: fakeCloud,
+          diagnostics: peerDiag,
+        ),
+      );
+      addTearDown(() => peer.closeAll());
+      final peerPort = await peer.startServer(
+        deviceId: 'device-b',
+        userId: 'user_test',
+        accountKey: accountKey,
+      );
+      await manager.debugTransport.connect(
+        peerDeviceId: 'device-b',
+        host: '127.0.0.1',
+        port: peerPort,
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: accountKey,
+      );
+      expect(d.handshakeSuccess, 1);
+
+      final row = <String, dynamic>{
+        'history_id': 'op-combo-1',
+        'type': 'text',
+        'content': 'encrypted',
+        'hash': 'hash-combo',
+        'source_device': 'device-a',
+        'source_device_name': 'Mac A',
+        'source_platform': 'macos',
+        'timestamp': 1,
+      };
+      final result = await manager.debugTransport.push('device-b', row);
+      expect(result, LanPushResult.delivered);
+      expect(d.ackReceived, 1);
+      expect(peerDiag.ackSent, 1);
+
+      // ④ handshakeRejected：manager 连接错账户 peer（不同 accountKey）被拒。
+      final wrongKey = Uint8List.fromList(List<int>.generate(32, (i) => i + 1));
+      final wrongPeer = LanTransport(
+        handshakeService: LanHandshakeService(
+          cloudRepository: fakeCloud,
+          diagnostics: LanDiagnostics(),
+        ),
+      );
+      addTearDown(() => wrongPeer.closeAll());
+      final wrongPort = await wrongPeer.startServer(
+        deviceId: 'device-x',
+        userId: 'user_test',
+        accountKey: wrongKey,
+      );
+      await expectLater(
+        manager.debugTransport.connect(
+          peerDeviceId: 'device-x',
+          host: '127.0.0.1',
+          port: wrongPort,
+          userId: 'user_test',
+          deviceId: 'device-a',
+          accountKey: accountKey,
+        ),
+        throwsA(isA<LanHandshakeException>()),
+      );
+      expect(d.handshakeRejected, 1);
+
+      // ⑤ ackSent：manager 默认构造的 transport 作为 responder，收到
+      // initiator 的 push 帧后回 fileAck（计数落在 manager.diagnostics）。
+      final initiatorDiag = LanDiagnostics();
+      final initiator = LanTransport(
+        handshakeService: LanHandshakeService(
+          cloudRepository: fakeCloud,
+          diagnostics: initiatorDiag,
+        ),
+      );
+      addTearDown(() => initiator.closeAll());
+      final managerPort = await manager.debugTransport.startServer(
+        deviceId: 'device-a',
+        userId: 'user_test',
+        accountKey: accountKey,
+      );
+      await initiator.connect(
+        peerDeviceId: 'device-a',
+        host: '127.0.0.1',
+        port: managerPort,
+        userId: 'user_test',
+        deviceId: 'device-b',
+        accountKey: accountKey,
+      );
+      final ackResult = await initiator.push('device-a', row);
+      expect(ackResult, LanPushResult.delivered);
+      expect(d.ackSent, 1);
+      expect(initiatorDiag.ackReceived, 1);
+
+      await manager.stop();
+    });
+  });
 }
+
