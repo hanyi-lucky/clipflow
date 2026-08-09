@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
@@ -6,6 +7,7 @@ import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import '../core/constants.dart';
 import '../models/sync_operation.dart';
 import '../repositories/cloud_repository.dart';
+import '../repositories/local_file_store.dart';
 import '../services/cloudbase_service.dart';
 import 'lan_discovery_service.dart';
 import 'lan_handshake_service.dart';
@@ -22,7 +24,7 @@ import 'lan_transport.dart';
 /// - `_knownHistoryIds` 有界集合（≤200）防 push/fetch 重复缓存；
 /// - 生命周期：`start`（失败静默降级 disabled，绝不抛）/ `stop`（清全部状态）。
 ///
-/// 红线：LAN 报文不携带 userId/密码/token/K_lan/salt/指纹/文件名/明文；
+/// 红线：LAN 报文不携带 userId/密码/token/K_lan/salt/指纹/文件名明文；
 /// 对外方法绝不把网络错误抛给调用方（内部 catch + debugPrint）。
 class LanSyncManager {
   LanSyncManager({
@@ -30,9 +32,11 @@ class LanSyncManager {
     LanDiscoveryService? discovery,
     LanTransport? transport,
     LanHandshakeService? handshakeService,
+    LocalFileStore? fileStore,
     @visibleForTesting Duration fetchTimeout = LanConstants.lanFetchTimeout,
   })  : _fetchTimeout = fetchTimeout,
         _discovery = discovery ?? LanDiscoveryService(),
+        _fileStore = fileStore ?? LocalFileStore(),
         _transport = transport ??
             LanTransport(
               handshakeService: handshakeService ??
@@ -43,10 +47,23 @@ class LanSyncManager {
             ) {
     _transport.latestRowProvider = () => _latestRow;
     _transport.onPushReceived = _handlePushReceived;
+    // 文件密文落盘：tmp `.part` → 全部字节收齐后原子 rename 成 `.enc`；
+    // onFilePushReceived 只在落盘完成后触发（fetch 命中文件行时 .enc 必已存在）。
+    _transport.fileSink = ({
+      required String entryId,
+      required Stream<List<int>> stream,
+    }) {
+      return _fileStore.saveEncryptedFromStream(
+        entryId: entryId,
+        stream: stream,
+      );
+    };
+    _transport.onFilePushReceived = _handleFilePushReceived;
   }
 
   final LanDiscoveryService _discovery;
   final LanTransport _transport;
+  final LocalFileStore _fileStore;
   final Duration _fetchTimeout;
 
   bool _enabled = false;
@@ -91,7 +108,7 @@ class LanSyncManager {
       );
       final started = await _discovery.start(
         deviceId: deviceId,
-        caps: 't/i',
+        caps: LanConstants.lanCaps,
         port: port,
       );
       if (!started) {
@@ -203,14 +220,22 @@ class LanSyncManager {
   }
 
   /// 发送侧接力推送（挂 coordinator durable success 点之后调用）。
-  /// 仅 text/image；同 historyId 去重；不向来源设备回推；异常只日志。
+  /// text/image/file；同 historyId 去重；不向来源设备回推；异常只日志。
+  ///
+  /// file 分支守卫：明文 ≤15MiB 且 artifact（`.enc`）存在才走 LAN，否则
+  /// Cloud-only（Cloud 已 durable 提交，LAN 本 best-effort）。密文从
+  /// artifact 流式读取分块，绝不整文件进内存。
   Future<void> pushOperation(SyncOperation op) async {
     if (!_enabled || _disposed || _userId == null) return;
-    if (op.kind != SyncOperationKind.text &&
-        op.kind != SyncOperationKind.image) {
-      return;
-    }
     try {
+      if (op.kind == SyncOperationKind.file) {
+        await _pushFileOperation(op);
+        return;
+      }
+      if (op.kind != SyncOperationKind.text &&
+          op.kind != SyncOperationKind.image) {
+        return;
+      }
       await _ensureConnectedPeers();
       final row = _toServerRow(op);
       if (row == null) return;
@@ -230,8 +255,48 @@ class LanSyncManager {
     }
   }
 
+  /// 文件接力推送：守卫（阈值/artifact）→ 行生成 → 去重 → 不回推 → pushFile。
+  Future<void> _pushFileOperation(SyncOperation op) async {
+    final size = (op.payload['fileSize'] as num?)?.toInt() ?? 0;
+    if (size <= 0 || size > LanConstants.lanMaxFileBytes) return;
+    final artifactId = op.artifactId ?? op.operationId;
+    final encPath = await _fileStore.loadEncryptedPath(artifactId);
+    if (encPath == null) return; // artifact 已清理 → Cloud-only
+    await _ensureConnectedPeers();
+    final row = _toFileServerRow(op);
+    if (row == null) return;
+    if (_registerHistoryId(row['history_id'])) return; // 已推过，去重
+    _updateLatestRow(row);
+    final encSize = await File(encPath).length();
+    final sourceDevice = row['source_device'] as String? ?? '';
+    for (final peerId in _transport.verifiedPeerIds) {
+      if (peerId == sourceDevice) continue; // 不向来源设备回推
+      try {
+        await _transport.pushFile(
+          peerId,
+          row,
+          encryptedPath: encPath,
+          encSize: encSize.toInt(),
+        );
+      } catch (e) {
+        debugPrint('[LAN] pushFile to $peerId failed: $e');
+      }
+    }
+  }
+
   /// 收到 peer push 帧：去重 → 更新缓存 → 通知 Provider 立即下载。
   void _handlePushReceived(Map<String, dynamic> row) {
+    if (!_enabled || _disposed) return;
+    final duplicate = _registerHistoryId(row['history_id']);
+    _updateLatestRow(row);
+    if (duplicate) return; // 重复 push 不重复通知
+    _pushPending = true;
+    onPushReceived?.call();
+  }
+
+  /// 收到 peer 文件 push：`.enc` 已由 transport 原子落盘后才回调。
+  /// 去重 → 更新缓存 → 置 _pushPending（下一次 fetch 命中本地文件行）。
+  void _handleFilePushReceived(Map<String, dynamic> row, String encPath) {
     if (!_enabled || _disposed) return;
     final duplicate = _registerHistoryId(row['history_id']);
     _updateLatestRow(row);
@@ -297,5 +362,30 @@ class LanSyncManager {
       row['format'] = payload['format'];
     }
     return row;
+  }
+
+  /// file payload → server-shape 文件行。与 `_toServerRow` 同构（恒带空
+  /// 删除/恢复数组），且**不含**明文 `file_name`/`mime_type`（红线）；
+  /// `enc_file_name` 取自 `prepareFile` 已加密的 `encFileName`（manager
+  /// 没有数据 key，绝不在本层加密）。`content` 为密文 marker（解码器在
+  /// 分支前无条件读 content，缺失会抛 DecryptionException 静默回 Cloud）。
+  Map<String, dynamic>? _toFileServerRow(SyncOperation op) {
+    final payload = op.payload;
+    final marker = payload['marker'];
+    if (marker is! String || marker.isEmpty) return null;
+    return <String, dynamic>{
+      'history_id': op.operationId,
+      'type': 'file',
+      'content': marker,
+      'hash': payload['hash'],
+      'enc_file_name': payload['encFileName'],
+      'file_size': payload['fileSize'],
+      'source_device': payload['sourceDevice'],
+      'source_device_name': payload['sourceDeviceName'],
+      'source_platform': payload['sourcePlatform'],
+      'timestamp': payload['timestamp'],
+      '_deletedIds': <String>[],
+      '_restoredEntries': <Map<String, dynamic>>[],
+    };
   }
 }

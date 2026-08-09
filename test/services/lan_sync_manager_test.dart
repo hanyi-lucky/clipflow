@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:clipflow/core/constants.dart';
 import 'package:clipflow/models/sync_operation.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
+import 'package:clipflow/repositories/local_file_store.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/lan_discovery_service.dart';
 import 'package:clipflow/services/lan_handshake_service.dart';
@@ -124,6 +126,24 @@ class _FakeTransport extends LanTransport {
     pushedRows.add(row);
   }
 
+  final List<String> pushedFilesTo = [];
+  final List<Map<String, dynamic>> pushedFileRows = [];
+  final List<String> pushedFilePaths = [];
+  final List<int> pushedFileSizes = [];
+
+  @override
+  Future<void> pushFile(
+    String peerDeviceId,
+    Map<String, dynamic> row, {
+    required String encryptedPath,
+    required int encSize,
+  }) async {
+    pushedFilesTo.add(peerDeviceId);
+    pushedFileRows.add(row);
+    pushedFilePaths.add(encryptedPath);
+    pushedFileSizes.add(encSize);
+  }
+
   @override
   void dropSession(String peerDeviceId) {
     dropped.add(peerDeviceId);
@@ -148,6 +168,38 @@ LanPeer _peer(String deviceId, {int port = 10000, DateTime? seen}) {
     host: '192.168.1.10',
     port: port,
     lastSeenAt: seen ?? DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
+  );
+}
+
+SyncOperation _fileOp({
+  required String operationId,
+  required String artifactId,
+  required String encFileName,
+  required int fileSize,
+  String sourceDevice = 'device-a',
+  int timestamp = 1,
+}) {
+  return SyncOperation(
+    operationId: operationId,
+    userId: 'user_test',
+    kind: SyncOperationKind.file,
+    state: SyncOperationState.sending,
+    dedupeKey: 'file:h-$operationId',
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    attemptCount: 0,
+    nextAttemptAtMs: 1,
+    payload: <String, dynamic>{
+      'hash': 'h-$operationId',
+      'encFileName': encFileName,
+      'fileSize': fileSize,
+      'marker': 'marker-$operationId',
+      'sourceDevice': sourceDevice,
+      'sourceDeviceName': 'Mac A',
+      'sourcePlatform': 'macos',
+      'timestamp': timestamp,
+    },
+    artifactId: artifactId,
   );
 }
 
@@ -182,19 +234,38 @@ void main() {
   late _MutableClock clock;
   late _FakeDiscovery discovery;
   late _FakeTransport transport;
+  late Directory tempDir;
+  late LocalFileStore fileStore;
 
-  setUp(() {
+  setUp(() async {
     clock = _MutableClock();
     discovery = _FakeDiscovery();
     transport = _FakeTransport();
+    tempDir = await Directory.systemTemp.createTemp('lan_sync_manager_');
+    fileStore = LocalFileStore(directoryPath: tempDir.path);
   });
 
-  LanSyncManager createManager({Duration fetchTimeout = const Duration(milliseconds: 50)}) {
+  tearDown(() async {
+    if (await tempDir.exists()) {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
+  LanSyncManager createManager({
+    Duration fetchTimeout = const Duration(milliseconds: 50),
+    LocalFileStore? fileStore,
+  }) {
     return LanSyncManager(
       discovery: discovery,
       transport: transport,
       fetchTimeout: fetchTimeout,
+      fileStore: fileStore,
     );
+  }
+
+  Future<String> importArtifact(String entryId, List<int> bytes) async {
+    final src = File('${tempDir.path}/src-$entryId.enc')..writeAsBytesSync(bytes);
+    return fileStore.importEncryptedFile(entryId, src.path);
   }
 
   group('LanDiscoveryService', () {
@@ -342,7 +413,7 @@ void main() {
       expect(transport.startServerCalls, 1);
       expect(discovery.startCalled, isTrue);
       expect(discovery.startDeviceId, 'device-a');
-      expect(discovery.startCaps, 't/i');
+      expect(discovery.startCaps, 't/i/f');
       expect(discovery.startPort, 45678);
     });
   });
@@ -462,7 +533,7 @@ void main() {
   });
 
   group('LanSyncManager.pushOperation', () {
-    test('text/image 才推送；file 不推送', () async {
+    test('text/image 才推送；file 缺 fileSize/artifact 不推送', () async {
       discovery.candidatesResult = [_peer('peer-b')];
       final manager = createManager();
       await manager.start(
@@ -484,6 +555,7 @@ void main() {
       );
       await manager.pushOperation(fileOp);
       expect(transport.pushedTo, isEmpty);
+      expect(transport.pushedFilesTo, isEmpty);
       await manager.pushOperation(_textOp(operationId: 't1', timestamp: 1));
       expect(transport.pushedTo, hasLength(1));
     });
@@ -597,6 +669,204 @@ void main() {
       expect(await manager.fetchLatestContent(), isNull);
       await manager.pushOperation(_textOp(operationId: 'h2', timestamp: 2));
       expect(transport.pushedTo, hasLength(1)); // stop 后不再推送
+    });
+  });
+
+  group('LanSyncManager.pushOperation file', () {
+    test('file ≤15MiB 且 artifact 存在 → pushFile 文件行（enc_file_name、无明文 file_name/mime_type）', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager(fileStore: fileStore);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      await importArtifact('f1', List<int>.filled(10, 1));
+
+      await manager.pushOperation(_fileOp(
+        operationId: 'f1',
+        artifactId: 'f1',
+        encFileName: 'enc-name-b64',
+        fileSize: 1024,
+      ));
+
+      expect(transport.pushedFilesTo, ['peer-b']);
+      expect(transport.pushedFilePaths.single, endsWith('f1.enc'));
+      expect(transport.pushedFileSizes.single, 10);
+      final row = transport.pushedFileRows.single;
+      expect(row['history_id'], 'f1');
+      expect(row['type'], 'file');
+      expect(row['content'], 'marker-f1');
+      expect(row['hash'], 'h-f1');
+      expect(row['enc_file_name'], 'enc-name-b64');
+      expect(row['file_size'], 1024);
+      expect(row['source_device'], 'device-a');
+      expect(row['source_device_name'], 'Mac A');
+      expect(row['source_platform'], 'macos');
+      expect(row['_deletedIds'], isEmpty);
+      expect(row['_restoredEntries'], isEmpty);
+      // 红线：LAN 行无明文 file_name / mime_type / userId
+      expect(row.containsKey('file_name'), isFalse);
+      expect(row.containsKey('mime_type'), isFalse);
+      expect(row.containsKey('userId'), isFalse);
+      // 本机缓存也更新为文件行（可应答 peers 的 latestRequest）
+      expect(transport.latestRowProvider!()!['history_id'], 'f1');
+    });
+
+    test('file 明文 >15MiB → 跳过 LAN（Cloud-only）', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager(fileStore: fileStore);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      await importArtifact('big1', List<int>.filled(10, 1));
+
+      await manager.pushOperation(_fileOp(
+        operationId: 'big1',
+        artifactId: 'big1',
+        encFileName: 'enc',
+        fileSize: LanConstants.lanMaxFileBytes + 1,
+      ));
+
+      expect(transport.pushedFilesTo, isEmpty);
+      expect(transport.pushedTo, isEmpty);
+    });
+
+    test('file artifact 缺失 → 跳过 LAN', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager(fileStore: fileStore);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+
+      await manager.pushOperation(_fileOp(
+        operationId: 'noenc',
+        artifactId: 'noenc',
+        encFileName: 'enc',
+        fileSize: 100,
+      ));
+
+      expect(transport.pushedFilesTo, isEmpty);
+      expect(transport.pushedTo, isEmpty);
+    });
+
+    test('文件不回推来源设备（peer.deviceId == source_device 跳过）', () async {
+      discovery.candidatesResult = [_peer('device-a'), _peer('peer-c')];
+      final manager = createManager(fileStore: fileStore);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      await importArtifact('f2', List<int>.filled(5, 2));
+
+      await manager.pushOperation(_fileOp(
+        operationId: 'f2',
+        artifactId: 'f2',
+        encFileName: 'enc',
+        fileSize: 100,
+        sourceDevice: 'device-a',
+      ));
+
+      expect(transport.pushedFilesTo, ['peer-c']);
+    });
+
+    test('同 historyId 二次 file push 去重', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager(fileStore: fileStore);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      await importArtifact('f3', List<int>.filled(5, 3));
+
+      await manager.pushOperation(_fileOp(
+        operationId: 'f3',
+        artifactId: 'f3',
+        encFileName: 'enc',
+        fileSize: 100,
+      ));
+      expect(transport.pushedFilesTo, hasLength(1));
+
+      await manager.pushOperation(_fileOp(
+        operationId: 'f3',
+        artifactId: 'f3',
+        encFileName: 'enc',
+        fileSize: 100,
+      ));
+      expect(transport.pushedFilesTo, hasLength(1));
+    });
+  });
+
+  group('LanSyncManager file push 接收', () {
+    test('_handleFilePushReceived：.enc 落盘后触发 onPushReceived；重复 historyId 不重触发', () async {
+      final manager = createManager(fileStore: fileStore);
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      var notifyCount = 0;
+      manager.onPushReceived = () {
+        notifyCount++;
+      };
+      final row = <String, dynamic>{
+        'history_id': 'h-file-push',
+        'type': 'file',
+        'content': 'marker',
+        'hash': 'h',
+        'enc_file_name': 'enc',
+        'file_size': 10,
+        'source_device': 'peer-b',
+        'source_device_name': 'Peer B',
+        'source_platform': 'macos',
+        'timestamp': 42,
+        '_deletedIds': <String>[],
+        '_restoredEntries': <Map<String, dynamic>>[],
+      };
+      // 模拟 transport：.enc 已原子落盘后才回调
+      final encPath = await importArtifact('h-file-push', List<int>.filled(4, 9));
+      transport.onFilePushReceived?.call(row, encPath);
+
+      expect(notifyCount, 1);
+      // 缓存可应答 latestRequest + 下一次 fetch 命中本机缓存
+      expect(transport.latestRowProvider!()!['history_id'], 'h-file-push');
+      final fetched = await manager.fetchLatestContent();
+      expect(fetched, isNotNull);
+      expect(fetched!['history_id'], 'h-file-push');
+      expect(fetched['_deletedIds'], isEmpty);
+      expect(fetched['_restoredEntries'], isEmpty);
+
+      // 重复 push 同 row → 不再通知
+      transport.onFilePushReceived?.call(row, encPath);
+      expect(notifyCount, 1);
+    });
+
+    test('未启动时收到文件 push → 忽略不触发', () async {
+      final manager = createManager(fileStore: fileStore);
+      var notifyCount = 0;
+      manager.onPushReceived = () {
+        notifyCount++;
+      };
+      final encPath = await importArtifact('h-off', List<int>.filled(4, 0));
+      transport.onFilePushReceived?.call(<String, dynamic>{
+        'history_id': 'h-off',
+        'type': 'file',
+        'content': 'marker',
+        'enc_file_name': 'enc',
+        'file_size': 10,
+        'source_device': 'peer-b',
+        'timestamp': 1,
+        '_deletedIds': <String>[],
+        '_restoredEntries': <Map<String, dynamic>>[],
+      }, encPath);
+      expect(notifyCount, 0);
+      expect(await manager.fetchLatestContent(), isNull);
     });
   });
 }
