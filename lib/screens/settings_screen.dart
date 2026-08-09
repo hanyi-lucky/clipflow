@@ -8,6 +8,7 @@ import '../l10n/app_strings.dart';
 import '../providers/clipboard_provider.dart';
 import '../repositories/local_storage.dart';
 import '../services/app_info.dart';
+import '../services/lan_diagnostics.dart';
 import '../widgets/device_management_section.dart';
 import 'backup/export_backup_screen.dart';
 import 'backup/import_backup_screen.dart';
@@ -315,6 +316,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ]),
               ],
               _buildSection(context, AppStrings.settingsCompatibilitySection, [_buildCompatibilityTile(context)]),
+              _buildSection(context, AppStrings.settingsDiagnosticsSection, [
+                _buildDiagnosticsSection(context),
+              ]),
               _buildSection(context, AppStrings.settingsAboutSection, [
                 ListTile(
                   title: const Text(AppStrings.aboutVersion),
@@ -363,6 +367,116 @@ class _SettingsScreenState extends State<SettingsScreen> {
           : null,
       onTap: () => settings.setThemeMode(mode),
     );
+  }
+
+  /// 「诊断（局域网）」调试区：显示计数 + fallback 原因 + 手动清零。
+  /// 「诊断（局域网）」调试区：显示计数 + fallback 原因 + 手动清零。
+  Widget _buildDiagnosticsSection(BuildContext context) {
+    return Consumer<ClipboardProvider>(
+      builder: (context, provider, _) {
+        final diagnostics = provider.lanDiagnostics;
+        final rows = <Widget>[];
+        if (diagnostics == null) {
+          rows.add(ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text(AppStrings.diagnosticsLanDisabled),
+          ));
+        } else {
+          rows.addAll([
+            _diagRow(AppStrings.diagnosticsDiscovered, diagnostics.discovered),
+            _diagRow(
+              AppStrings.diagnosticsHandshakeSuccess,
+              diagnostics.handshakeSuccess,
+            ),
+            _diagRow(
+              AppStrings.diagnosticsHandshakeRejected,
+              diagnostics.handshakeRejected,
+            ),
+            _diagRow(
+              AppStrings.diagnosticsLanFetchHit,
+              diagnostics.lanFetchHit,
+            ),
+            _diagRow(
+              AppStrings.diagnosticsLanFetchMiss,
+              diagnostics.lanFetchMiss,
+            ),
+            _diagRow(AppStrings.diagnosticsPushSent, diagnostics.pushSent),
+            _diagRow(
+              AppStrings.diagnosticsPushReceived,
+              diagnostics.pushReceived,
+            ),
+            _diagRow(AppStrings.diagnosticsAckSent, diagnostics.ackSent),
+            _diagRow(AppStrings.diagnosticsAckReceived, diagnostics.ackReceived),
+          ]);
+          final fallback = diagnostics.fallbackSnapshot;
+          if (fallback.isNotEmpty) {
+            rows.add(const Divider(height: 1, indent: 16));
+            rows.add(
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+                child: Text(
+                  AppStrings.diagnosticsFallbackTitle,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            );
+            fallback.forEach((reason, count) {
+              rows.add(_diagRow(_fallbackLabel(reason), count));
+            });
+          }
+        }
+        return Column(
+          children: [
+            ...rows,
+            const Divider(height: 1, indent: 16),
+            ListTile(
+              leading: const Icon(Icons.refresh),
+              title: const Text(AppStrings.diagnosticsReset),
+              onTap: provider.resetLanDiagnostics,
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+
+  Widget _diagRow(String label, int value) {
+    return ListTile(
+      dense: true,
+      title: Text(label),
+      trailing: Text(
+        '$value',
+        style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()]),
+      ),
+    );
+  }
+
+  String _fallbackLabel(LanFallbackReason reason) {
+    switch (reason) {
+      case LanFallbackReason.lanDisabled:
+        return AppStrings.diagnosticsFallbackLanDisabled;
+      case LanFallbackReason.noPeer:
+        return AppStrings.diagnosticsFallbackNoPeer;
+      case LanFallbackReason.handshakeRejected:
+        return AppStrings.diagnosticsFallbackHandshakeRejected;
+      case LanFallbackReason.fetchTimeout:
+        return AppStrings.diagnosticsFallbackFetchTimeout;
+      case LanFallbackReason.fetchError:
+        return AppStrings.diagnosticsFallbackFetchError;
+      case LanFallbackReason.duplicate:
+        return AppStrings.diagnosticsFallbackDuplicate;
+      case LanFallbackReason.decodeFailed:
+        return AppStrings.diagnosticsFallbackDecodeFailed;
+      case LanFallbackReason.localMissingEnc:
+        return AppStrings.diagnosticsFallbackLocalMissingEnc;
+      case LanFallbackReason.artifactMismatch:
+        return AppStrings.diagnosticsFallbackArtifactMismatch;
+      case LanFallbackReason.overLimit:
+        return AppStrings.diagnosticsFallbackOverLimit;
+    }
   }
 
   Widget _buildCompatibilityTile(BuildContext context) {

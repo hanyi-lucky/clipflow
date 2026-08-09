@@ -215,4 +215,28 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.widget<SwitchListTile>(tileFinder).value, isFalse);
   });
+
+  testWidgets('设置页「诊断（局域网）」区渲染计数与清零按钮；未启用时显示提示', (tester) async {
+    await useTallViewport(tester);
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    await tester.pumpWidget(buildApp(storage));
+    await tester.pumpAndSettle();
+
+    final section = find.text(AppStrings.settingsDiagnosticsSection);
+    expect(section, findsOneWidget);
+    await tester.scrollUntilVisible(section, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+
+    // LAN 未启用（测试环境无 manager）→ 显示提示 + 清零按钮
+    expect(find.text(AppStrings.diagnosticsLanDisabled), findsOneWidget);
+    expect(find.text(AppStrings.diagnosticsReset), findsOneWidget);
+
+    // 清零按钮可点击（no-op，不抛）
+    await tester.tap(find.text(AppStrings.diagnosticsReset));
+    await tester.pumpAndSettle();
+    expect(find.text(AppStrings.settingsDiagnosticsSection), findsOneWidget);
+  });
 }

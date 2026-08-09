@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../core/constants.dart';
+import 'lan_diagnostics.dart';
 import 'lan_network_channel.dart';
 
 /// mDNS 发现的单个候选设备。
@@ -37,11 +38,14 @@ class LanPeer {
 class LanDiscoveryService {
   LanDiscoveryService({
     LanNetworkChannel? channel,
+    LanDiagnostics? diagnostics,
     DateTime Function()? now,
   })  : _channel = channel ?? LanNetworkChannel(),
+        _diagnostics = diagnostics,
         _now = now ?? DateTime.now;
 
   final LanNetworkChannel _channel;
+  final LanDiagnostics? _diagnostics;
   final DateTime Function() _now;
   final Map<String, LanPeer> _peers = {};
   final Map<String, DateTime> _blacklistUntil = {};
@@ -111,6 +115,9 @@ class LanDiscoveryService {
       return;
     }
     final capsRaw = txt['caps'] as String? ?? '';
+    if (!_peers.containsKey(deviceId)) {
+      _diagnostics?.discovered++; // 新去重设备
+    }
     _peers[deviceId] = LanPeer(
       deviceId: deviceId,
       host: host,

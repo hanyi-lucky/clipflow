@@ -386,6 +386,30 @@ void main() {
     });
   });
 
+
+    test('discovered 计数：新设备去重累计', () {
+      final diagnostics = LanDiagnostics();
+      final service = LanDiscoveryService(
+        channel: LanNetworkChannel(),
+        now: () => clock.now,
+        diagnostics: diagnostics,
+      );
+      Map<String, dynamic> event(String deviceId) => <String, dynamic>{
+            'name': 'Mac',
+            'host': '192.168.1.5',
+            'port': 4000,
+            'txt': <String, dynamic>{
+              'proto': '1',
+              'device': deviceId,
+              'caps': 't/i',
+            },
+          };
+      service.handleDiscoveryEvent(event('dev-1'));
+      service.handleDiscoveryEvent(event('dev-1')); // 重复不累计
+      service.handleDiscoveryEvent(event('dev-2'));
+      expect(diagnostics.discovered, 2);
+    });
+
   group('LanSyncManager.start', () {
     test('enabled:false 置为 disabled 且不抛', () async {
       final manager = createManager();

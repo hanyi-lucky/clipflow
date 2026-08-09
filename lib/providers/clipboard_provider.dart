@@ -29,6 +29,7 @@ import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
 import '../repositories/local_image_store.dart';
 import '../repositories/local_file_store.dart';
+import '../services/lan_diagnostics.dart';
 import '../services/lan_sync_manager.dart';
 import '../core/constants.dart';
 import '../core/exceptions.dart';
@@ -163,6 +164,8 @@ class ClipboardProvider extends ChangeNotifier
   // 文件下载任务状态
   final Map<String, FileDownloadProgress> _fileDownloads = {};
   final Map<String, DownloadResult> _fileDownloadResults = {};
+  // 该 historyId 的文件行是否来自 LAN（localMissingEnc fallback 判定用）。
+  final Map<String, bool> _fileDownloadFromLan = {};
   String? _activeFileDownloadId;
   final Set<String> _pendingFileRetries = {};
   // 文件上传在途保护：同路径只允许一个上传任务。
@@ -189,6 +192,12 @@ class ClipboardProvider extends ChangeNotifier
   Set<String> get selectedIds => Set.unmodifiable(_selectedIds);
   String get mergeSeparator => _mergeSeparator;
   bool get serverConnected => _serverConnected;
+
+  /// LAN 诊断计数（LAN 未启用/未启动时为 null）。
+  LanDiagnostics? get lanDiagnostics => _lanManager?.diagnostics;
+
+  /// 诊断 UI「清零」按钮（LAN 未启用时 no-op）。
+  void resetLanDiagnostics() => _lanManager?.resetDiagnostics();
 
   /// 连续 Cloud 失败计数（测试/诊断用）。
   @visibleForTesting
@@ -1278,11 +1287,14 @@ class ClipboardProvider extends ChangeNotifier
             // 文件行 content 为空串（元数据行），须按 hasFile 交付
             if (lanResult != null &&
                 (lanResult.hasContent || lanResult.hasFile)) {
-              await _applyDownloadResult(lanResult);
+              await _applyDownloadResult(lanResult, fromLan: true);
               lanDelivered = true;
             }
           }
         } catch (e) {
+          // LAN 行解密失败（坏行/密钥不一致）→ 记 fallbackReason，回 Cloud。
+          _lanManager?.diagnostics
+              .recordFallback(LanFallbackReason.decodeFailed);
           debugPrint('[CLIP-PROVIDER] LAN fetch failed: $e');
           lanDelivered = false;
         }
@@ -1325,7 +1337,8 @@ class ClipboardProvider extends ChangeNotifier
   ///
   /// LAN 行与 Cloud 行同构（snake_case + `_deletedIds`/`_restoredEntries`），
   /// 两者共用此方法；LAN 行恒带空删除/恢复数组，删除/恢复只由 Cloud 收敛。
-  Future<void> _applyDownloadResult(DownloadResult? result) async {
+  Future<void> _applyDownloadResult(DownloadResult? result,
+      {bool fromLan = false}) async {
     if (result == null) return;
 
     // 处理删除同步：从本地历史中移除被其他设备删除的条目
@@ -1355,7 +1368,7 @@ class ClipboardProvider extends ChangeNotifier
       if (fileHash.isNotEmpty) {
         _syncService!.markAsDownloadedFileHash(fileHash);
       }
-      await _processFileDownload(result);
+      await _processFileDownload(result, fromLan: fromLan);
     } else if (result.content.isNotEmpty) {
       // 跳过已删除的内容
       final syncContentHash = sha256
@@ -1582,7 +1595,8 @@ class ClipboardProvider extends ChangeNotifier
   }
 
   /// 文件下载入口：建立进度任务后串行执行。
-  Future<void> _processFileDownload(DownloadResult result) async {
+  Future<void> _processFileDownload(DownloadResult result,
+      {bool fromLan = false}) async {
     final entryId = (result.id != null && result.id!.isNotEmpty)
         ? result.id!
         : const Uuid().v4();
@@ -1601,6 +1615,7 @@ class ClipboardProvider extends ChangeNotifier
     if (_activeFileDownloadId != null) return; // 同一时间只允许一个活跃下载
 
     _fileDownloadResults[entryId] = result;
+    _fileDownloadFromLan[entryId] = fromLan;
     _fileDownloads[entryId] = FileDownloadProgress(
       entryId: entryId,
       fileName: result.fileName ?? 'file',
@@ -1608,13 +1623,14 @@ class ClipboardProvider extends ChangeNotifier
       status: FileTransferStatus.pending,
     );
     notifyListeners();
-    await _runFileDownload(entryId, result);
+    await _runFileDownload(entryId, result, fromLan: fromLan);
   }
 
   Future<void> _runFileDownload(
     String entryId,
     DownloadResult result, {
     bool isRetry = false,
+    bool fromLan = false,
   }) async {
     _activeFileDownloadId = entryId;
     final progress = _fileDownloads[entryId];
@@ -1650,6 +1666,12 @@ class ClipboardProvider extends ChangeNotifier
       //    跳过 Cloud（同一 historyId，幂等锚点不变）。不存在才走 Cloud。
       encryptedPath = await _localFileStore.loadEncryptedPath(entryId);
       if (encryptedPath == null) {
+        // LAN 文件行元数据已交付但本地无 .enc（LAN push 未达/被清理）→
+        // 记 fallbackReason 后回 Cloud。
+        if (fromLan) {
+          _lanManager?.diagnostics
+              .recordFallback(LanFallbackReason.localMissingEnc);
+        }
         if (_cloudRepo == null) {
           throw Exception('Cloud repository unavailable');
         }
@@ -1761,6 +1783,8 @@ class ClipboardProvider extends ChangeNotifier
           e is FileSizeMismatchException ||
           e is DecryptionException ||
           e is EncryptionException) {
+        _lanManager?.diagnostics
+            .recordFallback(LanFallbackReason.artifactMismatch);
         final badPath = encryptedPath;
         if (badPath != null) {
           try {
@@ -1788,7 +1812,7 @@ class ClipboardProvider extends ChangeNotifier
           if (_disposed) return;
           if (progress.status == FileTransferStatus.cancelled) return;
           if (_activeFileDownloadId != null) return;
-          _runFileDownload(entryId, result, isRetry: true);
+          _runFileDownload(entryId, result, isRetry: true, fromLan: fromLan);
         });
         return;
       }
@@ -1854,7 +1878,12 @@ class ClipboardProvider extends ChangeNotifier
     progress.decryptedHash = null;
     progress.cancelToken = FileTransferCancelToken();
     notifyListeners();
-    await _runFileDownload(entryId, result, isRetry: true);
+    await _runFileDownload(
+      entryId,
+      result,
+      isRetry: true,
+      fromLan: _fileDownloadFromLan[entryId] ?? false,
+    );
   }
 
   bool _isImageFile(ClipboardFile file) {
