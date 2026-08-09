@@ -17,6 +17,9 @@ import io.flutter.plugin.common.MethodChannel
  * MethodChannel `clipflow/lan_network`：advertise / browse / stopAll / isSupported
  * EventChannel `clipflow/lan_network_events`：发现结果 `{name, host, port, txt}`
  *
+ * 广告（advertise）与发现（browse）可共存：同进程既广播又发现，两者互不注销。
+ * `stopAdvertisement()` 只停广告、`stopDiscovery()` 只停发现，`stopAll()` 才全部停止。
+ *
  * TXT 记录白名单：proto / port / device / caps。禁止广播 userId 及任何派生形态、
  * 密码、token、K_lan、salt、证书指纹、文件名、明文。
  *
@@ -103,7 +106,7 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             result.error("unsupported", "NsdManager unavailable", null)
             return
         }
-        stopAll()
+        stopAdvertisement()
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = deviceId
             serviceType = this@LanNetworkPlugin.serviceType
@@ -141,7 +144,7 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             result.error("unsupported", "NsdManager unavailable", null)
             return
         }
-        stopAll()
+        stopDiscovery()
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
                 result.success(null)
@@ -197,17 +200,35 @@ class LanNetworkPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
-    private fun stopAll() {
+    /**
+     * 仅停止广告广播：注销已注册的 mDNS 服务并置空 registeredServiceInfo，
+     * 不影响正在进行的服务发现（广告与发现可共存，同进程既广播又发现）。
+     */
+    private fun stopAdvertisement() {
         val manager = nsdManager ?: return
         try {
             registeredServiceInfo?.let { manager.unregisterService(it) }
         } catch (_: Exception) {
         }
+        registeredServiceInfo = null
+    }
+
+    /**
+     * 仅停止服务发现：停止 discovery listener 并置空 discoveryListener，
+     * 不注销已注册的 mDNS 广告（广告与发现可共存，同进程既广播又发现）。
+     */
+    private fun stopDiscovery() {
+        val manager = nsdManager ?: return
         try {
             discoveryListener?.let { manager.stopServiceDiscovery(it) }
         } catch (_: Exception) {
         }
-        registeredServiceInfo = null
         discoveryListener = null
+    }
+
+    /** 同时停止广告广播与服务发现（MethodChannel `stopAll` 语义：全部停止）。 */
+    private fun stopAll() {
+        stopAdvertisement()
+        stopDiscovery()
     }
 }
