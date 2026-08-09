@@ -83,7 +83,7 @@ void writeFrame(Socket socket, Map<String, dynamic> message) {
   socket.add(encodeFrame(message));
 }
 
-/// 从 [socket] 读取一帧。
+/// 单次便捷读取一帧（内部构造一次性 [LanFrameConnection]）。
 ///
 /// [timeout] 作用于整帧读取（空闲超时）。断链 / 超时 / 协议错误统一抛
 /// [LanProtocolException]（调用方按「只断单个 session」处理）。
@@ -91,25 +91,48 @@ Future<Map<String, dynamic>> readFrame(
   Socket socket, {
   Duration? timeout,
 }) async {
-  final source = timeout == null ? socket : socket.timeout(timeout);
-  final reader = _SocketFrameReader(source);
-  try {
-    final header = await reader.read(4);
-    final length = ByteData.sublistView(header).getUint32(0);
-    if (length > LanConstants.lanMaxFrameBytes) {
-      throw LanProtocolException(
-        'frame declares $length bytes, exceeds max ${LanConstants.lanMaxFrameBytes}',
-      );
+  final connection = LanFrameConnection(socket, timeout: timeout);
+  return connection.read();
+}
+
+/// 会话级帧连接：在同一 socket 上复用同一个底层流读取器，支持多次
+/// `read()`（握手需先读 hello 再读 auth）。
+///
+/// 注意：`Socket.timeout(...)` 返回单订阅流视图，因此超时视图必须在
+/// 构造时应用一次并复用，不能每次 read 都新建。
+class LanFrameConnection {
+  LanFrameConnection(Socket socket, {Duration? timeout})
+      : _socket = socket,
+        _reader = _SocketFrameReader(
+          timeout == null ? socket : socket.timeout(timeout),
+        );
+
+  final Socket _socket;
+  final _SocketFrameReader _reader;
+
+  void write(Map<String, dynamic> message) {
+    writeFrame(_socket, message);
+  }
+
+  Future<Map<String, dynamic>> read() async {
+    try {
+      final header = await _reader.read(4);
+      final length = ByteData.sublistView(header).getUint32(0);
+      if (length > LanConstants.lanMaxFrameBytes) {
+        throw LanProtocolException(
+          'frame declares $length bytes, exceeds max ${LanConstants.lanMaxFrameBytes}',
+        );
+      }
+      final payload = await _reader.read(length);
+      final bytes = Uint8List(4 + length);
+      bytes.setRange(0, 4, header);
+      bytes.setRange(4, bytes.length, payload);
+      return decodeFrameBytes(bytes);
+    } on TimeoutException {
+      throw LanProtocolException('frame read timed out');
+    } on SocketException catch (e) {
+      throw LanProtocolException('socket error: ${e.message}');
     }
-    final payload = await reader.read(length);
-    final bytes = Uint8List(4 + length);
-    bytes.setRange(0, 4, header);
-    bytes.setRange(4, bytes.length, payload);
-    return decodeFrameBytes(bytes);
-  } on TimeoutException {
-    throw LanProtocolException('frame read timed out');
-  } on SocketException catch (e) {
-    throw LanProtocolException('socket error: ${e.message}');
   }
 }
 
