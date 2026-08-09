@@ -1,7 +1,7 @@
 # ClipFlow 局域网优先同步改造交接记录
 
 > 最后更新：2026-08-09（Asia/Shanghai）
-> 当前状态：Phase 2.3（LAN 可靠性/ACK/诊断/重下熔断）已完成并验收通过；未部署到生产。
+> 当前状态：Phase 2.3 完成；真机端到端验证（2026-08-10）打通双向纯 LAN 同步；未部署到生产。
 
 ## 当前 Git 状态
 
@@ -72,9 +72,33 @@
 5. **Android 真机**：权限降级、后台保活、锁屏、网络切换，归 2.4。
 6. **低置信防御缺口**（置信度 40，2.3 处理）：LAN 行 hash 与 artifact 不符时可能反复重下，建议 2.3 加熔断。
 
+## 真机端到端验证（2026-08-10，Mac + Android 真机同 Wi-Fi）
+
+### 已验证通过
+1. mDNS 发现（双端互见、端口正确）；TLS 自签证书指纹固定（openssl 实测手机服务端证书指纹与内置一致）。
+2. A3 双向挑战握手全流程（hello → 服务端取票 → auth 交换 → 服务端验票），两端均握手成功。
+3. **LAN 内容交付（双向）**：Mac→手机、手机→Mac 均秒达；服务器数据库实测**零内容写入**（纯 LAN 内容只在局域网报文，history_id 不出现在服务端）。
+4. 防回声/去重：收到内容写剪贴板走 ignoreHashes，不重复上传。
+
+### 本次修复（已提交 463d7d0）
+- **Android 原生崩溃**：NsdManager 回调线程调 `eventSink/result` 触发 `@UiThread` 崩溃 → 全部回调 post 主线程（`mainHandler.post`）。
+- **macOS Zone mismatch**：`ensureInitialized` 移到 `runZonedGuarded` 内（修复后不再出现 runApp Zone mismatch）。
+- **Xcode 工程注册**（已提交 a2ab9f0）：`LanNetworkPlugin.swift` 未进 build phase → macOS 构建失败。
+
+### 实验性「仅局域网同步」开关
+- `ClipboardProvider.lanOnlyMode`（static，**默认 false**）：文本上传/下载完全走 LAN、跳过云端内容读写；Android 原生监听路径经 `ClipboardMonitor.uploadOverride` 一并覆盖；握手票据仍走服务端。
+- 真机双向验证：内容零服务器写入（DB 证据）。已知局限：仅文本、对端离线无兜底、历史仅本地、无删除/恢复、状态显示为模拟。
+- 尚未接入设置页 UI（下一轮）；正式完整版（删除/游标/文件/降级）归 Phase 2.5。
+
+### 已知问题（待跟进）
+1. **LAN 会话周期性断开后自动重连**（架构已接受的迟到帧竞态；不阻塞交付，但会产生反复握手）。
+2. **Mac 端自动刷新偶发不生效**（需手动刷新才写剪贴板；debug 下剪贴板监听/日志捕获不稳定，可能与 Zone 时代残留状态相关）。
+3. **MIUI 会撤销 adb 授予的 NEARBY_WIFI_DEVICES**（应用内授权可持久；真机需走设置页开关授权）。
+4. **Windows 端无 LAN 插件**（isSupported=false → 自动走云端）。补全可参考 macOS/Android 实现：原生 mDNS（WinRT Dnssd 系列）+ dart:io TLS + 复用 `lib/services/lan_*` 全部逻辑，注册进 `generated_plugin_registrant.cc` 即可。
+
 ## Phase 2.4 预定范围（Android 真机 + 后台生命周期 + 端到端实证）
 
-1. **必须前置（全部为外部依赖，代码侧已完成）**：真实双实例/真机 fileAck 端到端实证（≤15MiB push 交付 + 粘贴文件名正确 + >15MiB Cloud-only + 无回声环）；macOS 双实例实证（双 bundle ID + 真实 Wi-Fi）；生产部署写入 `LAN_TICKET_SECRET`。
+1. **已部分完成（2026-08-10）**：Mac+Android 真机双向文本 LAN 交付实证（≤15MiB 文件/图片/文件名正确/无回声环仍需补验）；macOS 双实例实证（双 bundle ID + 真实 Wi-Fi）仍未做；生产部署已写入 `LAN_TICKET_SECRET` 并上线 LAN 票据端点。
 2. Android 真机验证：NEARBY_WIFI_DEVICES 权限降级、后台保活、锁屏、前台服务绑定、网络切换。
 3. 依据实证结果修复发现的问题（如有）。
 
