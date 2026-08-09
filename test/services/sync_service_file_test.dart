@@ -219,4 +219,112 @@ void main() {
       expect(result, isNull);
     });
   });
+
+  group('SyncService.prepareFile encFileName', () {
+    test('payload carries encrypted fileName as encFileName', () async {
+      final prepared = await service.prepareFile(
+        plaintextHash: 'hash-enc-name',
+        operationId: 'op-enc-name',
+        fileName: '秘密报告.pdf',
+        fileSize: 2048,
+        mimeType: 'application/pdf',
+        timestamp: 1700000000000,
+      );
+
+      expect(prepared, isNotNull);
+      final encFileName = prepared!.payload['encFileName'] as String;
+      expect(encFileName, isNotEmpty);
+      // 密文可解密出真实文件名
+      final decrypted = await encryption.decrypt(
+        EncryptedData.fromBase64(encFileName),
+        key,
+      );
+      expect(decrypted, '秘密报告.pdf');
+      // 载荷里没有明文 fileName 之外的新字段；encFileName 与 fileName 并存
+      expect(prepared.payload['fileName'], '秘密报告.pdf');
+    });
+  });
+
+  group('SyncService.downloadLatestContent file branch enc_file_name', () {
+    test('enc_file_name decrypts to real file name', () async {
+      final encryptedName = (await encryption.encrypt('真名.zip', key)).toBase64();
+      repo.currentClipboard = {
+        'id': 'clip-enc',
+        'user_id': 'user_x',
+        'content': 'marker-ciphertext',
+        'hash': 'file-hash-enc',
+        'source_device': 'device-b',
+        'source_device_name': 'Phone B',
+        'source_platform': 'android',
+        'timestamp': 1700000000000,
+        'type': 'file',
+        'enc_file_name': encryptedName,
+        'file_size': 4096,
+        'file_key': 'uuid-enc',
+        'history_id': 'hist-enc-1',
+      };
+
+      final result = await service.downloadLatestContent();
+
+      expect(result, isNotNull);
+      expect(result!.type, equals(ContentType.file));
+      expect(result.fileName, '真名.zip');
+      expect(result.fileSize, 4096);
+      expect(result.fileHash, 'file-hash-enc');
+      expect(result.id, 'hist-enc-1');
+    });
+
+    test('cloud row without enc_file_name falls back to file_name', () async {
+      repo.currentClipboard = {
+        'id': 'clip-cloud',
+        'user_id': 'user_x',
+        'content': 'marker-ciphertext',
+        'hash': 'file-hash-cloud',
+        'source_device': 'device-b',
+        'source_device_name': 'Phone B',
+        'source_platform': 'android',
+        'timestamp': 1700000000000,
+        'type': 'file',
+        'file_name': 'cloud-name.txt',
+        'file_size': 512,
+        'mime_type': 'text/plain',
+        'file_key': 'uuid-cloud',
+        'history_id': 'hist-cloud-1',
+      };
+
+      final result = await service.downloadLatestContent();
+
+      expect(result, isNotNull);
+      expect(result!.type, equals(ContentType.file));
+      expect(result.fileName, 'cloud-name.txt');
+      expect(result.fileSize, 512);
+      expect(result.mimeType, 'text/plain');
+    });
+
+    test('file row with content marker still decodes as file (no DecryptionException)', () async {
+      final marker = (await encryption.encrypt('', key)).toBase64();
+      repo.currentClipboard = {
+        'id': 'clip-marker',
+        'user_id': 'user_x',
+        'content': marker,
+        'hash': 'file-hash-marker',
+        'source_device': 'device-b',
+        'source_device_name': 'Phone B',
+        'source_platform': 'android',
+        'timestamp': 1700000000000,
+        'type': 'file',
+        'enc_file_name': (await encryption.encrypt('marker.bin', key)).toBase64(),
+        'file_size': 100,
+        'file_key': 'uuid-marker',
+        'history_id': 'hist-marker-1',
+      };
+
+      final result = await service.downloadLatestContent();
+
+      expect(result, isNotNull);
+      expect(result!.type, equals(ContentType.file));
+      expect(result.fileName, 'marker.bin');
+      expect(result.fileHash, 'file-hash-marker');
+    });
+  });
 }

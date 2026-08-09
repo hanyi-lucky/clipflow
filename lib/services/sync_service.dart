@@ -254,12 +254,16 @@ class SyncService {
   }) async {
     if (isFileHashUploaded(plaintextHash)) return null;
     final marker = (await _encryption.encrypt('', _key)).toBase64();
+    // 文件名随数据 key 加密（随机 IV）：LAN 报文只携带密文 encFileName，
+    // 明文 fileName 绝不上 LAN；Cloud 侧仍走原有明文 file_name 元数据。
+    final encFileName = (await _encryption.encrypt(fileName, _key)).toBase64();
     return PreparedSyncOperation(
       kind: SyncOperationKind.file,
       dedupeKey: 'file:$plaintextHash',
       payload: {
         'hash': plaintextHash,
         'fileName': fileName,
+        'encFileName': encFileName,
         'fileSize': fileSize,
         'mimeType': mimeType,
         'marker': marker,
@@ -454,7 +458,22 @@ class SyncService {
       }
 
       if (type == 'file') {
-        // D3：轮询热路径只返回元数据，文件内容走独立下载任务
+        // D3：轮询热路径只返回元数据，文件内容走独立下载任务。
+        // 文件名：LAN 行优先解密 enc_file_name（密文）；Cloud 行回退
+        // 明文 file_name。enc_file_name 缺失/解密失败 → null（占位 'file'，
+        // 历史 refresh 自然修正展示名）。
+        String? fileName = current['file_name'] as String?;
+        final encFileName = current['enc_file_name'] as String?;
+        if (encFileName != null && encFileName.isNotEmpty) {
+          try {
+            fileName = await _encryption.decrypt(
+              EncryptedData.fromBase64(encFileName),
+              _key,
+            );
+          } catch (_) {
+            // 解密失败保留 Cloud 回退值或 null
+          }
+        }
         return DownloadResult(
           content: '',
           sourceDeviceId: current['source_device'] as String? ?? 'unknown',
@@ -465,7 +484,7 @@ class SyncService {
           restoredEntries: restoredRaw,
           type: ContentType.file,
           id: current['history_id'] as String?,
-          fileName: current['file_name'] as String?,
+          fileName: fileName,
           fileSize: current['file_size'] as int?,
           mimeType: current['mime_type'] as String?,
           fileHash: current['hash'] as String?,

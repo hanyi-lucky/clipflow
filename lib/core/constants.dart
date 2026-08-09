@@ -28,8 +28,9 @@ const Set<String> kImageFileExtensions = {
 
 /// LAN 加速相关常量（Phase 2.1 基础层）。
 ///
-/// 帧上限预留 16MiB：图片全图 base64 上限约 6.7MB，2.2 文件交付
-/// 复用同一帧协议时无需改上限。
+/// 帧上限预留 16MiB：图片全图 base64 上限约 6.7MB；2.2 起文件交付
+/// 走 1MiB 分块帧（fileStart/fileChunk），单文件体积与帧上限解耦——
+/// 文件体积只受 [lanMaxFileChunks] 约束，将来提上限只需增加帧数。
 class LanConstants {
   /// LAN 协议版本（Hello/帧中的 `v` 字段）。
   static const int lanProtoVersion = 1;
@@ -69,4 +70,17 @@ class LanConstants {
 
   /// 发起方连接（TLS 建连）超时。
   static const Duration lanConnectTimeout = Duration(seconds: 2);
+
+  /// LAN 文件明文上限（Phase 2.2）：明文 > 15MiB 不走 LAN（Cloud-only）。
+  static const int lanMaxFileBytes = 15 * 1024 * 1024;
+
+  /// LAN 文件密文分块大小：单 chunk 密文 ≤ 1MiB，base64 后 ≈1.4MiB/帧。
+  static const int lanFileChunkBytes = 1024 * 1024;
+
+  /// 单文件最大 chunk 数（DoS/资源上限）：128 × 1MiB ≈ 128MiB 密文，
+  /// 远超 50MiB 明文全局上限；将来提文件上限只需增加帧数，零协议改动。
+  static const int lanMaxFileChunks = 128;
+
+  /// mDNS 能力位：t=文本 / i=图片 / f=文件。仅展示/未来分流用，不参与认证。
+  static const String lanCaps = 't/i/f';
 }
