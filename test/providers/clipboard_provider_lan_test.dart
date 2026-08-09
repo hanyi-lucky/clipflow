@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -80,6 +81,10 @@ class _FakeLanSyncManager extends LanSyncManager {
   int fetchCalls = 0;
   final List<SyncOperation> pushed = [];
 
+  /// 若设置，start() 会挂起等待该 gate（模拟真实 socket bind 的
+  /// FakeAsync 下永不完成，用于验证 initialize 不阻塞）。
+  Completer<void>? startGate;
+
   @override
   Future<void> start({
     required String userId,
@@ -88,6 +93,10 @@ class _FakeLanSyncManager extends LanSyncManager {
     bool enabled = true,
   }) async {
     startCalls++;
+    final gate = startGate;
+    if (gate != null) {
+      await gate.future;
+    }
   }
 
   @override
@@ -354,6 +363,52 @@ void main() {
         lanProvider.history.map((e) => e.content).toList(),
       );
       expect(lanManager.fetchCalls, greaterThanOrEqualTo(1));
+    });
+  });
+
+  group('ClipboardProvider initialize 非阻塞（FakeAsync 回归）', () {
+    testWidgets('LAN start 未完成时 initialize 及时返回，不阻塞解锁', (tester) async {
+      final lanManager = _FakeLanSyncManager()
+        ..startGate = Completer<void>(); // start 永不完成，等价真实 socket bind
+      final settings = SettingsProvider();
+      await settings.setBackgroundSync(false);
+      await settings.setNotificationSync(false);
+
+      final provider = ClipboardProvider(
+        imageStore: imageStore,
+        outbox: _MemoryOutbox(),
+        lanSyncManager: lanManager,
+      );
+      provider.setSettingsProvider(settings);
+
+      var initReturned = false;
+      provider
+          .initialize(
+            storage: storage,
+            cloudRepo: repo,
+            deviceId: 'device-test',
+            deviceName: 'Test Mac',
+            encryptionKey: key,
+          )
+          .then((_) {
+            initReturned = true;
+          });
+
+      // FakeAsync 下只泵微任务，不推进真实网络 I/O；
+      // 若 initialize 错误地 await 了 _startLanManager，此处不会返回。
+      try {
+        await tester.pump();
+        await tester.pump();
+        expect(
+          initReturned,
+          isTrue,
+          reason: 'initialize 不应阻塞在 LAN start 上'
+              '（回归：await _startLanManager 在 FakeAsync 下挂起）',
+        );
+      } finally {
+        provider.dispose();
+      }
+      expect(lanManager.startCalls, 1);
     });
   });
 
