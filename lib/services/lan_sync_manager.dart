@@ -46,17 +46,22 @@ class LanSyncManager {
         _retryBaseDelay =
             retryBaseDelay ?? LanConstants.lanPushRetryBaseDelay,
         _outboxStore = outboxStore ?? LanOutboxStore(),
-        _diagnostics = diagnostics ?? LanDiagnostics(),
-        _discovery = discovery ?? LanDiscoveryService(),
-        _fileStore = fileStore ?? LocalFileStore(),
-        _transport = transport ??
-            LanTransport(
-              handshakeService: handshakeService ??
-                  LanHandshakeService(
-                    cloudRepository: cloudRepository ??
-                        CloudRepository(CloudBaseService()),
-                  ),
-            ) {
+        _fileStore = fileStore ?? LocalFileStore() {
+    // 单例 diagnostics：先解析一次，再注入 discovery/handshake/transport
+    // 三层默认构造分支（生产接线，见 Phase 2.3 reviewer 高置信问题 1）。
+    _diagnostics = diagnostics ?? LanDiagnostics();
+    _discovery = discovery ??
+        LanDiscoveryService(diagnostics: _diagnostics);
+    _transport = transport ??
+        LanTransport(
+          diagnostics: _diagnostics,
+          handshakeService: handshakeService ??
+              LanHandshakeService(
+                cloudRepository: cloudRepository ??
+                    CloudRepository(CloudBaseService()),
+                diagnostics: _diagnostics,
+              ),
+        );
     _transport.latestRowProvider = () => _latestRow;
     _transport.onPushReceived = _handlePushReceived;
     // 文件密文落盘：tmp `.part` → 全部字节收齐后原子 rename 成 `.enc`；
@@ -73,11 +78,11 @@ class LanSyncManager {
     _transport.onFilePushReceived = _handleFilePushReceived;
   }
 
-  final LanDiscoveryService _discovery;
-  final LanTransport _transport;
+  late final LanDiscoveryService _discovery;
+  late final LanTransport _transport;
   final LocalFileStore _fileStore;
   final LanOutboxStore _outboxStore;
-  final LanDiagnostics _diagnostics;
+  late final LanDiagnostics _diagnostics;
   final Duration _fetchTimeout;
   final Duration _retrySweepInterval;
   final Duration _retryBaseDelay;

@@ -268,6 +268,9 @@ SyncOperation _textOp({
 }
 
 void main() {
+  // 组合测试用真实 LanTransport（TLS 资产经 rootBundle 加载）需要 binding。
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late _MutableClock clock;
   late _FakeDiscovery discovery;
   late _FakeTransport transport;
@@ -1282,6 +1285,7 @@ void main() {
       // 作为 initiator 连接真实 peer（真实 TLS + 真实握手 + fileAck 回执）。
       final peerDiag = LanDiagnostics();
       final peer = LanTransport(
+        diagnostics: peerDiag,
         handshakeService: LanHandshakeService(
           cloudRepository: fakeCloud,
           diagnostics: peerDiag,
@@ -1349,6 +1353,7 @@ void main() {
       // initiator 的 push 帧后回 fileAck（计数落在 manager.diagnostics）。
       final initiatorDiag = LanDiagnostics();
       final initiator = LanTransport(
+        diagnostics: initiatorDiag,
         handshakeService: LanHandshakeService(
           cloudRepository: fakeCloud,
           diagnostics: initiatorDiag,
