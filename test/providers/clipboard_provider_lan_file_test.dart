@@ -18,6 +18,7 @@ import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/repositories/outbox_store.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/encryption_service.dart';
+import 'package:clipflow/services/file_download_breaker.dart';
 import 'package:clipflow/services/lan_sync_manager.dart';
 
 /// 模拟服务器：LAN 文件测试只关心 downloadFile 是否被调用 + Cloud 兜底内容。
@@ -89,6 +90,10 @@ class _FakeLanFileManager extends LanSyncManager {
   Future<void> stop() async {
     stopCalls++;
   }
+}
+
+class _MutableClock {
+  DateTime now = DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000);
 }
 
 class _MemoryOutbox implements OutboxStore {
@@ -221,11 +226,15 @@ void main() {
     };
   }
 
-  Future<ClipboardProvider> createProvider(_FakeLanFileManager? lanManager) async {
+  Future<ClipboardProvider> createProvider(
+    _FakeLanFileManager? lanManager, {
+    FileDownloadBreaker? breaker,
+  }) async {
     final provider = ClipboardProvider(
       fileStore: fileStore,
       outbox: _MemoryOutbox(),
       lanSyncManager: lanManager,
+      fileDownloadBreaker: breaker,
     );
     await provider.initialize(
       storage: storage,
@@ -490,6 +499,68 @@ void main() {
       expect(provider.serverConnected, isTrue);
       expect(provider.consecutiveFailures, 0);
       expect(provider.history.where((e) => e.id == historyId), hasLength(1));
+
+      await settle();
+      provider.dispose();
+    });
+  });
+
+  group('ClipboardProvider LAN file breaker（重下熔断）', () {
+    test('坏 artifact 连续失败 → 冷却期不再 Cloud 重下；冷却过期 half-open 探针', () async {
+      final plaintext =
+          Uint8List.fromList(List<int>.generate(8192, (i) => i % 251));
+      final badPlaintext = Uint8List.fromList(List<int>.filled(8192, 0));
+      final historyId = 'lan-file-breaker';
+      final badEnc = await encryption.encryptBytes(badPlaintext, key);
+      // Cloud 兜底也返回坏 artifact：重试继续失败 → 3 次后进入冷却。
+      repo.downloadBytes = badEnc.toBytes();
+      mockFileChannel();
+
+      final clock = _MutableClock();
+      final breaker = FileDownloadBreaker(
+        now: () => clock.now,
+        cooldown: const Duration(seconds: 60),
+      );
+      final lanManager = _FakeLanFileManager();
+      final row = await fileRow(
+        id: historyId,
+        fileName: 'breaker.bin',
+        fileSize: plaintext.length,
+        fileHash: sha256.convert(plaintext).toString(),
+      );
+
+      final provider = await createProvider(lanManager, breaker: breaker);
+      await settle();
+      provider.stopSync();
+      await seedEnc(historyId, badEnc.toBytes());
+      lanManager.lanRow = row;
+      await provider.triggerSync();
+
+      // 单次运行内：本地坏 .enc → 删除 → Cloud 兜底（≥2 次），3 次失败后 failed
+      await waitFor(
+        () =>
+            provider.fileDownloadProgress(historyId)?.status ==
+            FileTransferStatus.failed,
+        message: 'bad artifact should fail after retries',
+      );
+      final downloadsAfterRun = repo.downloadCalls.length;
+      expect(downloadsAfterRun, greaterThanOrEqualTo(2));
+      expect(breaker.isBlocked(historyId), isTrue, reason: '3 次失败进入冷却');
+
+      // 冷却期内再 triggerSync → 不再 Cloud 重下
+      await provider.triggerSync();
+      await settle();
+      expect(repo.downloadCalls.length, downloadsAfterRun);
+
+      // 冷却过期 → half-open 探针放行（Cloud 重下；单次运行内 2 次兜底）
+      clock.now = clock.now.add(const Duration(seconds: 61));
+      await provider.triggerSync();
+      await waitFor(
+        () => repo.downloadCalls.length >= downloadsAfterRun + 2,
+        message: 'half-open probe should re-download once cooldown expires',
+      );
+      // 探针再失败 → 重新冷却（计数不清零，防抖）
+      expect(breaker.isBlocked(historyId), isTrue);
 
       await settle();
       provider.dispose();

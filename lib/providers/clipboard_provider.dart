@@ -19,6 +19,7 @@ import '../services/encryption_service.dart';
 import '../services/history_service.dart';
 import '../services/clipboard_monitor.dart';
 import '../services/file_clipboard_service.dart';
+import '../services/file_download_breaker.dart';
 import '../services/file_processing_service.dart';
 import '../services/image_clipboard_service.dart';
 import '../l10n/app_strings.dart';
@@ -98,13 +99,15 @@ class ClipboardProvider extends ChangeNotifier
     @visibleForTesting LanSyncManager? lanSyncManager,
     @visibleForTesting
     Duration retryBaseDelay = const Duration(milliseconds: 500),
+    @visibleForTesting FileDownloadBreaker? fileDownloadBreaker,
   }) : _localImageStore = imageStore ?? LocalImageStore(),
        _localFileStore = fileStore ?? LocalFileStore(),
        _outbox = outbox,
        _fileProcessingService =
            fileProcessingService ?? FileProcessingService(),
        _injectedLanManager = lanSyncManager,
-       _retryBaseDelay = retryBaseDelay;
+       _retryBaseDelay = retryBaseDelay,
+       _fileBreaker = fileDownloadBreaker ?? FileDownloadBreaker();
 
   /// Convenience method to access ClipboardProvider from the widget tree
   static ClipboardProvider of(BuildContext context, {bool listen = true}) {
@@ -124,6 +127,9 @@ class ClipboardProvider extends ChangeNotifier
   final OutboxStore? _outbox;
   final FileProcessingService _fileProcessingService;
   final Duration _retryBaseDelay;
+
+  /// 文件重下熔断（坏 artifact 毒行；测试可注入短冷却）。
+  final FileDownloadBreaker _fileBreaker;
 
   /// LAN 加速门面（null = 禁用；生命周期随账户/Provider 收敛）。
   LanSyncManager? _lanManager;
@@ -356,6 +362,7 @@ class ClipboardProvider extends ChangeNotifier
     _nextSyncTimer?.cancel();
     // 先停 LAN（stop + null），再关协调器：避免 push 回调与旧账户并发。
     await _stopLanManager();
+    _fileBreaker.clear(); // 切账户 → 清熔断
     await _syncCoordinator?.discardAccountOutbox();
     await _syncCoordinator?.close();
     _syncCoordinator = null;
@@ -1404,6 +1411,8 @@ class ClipboardProvider extends ChangeNotifier
         _syncService!.markAsReceived(result.timestamp);
       }
     }
+    // 行被取代：游标推进后，被取代的旧毒行熔断状态清理（防 Map 膨胀）。
+    _fileBreaker.pruneOlderThan(result.timestamp.millisecondsSinceEpoch);
   }
 
   /// 处理恢复同步条目：按 type 分流。
@@ -1595,11 +1604,15 @@ class ClipboardProvider extends ChangeNotifier
   }
 
   /// 文件下载入口：建立进度任务后串行执行。
+  ///
+  /// 熔断拦截在入口最先：冷却期内直接 return（不重建进度、不 Cloud 重下），
+  /// 只拦坏 artifact 毒行；成功路径完全不被触碰。
   Future<void> _processFileDownload(DownloadResult result,
       {bool fromLan = false}) async {
     final entryId = (result.id != null && result.id!.isNotEmpty)
         ? result.id!
         : const Uuid().v4();
+    if (_fileBreaker.isBlocked(entryId)) return; // 冷却期：跳过本轮自动重下
     if (_fileDownloads.containsKey(entryId)) {
       final existing = _fileDownloads[entryId]!;
       if (existing.status == FileTransferStatus.pending ||
@@ -1771,6 +1784,7 @@ class ClipboardProvider extends ChangeNotifier
       _syncService!.markAsReceived(result.timestamp);
       progress.status = FileTransferStatus.completed;
       progress.error = null;
+      _fileBreaker.reset(entryId); // 成功 → 清熔断
       await _localFileStore.enforceCacheLimit(
         AppConstants.localFileCacheMaxBytes,
         protectedIds: {entryId},
@@ -1785,6 +1799,10 @@ class ClipboardProvider extends ChangeNotifier
           e is EncryptionException) {
         _lanManager?.diagnostics
             .recordFallback(LanFallbackReason.artifactMismatch);
+        _fileBreaker.recordFailure( // 跨 tick 熔断计数（按行时间戳域）
+          entryId,
+          rowTimestampMs: result.timestamp.millisecondsSinceEpoch,
+        );
         final badPath = encryptedPath;
         if (badPath != null) {
           try {
@@ -1850,6 +1868,7 @@ class ClipboardProvider extends ChangeNotifier
     progress.status = FileTransferStatus.cancelled;
     progress.error = AppStrings.fileCancelled;
     _pendingFileRetries.remove(entryId);
+    _fileBreaker.reset(entryId); // 取消 → 清熔断
     if (_activeFileDownloadId == entryId) {
       _activeFileDownloadId = null;
     }
@@ -1877,6 +1896,7 @@ class ClipboardProvider extends ChangeNotifier
     progress.totalBytes = null;
     progress.decryptedHash = null;
     progress.cancelToken = FileTransferCancelToken();
+    _fileBreaker.reset(entryId); // 手动重试 → 清熔断（可绕过冷却）
     notifyListeners();
     await _runFileDownload(
       entryId,
