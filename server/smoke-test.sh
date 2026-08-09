@@ -658,4 +658,100 @@ if [ "$ok" != "1" ]; then
   exit 1
 fi
 
+
+echo "==> 26. LAN 票据：取票 + 校验 + token deviceId 一致性"
+LAN_IP_A="198.51.100.70"
+LAN_IP_B="198.51.100.71"
+LAN_IP_C="198.51.100.72"
+LAN_USER="user_smoke_lan"
+LAN_DEV_A="lan-smoke-device-a"
+LAN_DEV_B="lan-smoke-device-b"
+LAN_DEV_C="lan-smoke-device-c"
+LAN_TOKEN_A=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${LAN_IP_A}" -d "{\"userId\":\"${LAN_USER}\",\"deviceId\":\"${LAN_DEV_A}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+LAN_AUTH_A="Authorization: Bearer ${LAN_TOKEN_A}"
+# 注册设备 A
+curl -fsS -X POST "${BASE}/device" -H "$LAN_AUTH_A" -H 'Content-Type: application/json' \
+  -d "{\"id\":\"${LAN_DEV_A}\",\"name\":\"Lan Smoke A\",\"platform\":\"macos\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"){console.error("FAIL register device: "+s);process.exit(1)}})'
+# 取票（带 token）→ 200 + ticket/expiresAtMs
+curl -fsS -X POST "${BASE}/lan/ticket" -H "$LAN_AUTH_A" -H 'Content-Type: application/json' \
+  -d "{\"deviceId\":\"${LAN_DEV_A}\"}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL lan ticket: "+s);process.exit(1)}
+  const d=j.data;
+  if(typeof d.ticket!=="string"||d.ticket.length<20){console.error("FAIL ticket missing: "+s);process.exit(1)}
+  if(typeof d.expiresAtMs!=="number"||d.expiresAtMs<=Date.now()){console.error("FAIL expiresAtMs: "+s);process.exit(1)}
+  console.log("    ok (ticket="+d.ticket.slice(0,16)+"..., expiresAtMs="+d.expiresAtMs+")");
+})'
+TICKET_A=$(curl -fsS -X POST "${BASE}/lan/ticket" -H "$LAN_AUTH_A" -H 'Content-Type: application/json' \
+  -d "{\"deviceId\":\"${LAN_DEV_A}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.ticket)})')
+# 校验 → 200 + userId/deviceId
+curl -fsS -X POST "${BASE}/lan/ticket/verify" -H 'Content-Type: application/json' \
+  -d "{\"ticket\":\"${TICKET_A}\"}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL lan verify: "+s);process.exit(1)}
+  const d=j.data;
+  if(d.userId!=="user_smoke_lan"){console.error("FAIL verify userId: "+JSON.stringify(d));process.exit(1)}
+  if(d.deviceId!=="lan-smoke-device-a"){console.error("FAIL verify deviceId: "+JSON.stringify(d));process.exit(1)}
+  console.log("    ok (userId="+d.userId+", deviceId="+d.deviceId+")");
+})'
+# token deviceId 一致性：body deviceId 与 token 绑定的 deviceId 不一致 → 400
+LAN_MISMATCH_CODE=$(curl -sS -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/lan/ticket" -H "$LAN_AUTH_A" -H 'Content-Type: application/json' -d '{"deviceId":"some-other-device"}' || true)
+if [ "$LAN_MISMATCH_CODE" != "400" ]; then
+  echo "FAIL: lan ticket deviceId mismatch expect 400 got ${LAN_MISMATCH_CODE}" >&2
+  exit 1
+fi
+node -e '
+const fs=require("fs");
+const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+if(b.code!=="ERROR"){console.error("FAIL mismatch body: "+fs.readFileSync(process.argv[1],"utf8"));process.exit(1)}
+console.log("    ok (deviceId mismatch -> 400 ERROR)");
+' "${RATE_BODY}"
+
+echo "==> 27. LAN 票据：设备移除后取票/校验 403"
+# 27a. 正常移除设备后，已签发票据校验 → 403（撤销实时生效）
+LAN_TOKEN_B=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${LAN_IP_B}" -d "{\"userId\":\"${LAN_USER}\",\"deviceId\":\"${LAN_DEV_B}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+LAN_AUTH_B="Authorization: Bearer ${LAN_TOKEN_B}"
+curl -fsS -X POST "${BASE}/device" -H "$LAN_AUTH_B" -H 'Content-Type: application/json' \
+  -d "{\"id\":\"${LAN_DEV_B}\",\"name\":\"Lan Smoke B\",\"platform\":\"macos\"}" >/dev/null
+TICKET_B=$(curl -fsS -X POST "${BASE}/lan/ticket" -H "$LAN_AUTH_B" -H 'Content-Type: application/json' \
+  -d "{\"deviceId\":\"${LAN_DEV_B}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.ticket)})')
+# 用设备 A 的 token 移除设备 B（移除后设备 B 的 token 全部删除）
+curl -fsS -X DELETE "${BASE}/device/${LAN_DEV_B}" -H "$LAN_AUTH_A" >/dev/null
+LAN_VERIFY_B_CODE=$(curl -sS -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/lan/ticket/verify" -H 'Content-Type: application/json' -d "{\"ticket\":\"${TICKET_B}\"}" || true)
+if [ "$LAN_VERIFY_B_CODE" != "403" ]; then
+  echo "FAIL: verify after removal expect 403 got ${LAN_VERIFY_B_CODE}" >&2
+  exit 1
+fi
+echo "    ok (verify removed device ticket -> 403)"
+# 27b. 模拟带外移除（直改 removed_at，token 仍有效）→ 取票 403
+LAN_TOKEN_C=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' -H "X-Forwarded-For: ${LAN_IP_C}" -d "{\"userId\":\"${LAN_USER}\",\"deviceId\":\"${LAN_DEV_C}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+LAN_AUTH_C="Authorization: Bearer ${LAN_TOKEN_C}"
+curl -fsS -X POST "${BASE}/device" -H "$LAN_AUTH_C" -H 'Content-Type: application/json' \
+  -d "{\"id\":\"${LAN_DEV_C}\",\"name\":\"Lan Smoke C\",\"platform\":\"macos\"}" >/dev/null
+node -e '
+const Database=require(process.argv[1]);
+const db=new Database(process.argv[2]);
+const info=db.prepare("UPDATE devices SET removed_at = ? WHERE id = ?").run(Date.now(), process.argv[3]);
+if(info.changes!==1){console.error("FAIL direct removal update");process.exit(1)}
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${LAN_DEV_C}"
+LAN_TICKET_C_CODE=$(curl -sS -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/lan/ticket" -H "$LAN_AUTH_C" -H 'Content-Type: application/json' -d "{\"deviceId\":\"${LAN_DEV_C}\"}" || true)
+if [ "$LAN_TICKET_C_CODE" != "403" ]; then
+  echo "FAIL: ticket after removal expect 403 got ${LAN_TICKET_C_CODE}" >&2
+  exit 1
+fi
+echo "    ok (ticket for removed device -> 403)"
+
 echo "SMOKE TEST PASSED"

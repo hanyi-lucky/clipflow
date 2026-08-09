@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
@@ -133,6 +134,107 @@ function pruneCrashBuckets(now) {
     if (kept.length === 0) crashBuckets.delete(key);
     else crashBuckets.set(key, kept);
   }
+}
+
+// ==================== LAN 票据（A3 双向挑战的服务端部分）====================
+// 短时票据：HMAC-SHA256(LAN_TICKET_SECRET, "clipflow:lan-ticket-v1|payload")。
+// LAN_TICKET_SECRET 支持环境变量；缺省启动随机生成并 warn（重启后旧票据失效，
+// 客户端握手时自动重取，无感）。payload 只含 deviceId+exp，**不含 userId**——
+// userId 由 verify 端点从 devices 表反查返回，客户端仅在内存中与自身比对，
+// userId 永不落线。
+const LAN_TICKET_TTL_MS = envInt('LAN_TICKET_TTL_MS', 5 * 60 * 1000);
+const LAN_TICKET_SECRET = process.env.LAN_TICKET_SECRET
+  || (() => {
+    const secret = crypto.randomBytes(32).toString('hex');
+    console.warn('LAN_TICKET_SECRET not set; using ephemeral random secret (LAN tickets invalid after restart)');
+    return secret;
+  })();
+
+// LAN 票据校验限流（POST /api/lan/ticket/verify）：轻量独立 IP 桶（verify 无认证，
+// 无 userId 概念），与 auth/crash 同构的滑动窗口辅助函数。
+const LAN_VERIFY_MAX_IP_REQUESTS = envInt('LAN_VERIFY_MAX_IP_REQUESTS', 60);
+const LAN_VERIFY_WINDOW_MS = envInt('LAN_VERIFY_WINDOW_MS', 60000);
+const LAN_VERIFY_CLEANUP_MS = envInt('LAN_VERIFY_CLEANUP_MS', 60000);
+// key -> 窗口内时间戳数组（'lan-verify-ip:'+ip）
+const lanVerifyBuckets = new Map();
+
+function isLanVerifyLimited(key, now) {
+  const stamps = lanVerifyBuckets.get(key) || [];
+  const kept = stamps.filter((t) => now - t < LAN_VERIFY_WINDOW_MS);
+  lanVerifyBuckets.set(key, kept);
+  return kept.length >= LAN_VERIFY_MAX_IP_REQUESTS;
+}
+
+function recordLanVerify(key, now) {
+  const stamps = lanVerifyBuckets.get(key) || [];
+  stamps.push(now);
+  lanVerifyBuckets.set(key, stamps);
+}
+
+// 计算最早超龄时间差；窗口已被 prune 清空时兜底返回整个窗口
+function computeLanVerifyRetryAfterMs(now, key) {
+  let earliest = Infinity;
+  for (const t of lanVerifyBuckets.get(key) || []) {
+    if (t < earliest) earliest = t;
+  }
+  const wait = earliest === Infinity ? LAN_VERIFY_WINDOW_MS : (earliest + LAN_VERIFY_WINDOW_MS - now);
+  return Math.max(wait, 1000);
+}
+
+function pruneLanVerifyBuckets(now) {
+  for (const [key, stamps] of lanVerifyBuckets) {
+    const kept = stamps.filter((t) => now - t < LAN_VERIFY_WINDOW_MS);
+    if (kept.length === 0) lanVerifyBuckets.delete(key);
+    else lanVerifyBuckets.set(key, kept);
+  }
+}
+
+// 签发票据：payload = base64url({deviceId, exp})，mac = HMAC(secret, 域前缀|payload)。
+function signLanTicket(deviceId, exp) {
+  const payload = Buffer.from(JSON.stringify({ deviceId, exp })).toString('base64url');
+  const mac = crypto.createHmac('sha256', LAN_TICKET_SECRET)
+    .update(`clipflow:lan-ticket-v1|${payload}`)
+    .digest('base64url');
+  return `${payload}.${mac}`;
+}
+
+// 校验票据：结构/HMAC（常量时间）/过期。返回 {ok, deviceId?, expiresAtMs?}。
+// 任何一步失败均返回 ok=false（verify 端点统一 403，不泄露具体失败原因）。
+function verifyLanTicket(ticket) {
+  if (typeof ticket !== 'string' || ticket.length === 0 || ticket.length > 4096) {
+    return { ok: false };
+  }
+  const dot = ticket.indexOf('.');
+  if (dot <= 0 || dot === ticket.length - 1) return { ok: false };
+  const payload = ticket.slice(0, dot);
+  const mac = ticket.slice(dot + 1);
+  if (!/^[A-Za-z0-9_-]+$/.test(payload) || !/^[A-Za-z0-9_-]+$/.test(mac)) {
+    return { ok: false };
+  }
+  const expected = crypto.createHmac('sha256', LAN_TICKET_SECRET)
+    .update(`clipflow:lan-ticket-v1|${payload}`)
+    .digest();
+  let provided;
+  try {
+    provided = Buffer.from(mac, 'base64url');
+  } catch (e) {
+    return { ok: false };
+  }
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+    return { ok: false };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  } catch (e) {
+    return { ok: false };
+  }
+  if (typeof parsed.deviceId !== 'string' || parsed.deviceId.length === 0
+      || typeof parsed.exp !== 'number' || !Number.isFinite(parsed.exp)) {
+    return { ok: false };
+  }
+  if (parsed.exp <= Date.now()) return { ok: false };
+  return { ok: true, deviceId: parsed.deviceId, expiresAtMs: parsed.exp };
 }
 
 // 中间件
@@ -824,6 +926,78 @@ app.post('/api/salt', authenticate, (req, res) => {
   res.json({ code: 'SUCCESS' });
 });
 
+// ==================== LAN 票据 API ====================
+
+// 取票：authenticate 鉴权 + token 绑定的 device_id 与 body 一致性 + removed_at 403。
+// 签发 HMAC 短时票据（默认 5min TTL）。不建表、不加外键、不动 tokens 机制。
+app.post('/api/lan/ticket', authenticate, (req, res) => {
+  const { deviceId } = req.body || {};
+  if (typeof deviceId !== 'string' || deviceId.length === 0 || deviceId.length > 128) {
+    return res.status(400).json({ code: 'ERROR', message: 'deviceId is required' });
+  }
+
+  // token device_id 一致性：票据只能为当前 token 绑定的设备签发
+  const tokenRow = db.prepare('SELECT user_id, device_id FROM tokens WHERE token = ?').get(req.token);
+  if (!tokenRow || tokenRow.device_id !== deviceId) {
+    return res.status(400).json({ code: 'ERROR', message: 'deviceId does not match token' });
+  }
+
+  // removed_at 复查（撤销实时生效；正常 API 移除会同时删除绑定 token，
+  // 此处兜底带外移除 / 竞态）
+  const device = db.prepare('SELECT removed_at FROM devices WHERE id = ? AND user_id = ?')
+    .get(deviceId, req.userId);
+  if (device && device.removed_at != null) {
+    return res.status(403).json({
+      code: 'ERROR',
+      message: '设备已被移除，请清除应用数据后重新添加',
+    });
+  }
+
+  const exp = Date.now() + LAN_TICKET_TTL_MS;
+  const ticket = signLanTicket(deviceId, exp);
+  res.json({ code: 'SUCCESS', data: { ticket, expiresAtMs: exp } });
+});
+
+// 校验票据：独立 IP 限流 + HMAC/过期复查 + removed_at 复查。
+// 返回 userId/deviceId（userId 仅经此加密通道返回，客户端在内存中比对）。
+app.post('/api/lan/ticket/verify', (req, res) => {
+  const now = Date.now();
+  const ipKey = 'lan-verify-ip:' + clientIp(req);
+  if (isLanVerifyLimited(ipKey, now)) {
+    const retryAfterMs = computeLanVerifyRetryAfterMs(now, ipKey);
+    res.set('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
+    return res.status(429).json({
+      code: 'RATE_LIMITED',
+      message: '尝试过于频繁，请稍后再试',
+      retryAfterMs,
+    });
+  }
+
+  const { ticket } = req.body || {};
+  const result = verifyLanTicket(ticket);
+  if (!result.ok) {
+    return res.status(403).json({ code: 'ERROR', message: 'Invalid ticket' });
+  }
+
+  // 校验通过才记账（与 /auth 同语义），避免非法请求刷爆桶
+  recordLanVerify(ipKey, now);
+
+  // 实时复查 removed_at：设备被移除后已签发票据立即失效
+  const device = db.prepare('SELECT user_id, removed_at FROM devices WHERE id = ?')
+    .get(result.deviceId);
+  if (!device || device.removed_at != null) {
+    return res.status(403).json({
+      code: 'ERROR',
+      message: '设备已被移除，请清除应用数据后重新添加',
+    });
+  }
+
+  res.json({
+    code: 'SUCCESS',
+    data: { userId: device.user_id, deviceId: result.deviceId, expiresAtMs: result.expiresAtMs },
+  });
+});
+
 // 崩溃上报：可选认证 + 独立双滑动窗口限流 + stack 必填 + body 256KB + 字段裁剪入库。
 // 白名单字段（异常类型/消息/栈/平台/机型/版本/设备/指纹/时间），绝不采集剪贴板明文/密码。
 app.post('/api/crash', authenticateOptional, (req, res) => {
@@ -891,6 +1065,11 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     pruneAuthBuckets(Date.now());
     pruneCrashBuckets(Date.now());
   }, Math.min(AUTH_CLEANUP_MS, CRASH_CLEANUP_MS));
+
+  // LAN 票据校验限流桶定时清理（防内存膨胀；重启清零=更宽松，接受）
+  setInterval(() => {
+    pruneLanVerifyBuckets(Date.now());
+  }, LAN_VERIFY_CLEANUP_MS);
 
   // 每小时清理过期 token、超过 24h 的已删除条目，以及超过 30 天的崩溃报告
   setInterval(() => {
