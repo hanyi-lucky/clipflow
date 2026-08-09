@@ -22,6 +22,7 @@ class LocalStorage {
   static const _keyDeletedEntryIds = 'deleted_entry_ids';
   static const _keyMonitorIgnoreFileHashes = 'monitor_ignore_file_hashes';
   static const _keyMonitorLastFileSignatures = 'monitor_last_file_signatures';
+  static const _keyLanAcceleration = 'lan_acceleration';
 
   final SharedPreferences _prefs;
 
@@ -182,6 +183,13 @@ class LocalStorage {
 
   Future<void> setMonitorIgnoreFileHashes(List<String> hashes) async {
     await _prefs.setStringList(_keyMonitorIgnoreFileHashes, hashes);
+  }
+
+  // LAN 加速（Phase 2.1，默认开）
+  bool get lanAcceleration => _prefs.getBool(_keyLanAcceleration) ?? true;
+
+  Future<void> setLanAcceleration(bool value) async {
+    await _prefs.setBool(_keyLanAcceleration, value);
   }
 
   Map<String, String> get monitorLastFileSignatures {

@@ -29,6 +29,7 @@ import '../repositories/local_storage.dart';
 import '../repositories/cloud_repository.dart';
 import '../repositories/local_image_store.dart';
 import '../repositories/local_file_store.dart';
+import '../services/lan_sync_manager.dart';
 import '../core/constants.dart';
 import '../core/exceptions.dart';
 import 'settings_provider.dart';
@@ -93,6 +94,7 @@ class ClipboardProvider extends ChangeNotifier
     LocalFileStore? fileStore,
     OutboxStore? outbox,
     FileProcessingService? fileProcessingService,
+    @visibleForTesting LanSyncManager? lanSyncManager,
     @visibleForTesting
     Duration retryBaseDelay = const Duration(milliseconds: 500),
   }) : _localImageStore = imageStore ?? LocalImageStore(),
@@ -100,6 +102,7 @@ class ClipboardProvider extends ChangeNotifier
        _outbox = outbox,
        _fileProcessingService =
            fileProcessingService ?? FileProcessingService(),
+       _injectedLanManager = lanSyncManager,
        _retryBaseDelay = retryBaseDelay;
 
   /// Convenience method to access ClipboardProvider from the widget tree
@@ -120,6 +123,11 @@ class ClipboardProvider extends ChangeNotifier
   final OutboxStore? _outbox;
   final FileProcessingService _fileProcessingService;
   final Duration _retryBaseDelay;
+
+  /// LAN 加速门面（null = 禁用；生命周期随账户/Provider 收敛）。
+  LanSyncManager? _lanManager;
+  final LanSyncManager? _injectedLanManager;
+  String? _lanUserId;
 
   ClipboardMonitor? _monitor;
   SyncService? _syncService;
@@ -181,6 +189,10 @@ class ClipboardProvider extends ChangeNotifier
   Set<String> get selectedIds => Set.unmodifiable(_selectedIds);
   String get mergeSeparator => _mergeSeparator;
   bool get serverConnected => _serverConnected;
+
+  /// 连续 Cloud 失败计数（测试/诊断用）。
+  @visibleForTesting
+  int get consecutiveFailures => _consecutiveFailures;
 
   bool get hasActiveFilters =>
       _searchQuery.isNotEmpty ||
@@ -262,6 +274,64 @@ class ClipboardProvider extends ChangeNotifier
     _settingsProvider = settings;
   }
 
+  // -- LAN 加速（Phase 2.1）--
+
+  /// 设置页开关：true → 启动 LAN（未启动时）；false → 停止并置 null。
+  Future<void> setLanAcceleration(bool enabled) async {
+    if (_disposed) return;
+    if (enabled) {
+      await _startLanManager();
+    } else {
+      await _stopLanManager();
+    }
+  }
+
+  /// 启动 LAN 门面。任何失败都只日志并降级禁用，绝不阻塞解锁。
+  Future<void> _startLanManager() async {
+    if (_disposed || _syncService == null || _cloudRepo == null) return;
+    var manager = _lanManager;
+    if (manager != null) {
+      if (manager.isEnabled) return;
+      _lanManager = null;
+      try {
+        await manager.stop();
+      } catch (e) {
+        debugPrint('[CLIP-PROVIDER] LAN stop before restart failed: $e');
+      }
+    }
+    try {
+      manager = _injectedLanManager ??
+          LanSyncManager(cloudRepository: _cloudRepo!);
+      _lanManager = manager;
+      await manager.start(
+        userId: _lanUserId ??
+            _storage?.userId ??
+            'user_${_syncService!.deviceId}',
+        deviceId: _syncService!.deviceId,
+        accountKey: _syncService!.key,
+      );
+      manager.onPushReceived = () {
+        if (_disposed) return;
+        _performDownload();
+      };
+    } catch (e) {
+      debugPrint('[CLIP-PROVIDER] LAN start failed, disabled: $e');
+      _lanManager = null;
+    }
+  }
+
+  /// 停止 LAN 门面并置 null（账户切换/开关关闭）。
+  Future<void> _stopLanManager() async {
+    final manager = _lanManager;
+    _lanManager = null;
+    if (manager == null) return;
+    try {
+      await manager.stop();
+    } catch (e) {
+      debugPrint('[CLIP-PROVIDER] LAN stop error: $e');
+    }
+  }
+
   /// 更新设备名（供重命名当前设备后使用）
   void updateDeviceName(String name) {
     _syncService?.updateDeviceName(name);
@@ -272,6 +342,8 @@ class ClipboardProvider extends ChangeNotifier
     _uploadDebounce?.cancel();
     _syncTimer?.cancel();
     _nextSyncTimer?.cancel();
+    // 先停 LAN（stop + null），再关协调器：避免 push 回调与旧账户并发。
+    await _stopLanManager();
     await _syncCoordinator?.discardAccountOutbox();
     await _syncCoordinator?.close();
     _syncCoordinator = null;
@@ -333,6 +405,14 @@ class ClipboardProvider extends ChangeNotifier
 
     // Register lifecycle observer
     WidgetsBinding.instance.addObserver(this);
+
+    // LAN 加速：默认按设置开启；start 内部失败只降级禁用，不阻塞解锁。
+    // 必须在 _startSyncLoop 之前完成，保证首次 _performDownload 时 LAN
+    // 已就绪或已禁用。
+    _lanUserId = userId ?? storage.userId ?? 'user_$deviceId';
+    if (_settingsProvider?.lanAcceleration ?? true) {
+      await _startLanManager();
+    }
 
     // Only start sync loop if background sync is enabled (or no settings yet)
     if (_settingsProvider?.backgroundSync ?? true) {
@@ -1115,6 +1195,9 @@ class ClipboardProvider extends ChangeNotifier
           notifyListeners();
           break;
       }
+      // LAN 接力推送：补账之后、同 try/catch 内；异常只日志，绝不 rethrow
+      // （防止已删 manifest 的成功操作被写回 outbox 重复上传）。
+      await _lanManager?.pushOperation(op);
     } catch (error) {
       // 回执异常只日志：绝不能向上传播进 coordinator 的失败分支，
       // 否则已删除 manifest 的已成功操作会被重写回 outbox 重复上传。
@@ -1178,91 +1261,129 @@ class ClipboardProvider extends ChangeNotifier
   Future<void> _performDownload() async {
     if (_downloadInFlight) return;
     _downloadInFlight = true;
+    var lanDelivered = false;
     try {
-      final result = await _syncCoordinator!.downloadLatestContent();
-
-      // 处理删除同步：从本地历史中移除被其他设备删除的条目
-      if (result != null && result.deletedIds.isNotEmpty) {
-        for (final id in result.deletedIds) {
-          _historyService.removeEntry(id);
+      // ① LAN 先试（只读旁路，best-effort）：命中则立即交付内容。
+      //    LAN 异常绝不进入 Cloud 的失败计数（内容可能已送达）。
+      if (_lanManager != null) {
+        try {
+          final lanRow = await _lanManager!.fetchLatestContent();
+          if (lanRow != null) {
+            final lanResult =
+                await _syncService!.decodeCurrentClipboard(lanRow);
+            if (lanResult != null && lanResult.hasContent) {
+              await _applyDownloadResult(lanResult);
+              lanDelivered = true;
+            }
+          }
+        } catch (e) {
+          debugPrint('[CLIP-PROVIDER] LAN fetch failed: $e');
+          lanDelivered = false;
         }
-        _saveHistory();
-        notifyListeners();
       }
 
-      // 处理恢复同步：将其他设备恢复的条目添加回本地历史
-      if (result != null && result.restoredEntries.isNotEmpty) {
-        await _handleRestoredEntries(result.restoredEntries);
-      }
-
-      if (result != null &&
-          result.type == ContentType.image &&
-          result.imageBytes != null) {
-        final imageHash = result.imageHash ?? '';
-        _syncService!.markAsDownloadedHash(imageHash);
-        if (!_recentlyDeletedHashes.contains(imageHash)) {
-          await _processImageDownload(result);
-          // 图片完整写入剪切板并成功入历史后才推进时间戳
-          _syncService!.markAsReceived(result.timestamp);
-        }
-      } else if (result != null && result.hasFile) {
-        final fileHash = result.fileHash ?? '';
-        if (fileHash.isNotEmpty) {
-          _syncService!.markAsDownloadedFileHash(fileHash);
-        }
-        await _processFileDownload(result);
-      } else if (result != null && result.content.isNotEmpty) {
-        // 跳过已删除的内容
-        final syncContentHash = sha256
-            .convert(utf8.encode(result.content))
-            .toString();
-        if (_recentlyDeletedHashes.contains(syncContentHash)) {
-          _syncService!.markAsDownloaded(result.content);
-        } else {
-          _syncService!.markAsDownloaded(result.content);
-
-          final contentHash = _syncService!.lastUploadedHash;
-          _monitor?.addIgnoreHash(contentHash);
-
-          _monitor?.pause();
-          await Clipboard.setData(ClipboardData(text: result.content));
-          await Future.delayed(const Duration(milliseconds: 50));
-          _monitor?.resume();
-
-          _historyService.addEntry(
-            ClipboardEntry(
-              id: result.id ?? const Uuid().v4(),
-              content: result.content,
-              sourceDeviceId: result.sourceDeviceId,
-              sourceDeviceName: result.sourceDeviceName,
-              sourcePlatform: result.sourcePlatform,
-              timestamp: result.timestamp,
-              type: ContentType.text,
-            ),
+      // ② Cloud 权威兜底（每 tick 照常执行）：删除/恢复权威源 + 内容兜底。
+      //    LAN 已交付的内容经 decodeCurrentClipboard 时间戳游标自然过滤。
+      try {
+        final result = await _syncCoordinator!.downloadLatestContent();
+        await _applyDownloadResult(result);
+        _consecutiveFailures = 0;
+        _serverConnected = true;
+        _setStatus(SyncStatus.connected);
+      } catch (e) {
+        if (lanDelivered) {
+          // 内容已由 LAN 送达：Cloud 抖动不计失败、保持 connected。
+          debugPrint(
+            '[CLIP-PROVIDER] Cloud fetch failed after LAN delivery: $e',
           );
-          _saveHistory();
-          notifyListeners();
-          // 内容处理成功后才标记时间戳，防止处理失败导致该内容被永久跳过
-          _syncService!.markAsReceived(result.timestamp);
-        }
-      }
-      _consecutiveFailures = 0;
-      _serverConnected = true;
-      _setStatus(SyncStatus.connected);
-    } catch (e) {
-      _consecutiveFailures++;
-      _errorMessage = e.toString();
-      // 连续失败 ≥ 2 次才降级为 disconnected/error，首次失败保持原状态
-      if (_consecutiveFailures >= 2) {
-        _serverConnected = false;
-        if (e is SocketException || e is TimeoutException) {
-          _setStatus(SyncStatus.disconnected);
         } else {
-          _setStatus(SyncStatus.error);
+          _consecutiveFailures++;
+          _errorMessage = e.toString();
+          // 连续失败 ≥ 2 次才降级为 disconnected/error，首次失败保持原状态
+          if (_consecutiveFailures >= 2) {
+            _serverConnected = false;
+            if (e is SocketException || e is TimeoutException) {
+              _setStatus(SyncStatus.disconnected);
+            } else {
+              _setStatus(SyncStatus.error);
+            }
+          }
         }
       }
     } finally {
       _downloadInFlight = false;
+    }
+  }
+
+  /// 应用一次下载结果（写剪切板/历史/防回声/游标）。
+  ///
+  /// LAN 行与 Cloud 行同构（snake_case + `_deletedIds`/`_restoredEntries`），
+  /// 两者共用此方法；LAN 行恒带空删除/恢复数组，删除/恢复只由 Cloud 收敛。
+  Future<void> _applyDownloadResult(DownloadResult? result) async {
+    if (result == null) return;
+
+    // 处理删除同步：从本地历史中移除被其他设备删除的条目
+    if (result.deletedIds.isNotEmpty) {
+      for (final id in result.deletedIds) {
+        _historyService.removeEntry(id);
+      }
+      _saveHistory();
+      notifyListeners();
+    }
+
+    // 处理恢复同步：将其他设备恢复的条目添加回本地历史
+    if (result.restoredEntries.isNotEmpty) {
+      await _handleRestoredEntries(result.restoredEntries);
+    }
+
+    if (result.type == ContentType.image && result.imageBytes != null) {
+      final imageHash = result.imageHash ?? '';
+      _syncService!.markAsDownloadedHash(imageHash);
+      if (!_recentlyDeletedHashes.contains(imageHash)) {
+        await _processImageDownload(result);
+        // 图片完整写入剪切板并成功入历史后才推进时间戳
+        _syncService!.markAsReceived(result.timestamp);
+      }
+    } else if (result.hasFile) {
+      final fileHash = result.fileHash ?? '';
+      if (fileHash.isNotEmpty) {
+        _syncService!.markAsDownloadedFileHash(fileHash);
+      }
+      await _processFileDownload(result);
+    } else if (result.content.isNotEmpty) {
+      // 跳过已删除的内容
+      final syncContentHash = sha256
+          .convert(utf8.encode(result.content))
+          .toString();
+      if (_recentlyDeletedHashes.contains(syncContentHash)) {
+        _syncService!.markAsDownloaded(result.content);
+      } else {
+        _syncService!.markAsDownloaded(result.content);
+
+        final contentHash = _syncService!.lastUploadedHash;
+        _monitor?.addIgnoreHash(contentHash);
+
+        _monitor?.pause();
+        await Clipboard.setData(ClipboardData(text: result.content));
+        await Future.delayed(const Duration(milliseconds: 50));
+        _monitor?.resume();
+
+        _historyService.addEntry(
+          ClipboardEntry(
+            id: result.id ?? const Uuid().v4(),
+            content: result.content,
+            sourceDeviceId: result.sourceDeviceId,
+            sourceDeviceName: result.sourceDeviceName,
+            sourcePlatform: result.sourcePlatform,
+            timestamp: result.timestamp,
+            type: ContentType.text,
+          ),
+        );
+        _saveHistory();
+        notifyListeners();
+        // 内容处理成功后才标记时间戳，防止处理失败导致该内容被永久跳过
+        _syncService!.markAsReceived(result.timestamp);
+      }
     }
   }
 
@@ -2086,6 +2207,8 @@ class ClipboardProvider extends ChangeNotifier
       _savePending = false;
     }
     _monitor?.removeListener(_onMonitorChanged);
+    unawaited(_lanManager?.stop());
+    _lanManager = null;
     _syncCoordinator?.close();
     _monitor?.stop();
     _monitor?.dispose();
