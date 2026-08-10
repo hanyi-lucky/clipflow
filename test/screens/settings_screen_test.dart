@@ -239,4 +239,33 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text(AppStrings.settingsDiagnosticsSection), findsOneWidget);
   });
+
+  testWidgets('设置页「通用」区显示仅局域网同步开关，默认关，开启后持久化', (tester) async {
+    await useTallViewport(tester);
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    await tester.pumpWidget(buildApp(storage));
+    await tester.pumpAndSettle();
+
+    // 开关存在且默认关闭（实验性开关，默认关）
+    expect(find.text(AppStrings.lanOnlyTitle), findsOneWidget);
+    expect(find.text(AppStrings.lanOnlySubtitle), findsOneWidget);
+    final tileFinder = find.ancestor(
+      of: find.text(AppStrings.lanOnlyTitle),
+      matching: find.byType(SwitchListTile),
+    );
+    expect(tester.widget<SwitchListTile>(tileFinder).value, isFalse);
+
+    // 开启 → 树内 SettingsProvider 状态翻转（持久化由 provider/local_storage
+    // 单测覆盖；此处在测试环境 Provider 无 manager）。
+    await tester.tap(find.text(AppStrings.lanOnlyTitle));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(tileFinder).value, isTrue);
+
+    // 再关 → 回到默认
+    await tester.tap(find.text(AppStrings.lanOnlyTitle));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(tileFinder).value, isFalse);
+  });
 }

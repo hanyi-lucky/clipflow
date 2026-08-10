@@ -124,6 +124,53 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                   ),
+                  // Phase 5.1：LAN-only 降级横幅（无 verified peer → 内容仅本地）。
+                  if (provider.lanOnlyDegraded)
+                    SliverToBoxAdapter(
+                      child: Container(
+                        margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.withOpacity(0.10),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Colors.amber.withOpacity(0.4),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.cloud_off,
+                              size: 18,
+                              color: Colors.amber,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    AppStrings.lanOnlyLocalOnlyBanner,
+                                    style: const TextStyle(
+                                      color: Colors.amber,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  Text(
+                                    AppStrings.lanOnlyLocalOnlyBannerHint,
+                                    style: TextStyle(
+                                      color: Colors.amber.shade700,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   const SliverToBoxAdapter(child: HistorySearchBar()),
                   Consumer<ClipboardProvider>(
                     builder: (context, provider, _) {

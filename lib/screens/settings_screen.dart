@@ -113,11 +113,70 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         return;
                       }
                     }
+                    // 级联（不变式 lanOnly ⇒ lanAcceleration）：关闭
+                    // lanAcceleration 同时清除 lanOnly（settings_screen 唯一级联点）。
+                    if (!v && settings.lanOnlyMode) {
+                      await settings.setLanOnlyMode(false);
+                      await ClipboardProvider.of(
+                        context,
+                        listen: false,
+                      ).setLanOnlyMode(false);
+                    }
                     await settings.setLanAcceleration(v);
                     await ClipboardProvider.of(
                       context,
                       listen: false,
                     ).setLanAcceleration(v);
+                  },
+                ),
+                const Divider(height: 1, indent: 16),
+                SwitchListTile(
+                  title: const Text(AppStrings.lanOnlyTitle),
+                  subtitle: const Text(AppStrings.lanOnlySubtitle),
+                  value: settings.lanOnlyMode,
+                  secondary: const Icon(Icons.lan_outlined),
+                  onChanged: (v) async {
+                    // Android 13+ 开启前先请求 NEARBY_WIFI_DEVICES；
+                    // 拒绝 → 置回 false 并提示（LAN 降级，不阻塞 Cloud）。
+                    if (v && Platform.isAndroid) {
+                      final status =
+                          await ph.Permission.nearbyWifiDevices.request();
+                      if (!status.isGranted) {
+                        await settings.setLanOnlyMode(false);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(AppStrings.lanPermissionDenied),
+                            ),
+                          );
+                        }
+                        return;
+                      }
+                    }
+                    // 级联（不变式 lanOnly ⇒ lanAcceleration）：开启
+                    // lanOnly 前先确保 lanAcceleration 开启（manager 生命周期归它）。
+                    if (v && !settings.lanAcceleration) {
+                      await settings.setLanAcceleration(true);
+                      await ClipboardProvider.of(
+                        context,
+                        listen: false,
+                      ).setLanAcceleration(true);
+                    }
+                    await settings.setLanOnlyMode(v);
+                    await ClipboardProvider.of(
+                      context,
+                      listen: false,
+                    ).setLanOnlyMode(v);
+                    if (v && context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            '${AppStrings.lanOnlyExperimentalHint}\n'
+                            '${AppStrings.lanOnlyEnabledSnackBar}',
+                          ),
+                        ),
+                      );
+                    }
                   },
                 ),
                 ListTile(

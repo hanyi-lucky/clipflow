@@ -21,6 +21,8 @@ abstract final class AppStrings {
   static const String syncStatusDisconnected = '未连接';
   static const String syncStatusPaused = '已暂停同步';
   static const String syncStatusLocalOnly = '仅本地';
+  static const String lanOnlyLocalOnlyBanner = '内容仅在本地、未同步到其他设备';
+  static const String lanOnlyLocalOnlyBannerHint = '对端离线或未握手成功时，内容保留在本机，恢复连接后自动继续同步';
 
   // ===== 设置页 =====
   static const String settingsTitle = '设置';
@@ -33,6 +35,10 @@ abstract final class AppStrings {
   static const String autoSyncSubtitle = '检测到新内容时自动同步到云端';
   static const String lanAccelerationTitle = '局域网加速';
   static const String lanAccelerationSubtitle = '同一 Wi-Fi 下优先经局域网快速同步文本与图片，失败自动回退云端';
+  static const String lanOnlyTitle = '仅局域网同步（实验）';
+  static const String lanOnlySubtitle = '内容只经局域网同步，不写云端（同 Wi-Fi 下零服务器流量）';
+  static const String lanOnlyExperimentalHint = '实验功能：对端离线时不保证送达，内容会保留在本机';
+  static const String lanOnlyEnabledSnackBar = '已开启仅局域网同步：内容仅在本机与同一 Wi-Fi 设备间同步';
   static const String lanPermissionDenied = '未获得局域网权限，已回退云端同步';
   static const String historyLimitTitle = '历史记录保留';
   static String historyLimitCount(int limit) => '$limit条';
