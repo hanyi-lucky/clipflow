@@ -771,5 +771,128 @@ void main() {
       await settle();
       provider.dispose();
     });
+
+    test('重启恢复：LAN-only 图片本地历史 + .bin artifact 在 provider 重建后保留', () async {
+      final imgBytes = img.encodePng(img.Image(width: 64, height: 64));
+      mockFileChannel(
+        hasImage: true,
+        imageBytes: Uint8List.fromList(imgBytes),
+      );
+
+      final lanManager = _FakeLanFileManager(); // no peer
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      await provider.debugFileCheck();
+
+      await waitFor(
+        () => lanManager.pushed.any((o) => o.kind == SyncOperationKind.image),
+        message: 'image should be pushed to LAN manager',
+      );
+      await waitFor(
+        () => provider.history.any((e) => e.type == ContentType.image),
+        message: 'image should be in local history',
+      );
+      final op = lanManager.pushed.firstWhere(
+        (o) => o.kind == SyncOperationKind.image,
+      );
+      final imageCache =
+          '${tempDir.path}/${LocalImageStore.subDirectoryName}/${op.operationId}.bin';
+      expect(File(imageCache).existsSync(), isTrue);
+      // 等上传完全收敛（_lanOnlyUploadImage 内 addEntry 与 _saveHistory 之间
+      // 隔着 await 落盘，dispose 过早会在 _savePending=false 时错过 flush）。
+      await waitFor(
+        () => provider.syncStatus == SyncStatus.localOnly,
+        message: 'image upload should settle to localOnly before restart',
+      );
+      // dispose 触发未落盘历史立即写入 storage（模拟退出）
+      provider.dispose();
+      await settle();
+
+      // 重建 provider（同 storage + 同 tempDir、空服务器历史）：历史 + artifact 保留
+      final restarted = await createProvider(_FakeLanFileManager());
+      await settle();
+
+      expect(
+        restarted.history.any((e) => e.type == ContentType.image),
+        isTrue,
+        reason: 'LAN-only 图片历史应在重启后从持久化 JSON 恢复',
+      );
+      expect(
+        File(imageCache).existsSync(),
+        isTrue,
+        reason: '图片 .bin artifact 不应被 cleanupOrphans 孤儿清理',
+      );
+
+      restarted.dispose();
+    });
+
+    test('重启恢复：LAN-only 文件本地历史 + .enc artifact 在 provider 重建后保留', () async {
+      final sourceBytes = List<int>.generate(8192, (i) => i % 251);
+      final sourceFile = File('${tempDir.path}/restart-file.pdf');
+      sourceFile.writeAsBytesSync(sourceBytes);
+      mockFileChannel(
+        hasFiles: true,
+        files: [
+          {
+            'path': sourceFile.path,
+            'name': 'restart-file.pdf',
+            'mimeType': 'application/pdf',
+            'size': sourceBytes.length,
+            'lastModified': 1700000000000,
+            'temp': false,
+          },
+        ],
+      );
+
+      final lanManager = _FakeLanFileManager(); // no peer
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      await provider.debugFileCheck();
+
+      await waitFor(
+        () => lanManager.pushed.any((o) => o.kind == SyncOperationKind.file),
+        message: 'file should be pushed to LAN manager',
+      );
+      await waitFor(
+        () => provider.history.any(
+          (e) => e.type == ContentType.file && e.fileName == 'restart-file.pdf',
+        ),
+        message: 'file should be in local history',
+      );
+      final op = lanManager.pushed.firstWhere(
+        (o) => o.kind == SyncOperationKind.file,
+      );
+      final encPath =
+          '${tempDir.path}/${LocalFileStore.encDirName}/${op.artifactId}.enc';
+      expect(File(encPath).existsSync(), isTrue);
+
+      provider.dispose();
+      await settle();
+
+      // 重建 provider（同 storage + 同 tempDir、空服务器历史）：历史 + artifact 保留
+      final restarted = await createProvider(_FakeLanFileManager());
+      await settle();
+
+      expect(
+        restarted.history.any(
+          (e) => e.type == ContentType.file && e.fileName == 'restart-file.pdf',
+        ),
+        isTrue,
+        reason: 'LAN-only 文件历史应在重启后从持久化 JSON 恢复',
+      );
+      expect(
+        File(encPath).existsSync(),
+        isTrue,
+        reason: '文件 .enc artifact 不应被 cleanupOrphans 孤儿清理',
+      );
+
+      restarted.dispose();
+    });
   });
 }

@@ -616,5 +616,36 @@ void main() {
       expect(provider.lanOnlyDegraded, isTrue);
       expect(provider.lanOnlyUnsyncedAt, isNotNull);
     });
+
+    test('重启恢复：LAN-only 文本本地历史在 provider 重建后保留（同 storage、Cloud 空历史）', () async {
+      final lanManager = _FakeLanSyncManager();
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      await mockClipboardText('restart survives text');
+      await provider.debugFileCheck();
+
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.content == 'restart survives text'),
+        message: 'text should be in local history before restart',
+      );
+      // dispose 触发未落盘历史立即写入 storage（模拟退出）
+      provider.dispose();
+      await settle();
+
+      // 重建 provider（同 storage、空服务器历史）：LAN-only 本地条目应恢复
+      final restarted = await createProvider(_FakeLanSyncManager());
+      await settle();
+
+      expect(
+        restarted.history.any((e) => e.content == 'restart survives text'),
+        isTrue,
+        reason: 'LAN-only 本地历史应在重启后从持久化 JSON 恢复',
+      );
+      restarted.dispose();
+    });
   });
 }
