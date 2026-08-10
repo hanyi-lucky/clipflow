@@ -1,7 +1,7 @@
 # ClipFlow 局域网优先同步改造交接记录
 
 > 最后更新：2026-08-09（Asia/Shanghai）
-> 当前状态：Phase 2.3 完成；真机端到端验证（2026-08-10）打通双向纯 LAN 同步；未部署到生产。
+> 当前状态：**Phase 2.4 完成（2026-08-10）**——Android 真机生命周期、macOS 双实例实证、图片/文件（≤15MiB）LAN 真机交付、LAN 会话稳定性、Mac 自动刷新问题全部验证/解决。
 
 ## 当前 Git 状态
 
@@ -91,8 +91,8 @@
 - 尚未接入设置页 UI（下一轮）；正式完整版（删除/游标/文件/降级）归 Phase 2.5。
 
 ### 已知问题（待跟进）
-1. **LAN 会话周期性断开后自动重连**（架构已接受的迟到帧竞态；不阻塞交付，但会产生反复握手）。
-2. **Mac 端自动刷新偶发不生效**（需手动刷新才写剪贴板；debug 下剪贴板监听/日志捕获不稳定，可能与 Zone 时代残留状态相关）。
+1. **LAN 会话周期性断开后自动重连**（架构已接受的迟到帧竞态；不阻塞交付，但会产生反复握手）——Phase 2.4 实测内容交付无丢失，仍待后续优化。
+2. ~~**Mac 端自动刷新偶发不生效**~~ → **已解决**：`463d7d0` Zone mismatch 修复后，手机→Mac 自动写剪贴板/列表更新连续验证通过。
 3. **MIUI 会撤销 adb 授予的 NEARBY_WIFI_DEVICES**（应用内授权可持久；真机需走设置页开关授权）。
 4. **Windows 端无 LAN 插件**（isSupported=false → 自动走云端）。补全可参考 macOS/Android 实现：原生 mDNS（WinRT Dnssd 系列）+ dart:io TLS + 复用 `lib/services/lan_*` 全部逻辑，注册进 `generated_plugin_registrant.cc` 即可。
 
@@ -101,6 +101,39 @@
 1. **已部分完成（2026-08-10）**：Mac+Android 真机双向文本 LAN 交付实证（≤15MiB 文件/图片/文件名正确/无回声环仍需补验）；macOS 双实例实证（双 bundle ID + 真实 Wi-Fi）仍未做；生产部署已写入 `LAN_TICKET_SECRET` 并上线 LAN 票据端点。
 2. Android 真机验证：NEARBY_WIFI_DEVICES 权限降级、后台保活、锁屏、前台服务绑定、网络切换。
 3. 依据实证结果修复发现的问题（如有）。
+
+## Phase 2.4 验证结果（2026-08-10，全量真机实证）
+
+### 1. 图片/文件（≤15MiB）LAN 真机交付 — ✅ 通过
+- 图片（800×600 PNG）：Mac→手机秒达，手机解码成功（`clipflow_images/*.bin` 落盘）。
+- 5MiB / 12MiB 文件：`.enc` 密文 + 解密明文 **SHA-256 双端字节一致**，文件名正确，无回声环。
+- **>15MiB（16MiB）自动走 Cloud 兜底**：LAN enc 目录无落盘、服务器有记录、明文一致——边界正确。
+
+### 2. Android 真机生命周期验证（Xiaomi 24129PN74C / Android 16 / MIUI）— ✅ 通过
+| 场景 | 结果 |
+|---|---|
+| NEARBY_WIFI_DEVICES 权限降级 | `[LAN-DISCOVERY] start disabled: permissionDenied` 优雅降级不崩溃 → Cloud 兜底正常 → 重新授权后 LAN 恢复 |
+| 后台保活 | Home 后台化后新内容仍被下载（含 MIUI idle 冻结期） |
+| 锁屏 | 屏幕熄灭时同步暂停（MIUI Doze 策略：进程未冻结但 Dart 事件循环挂起、LAN 端口无响应），**唤醒后立即补收**——MIUI 后台策略，非应用缺陷 |
+| 前台服务绑定 | `SyncForegroundService isForeground=true`（dataSync 类型） |
+| 网络切换 | Wi-Fi 断开/恢复后 LAN manager 自动重启新端口，双向同步恢复正常 |
+
+### 3. macOS 双实例实证 — ✅ 通过
+- 双 bundle ID（`com.clipflow.clipflow` / `com.clipflow.clipflow.test`）隔离 SharedPreferences，相同密码 0000 → 相同 userId。
+- A↔B 通过 **loopback LAN 直连**（mDNS→TLS→双向挑战握手→LAN 帧，连接持续 ESTABLISHED），**双向互同步**（A 收到 B 来源、B 收到 A 来源），**无回声环**（双方历史无重复内容）。
+
+### 4. LAN 会话稳定性 — ✅ 符合预期
+- 连续 5 次同步全部成功交付（0/6/13/19/25 秒前逐条到达），内容无丢失。
+- 偶发 `responder session dropped: socket closed before frame completed`（已知迟到帧竞态），自动重连收敛，不阻塞交付。
+
+### 5. Mac 自动刷新问题 — ✅ 已解决（Zone mismatch 修复后验证通过）
+- 手机→Mac：**自动写入 Mac 剪贴板 + 列表自动更新**（无需手动刷新），连续两次验证通过。
+- Mac→手机反向同样自动到达。
+- 结论：`463d7d0`（runZonedGuarded 内初始化 FlutterBinding）修复后，Mac 自动刷新链路正常。
+
+### 回归验证
+- `flutter test`：**458/458 全部通过**；`flutter analyze`：0 error（83 issues 与基线一致）。
+- 生产服务器 LAN 端点已上线并验证（ticket/verify 401/403 语义正确）。
 
 ## 重要约束
 
