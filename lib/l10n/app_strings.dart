@@ -20,6 +20,7 @@ abstract final class AppStrings {
   static const String syncStatusError = '同步失败';
   static const String syncStatusDisconnected = '未连接';
   static const String syncStatusPaused = '已暂停同步';
+  static const String syncStatusLocalOnly = '仅本地';
 
   // ===== 设置页 =====
   static const String settingsTitle = '设置';

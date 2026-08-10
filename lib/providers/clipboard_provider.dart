@@ -82,7 +82,8 @@ enum SyncStatus {
   syncing(AppStrings.syncStatusSyncing, Colors.orange),
   error(AppStrings.syncStatusError, Colors.red),
   disconnected(AppStrings.syncStatusDisconnected, Colors.grey),
-  paused(AppStrings.syncStatusPaused, Colors.blueGrey);
+  paused(AppStrings.syncStatusPaused, Colors.blueGrey),
+  localOnly(AppStrings.syncStatusLocalOnly, Colors.amber);
 
   final String label;
   final Color color;
@@ -134,10 +135,12 @@ class ClipboardProvider extends ChangeNotifier
   /// LAN 加速门面（null = 禁用；生命周期随账户/Provider 收敛）。
   LanSyncManager? _lanManager;
 
-  /// 【实验性】纯 LAN 同步模式：内容上传/下载完全走 LAN，跳过云端内容读写。
-  /// 仅文本路径；握手票据仍走服务端。默认关闭（B 方案：代码保留 + 文档说明，
-  /// 设置页开关待下一轮接入）。已知局限：对端离线无兜底、历史仅本地、无删除/恢复。
-  static bool lanOnlyMode = false;
+  /// LAN-only 独立模式（Phase 5.1 正式化）：内容上传/下载完全走 LAN，
+  /// 跳过云端内容读写；握手票据仍走服务端。持久化于 SettingsProvider
+  /// （LocalStorage key `lan_only_mode`），实例字段避免跨测试污染。
+  bool _lanOnlyMode = false;
+  /// 进入降级（无 verified peer）的时间点，供首页横幅展示。
+  DateTime? _lanOnlyUnsyncedAt;
   final LanSyncManager? _injectedLanManager;
   String? _lanUserId;
 
@@ -206,6 +209,17 @@ class ClipboardProvider extends ChangeNotifier
 
   /// LAN 诊断计数（LAN 未启用/未启动时为 null）。
   LanDiagnostics? get lanDiagnostics => _lanManager?.diagnostics;
+
+  /// LAN-only 独立模式开关（设置页持久化）。
+  bool get lanOnlyMode => _lanOnlyMode;
+
+  /// 降级信号：lanOnly 开启但无 verified peer（内容仅落本地、未同步到其他设备）。
+  /// 横幅据此派生，不引入独立 reducer。
+  bool get lanOnlyDegraded =>
+      _lanOnlyMode && !(_lanManager?.hasVerifiedPeers ?? false);
+
+  /// 进入降级状态的时间点（无 peer 时打点；恢复/关闭时清空）。
+  DateTime? get lanOnlyUnsyncedAt => _lanOnlyUnsyncedAt;
 
   /// 诊断 UI「清零」按钮（LAN 未启用时 no-op）。
   void resetLanDiagnostics() => _lanManager?.resetDiagnostics();
@@ -303,6 +317,43 @@ class ClipboardProvider extends ChangeNotifier
       await _startLanManager();
     } else {
       await _stopLanManager();
+    }
+  }
+
+  /// 设置页开关：LAN-only 独立模式（Phase 5.1）。
+  ///
+  /// 开启：幂等启动 LAN manager（生命周期仍归 lanAcceleration）+ 注入文本
+  /// uploadOverride；关闭：清除 override + 状态复位（LAN manager 不停，
+  /// 归 lanAcceleration 所有），下个 tick 恢复 Cloud 权威分支。
+  ///
+  /// 不变式 lanOnly ⇒ lanAcceleration 由 settings_screen 级联保证，
+  /// Provider 不做隐式级联。
+  Future<void> setLanOnlyMode(bool enabled) async {
+    if (_disposed) return;
+    if (enabled) {
+      _lanOnlyMode = true;
+      await _startLanManager();
+      _monitor?.uploadOverride = _lanOnlyUploadText;
+      _setLanOnlyDerivedStatus();
+    } else {
+      _lanOnlyMode = false;
+      _monitor?.uploadOverride = null;
+      _lanOnlyUnsyncedAt = null;
+      _setStatus(SyncStatus.syncing);
+    }
+    notifyListeners();
+  }
+
+  /// lanOnly 上传后的状态派生：有 verified peer → connected，否则 localOnly
+  /// （durable-local，内容已落本地历史 + artifact，送达与否只影响状态显示）。
+  void _setLanOnlyDerivedStatus() {
+    final hasPeers = _lanManager?.hasVerifiedPeers ?? false;
+    if (hasPeers) {
+      _lanOnlyUnsyncedAt = null;
+      _setStatus(SyncStatus.connected);
+    } else {
+      _lanOnlyUnsyncedAt ??= DateTime.now();
+      _setStatus(SyncStatus.localOnly);
     }
   }
 
@@ -429,8 +480,10 @@ class ClipboardProvider extends ChangeNotifier
     _monitor!.onContentSynced = _addSyncedToHistory;
     _monitor!.onImageChanged = _onImageClipboardChanged;
     _monitor!.onFilesChanged = _onFileClipboardChanged;
-    // 【临时实验】纯 LAN 模式：Android 原生监听路径也走 LAN（覆盖云端上传）。
-    if (lanOnlyMode) {
+    // LAN-only 模式：从设置读取并注入文本上传 override（图片/文件经
+    // _uploadImage/_uploadFile 的 lanOnly 分支路由，见 Phase 5.1）。
+    _lanOnlyMode = _settingsProvider?.lanOnlyMode ?? false;
+    if (_lanOnlyMode) {
       _monitor!.uploadOverride = _lanOnlyUploadText;
     }
     _monitor!.loadState();
@@ -942,42 +995,57 @@ class ClipboardProvider extends ChangeNotifier
         key: _syncService!.key,
       );
 
-      final result = await _syncCoordinator!.uploadFile(
-        encryptedPath: preparedEncryptedPath,
-        fileName: file.name ?? path.split(Platform.pathSeparator).last,
-        fileSize: size,
-        mimeType: file.mimeType ?? 'application/octet-stream',
-        plaintextHash: plaintextHash,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-      );
-      if (result != null) {
-        await _localFileStore.importEncryptedFile(
-          result.historyId,
-          preparedEncryptedPath,
+      // Phase 5.1：LAN-only 文件路由（≤15MiB 走 LAN，不写云端；>15MiB 走
+      // else 分支 Cloud 权威，LAN 接力被 _pushFileOperation 的 15MiB 守卫拦截）。
+      var lanOnlyUploaded = false;
+      if (_lanOnlyMode && size <= LanConstants.lanMaxFileBytes) {
+        lanOnlyUploaded = true;
+        await _lanOnlyUploadFile(
+          encryptedPath: preparedEncryptedPath,
+          fileName: file.name ?? path.split(Platform.pathSeparator).last,
+          fileSize: size,
+          mimeType: file.mimeType ?? 'application/octet-stream',
+          plaintextHash: plaintextHash,
+          file: file,
         );
-        _historyService.addEntry(
-          ClipboardEntry(
-            id: result.historyId,
-            content: '',
-            sourceDeviceId: _syncService!.deviceId,
-            sourceDeviceName: _syncService!.deviceName,
-            sourcePlatform: Platform.operatingSystem,
-            timestamp: DateTime.now(),
-            type: ContentType.file,
-            fileName: file.name ?? path.split(Platform.pathSeparator).last,
-            fileSize: size,
-            mimeType: file.mimeType ?? 'application/octet-stream',
-            fileHash: plaintextHash,
-          ),
+      } else {
+        final result = await _syncCoordinator!.uploadFile(
+          encryptedPath: preparedEncryptedPath,
+          fileName: file.name ?? path.split(Platform.pathSeparator).last,
+          fileSize: size,
+          mimeType: file.mimeType ?? 'application/octet-stream',
+          plaintextHash: plaintextHash,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
         );
-        _saveHistory();
-        notifyListeners();
-        await _localFileStore.enforceCacheLimit(
-          AppConstants.localFileCacheMaxBytes,
-          protectedIds: {result.historyId},
-        );
-        // 上传成功后才记录签名：失败时签名不落地，同文件可重试。
-        _monitor?.recordFileSignature(file);
+        if (result != null) {
+          await _localFileStore.importEncryptedFile(
+            result.historyId,
+            preparedEncryptedPath,
+          );
+          _historyService.addEntry(
+            ClipboardEntry(
+              id: result.historyId,
+              content: '',
+              sourceDeviceId: _syncService!.deviceId,
+              sourceDeviceName: _syncService!.deviceName,
+              sourcePlatform: Platform.operatingSystem,
+              timestamp: DateTime.now(),
+              type: ContentType.file,
+              fileName: file.name ?? path.split(Platform.pathSeparator).last,
+              fileSize: size,
+              mimeType: file.mimeType ?? 'application/octet-stream',
+              fileHash: plaintextHash,
+            ),
+          );
+          _saveHistory();
+          notifyListeners();
+          await _localFileStore.enforceCacheLimit(
+            AppConstants.localFileCacheMaxBytes,
+            protectedIds: {result.historyId},
+          );
+          // 上传成功后才记录签名：失败时签名不落地，同文件可重试。
+          _monitor?.recordFileSignature(file);
+        }
       }
 
       // Android 预拷贝临时文件上传成功后清理
@@ -1003,7 +1071,11 @@ class ClipboardProvider extends ChangeNotifier
       }
 
       _serverConnected = true;
-      _setStatus(SyncStatus.connected);
+      if (lanOnlyUploaded) {
+        _setLanOnlyDerivedStatus();
+      } else {
+        _setStatus(SyncStatus.connected);
+      }
     } catch (e) {
       _monitor?.clearFileSignature(file);
       if (encryptedPath != null) {
@@ -1038,6 +1110,14 @@ class ClipboardProvider extends ChangeNotifier
 
       // 去重键用跨重编码稳定的像素内容哈希（P1 根治回声）
       final imageHash = compressed.stableHash;
+      if (_lanOnlyMode) {
+        // Phase 5.1：LAN-only 图片路由——不写云端，本地 durable
+        // （历史 + 全图密文落盘），状态按 hasVerifiedPeers 派生。
+        await _lanOnlyUploadImage(compressed);
+        _serverConnected = true;
+        _setLanOnlyDerivedStatus();
+        return;
+      }
       final result = await _syncCoordinator!.uploadImage(
         bytes: compressed.bytes,
         thumbBytes: compressed.thumbBytes,
@@ -1097,8 +1177,8 @@ class ClipboardProvider extends ChangeNotifier
     _setStatus(SyncStatus.syncing);
 
     try {
-      if (lanOnlyMode) {
-        // 实验：纯 LAN 上传——本地加密 + 直推 LAN peer + 本地历史（不写云端）。
+      if (_lanOnlyMode) {
+        // LAN-only：本地加密 + 直推 LAN peer + 本地历史（不写云端）。
         final operationId = await _lanOnlyUploadText(truncatedContent);
         if (operationId != null) {
           _historyService.addEntry(
@@ -1138,7 +1218,11 @@ class ClipboardProvider extends ChangeNotifier
       }
 
       _serverConnected = true;
-      _setStatus(SyncStatus.connected);
+      if (_lanOnlyMode) {
+        _setLanOnlyDerivedStatus();
+      } else {
+        _setStatus(SyncStatus.connected);
+      }
     } catch (e) {
       _errorMessage = e.toString();
       _serverConnected = false;
@@ -1146,8 +1230,12 @@ class ClipboardProvider extends ChangeNotifier
     }
   }
 
-  /// 【临时实验】纯 LAN 文本上传：本地加密 + 直推 LAN peer，返回 operationId。
+  /// LAN-only 文本上传：本地加密 + 直推 LAN peer，返回 operationId。
   /// 不写云端；由 Provider 上传路径与 ClipboardMonitor.uploadOverride 共用。
+  ///
+  /// durable-local 语义：无 peer 也返回 operationId（内容已加密落本地历史，
+  /// 送达与否只影响状态显示）；push 后置 markUploadSucceeded 与 Cloud 语义
+  /// 对齐，防同内容经其他路径重复入历史。
   Future<String?> _lanOnlyUploadText(String content) async {
     if (_syncService == null || _lanManager == null) return null;
     final operationId = const Uuid().v4();
@@ -1170,6 +1258,147 @@ class ClipboardProvider extends ChangeNotifier
       payload: prepared.payload,
     );
     await _lanManager!.pushOperation(op);
+    // 本地持久化成功（无论是否送达）后标记，防同内容重复入历史。
+    _syncService!.markUploadSucceeded(prepared.dedupeKey);
+    return operationId;
+  }
+
+  /// LAN-only 图片上传：prepareImage（stableHash 去重）→ pushOperation →
+  /// 本地历史 + 全图密文落盘 + markUploadSucceeded。不写云端。
+  Future<String?> _lanOnlyUploadImage(CompressedImage compressed) async {
+    if (_syncService == null || _lanManager == null) return null;
+    final operationId = const Uuid().v4();
+    final prepared = await _syncService!.prepareImage(
+      bytes: compressed.bytes,
+      thumbBytes: compressed.thumbBytes,
+      width: compressed.width,
+      height: compressed.height,
+      format: compressed.format,
+      stableHash: compressed.stableHash,
+      operationId: operationId,
+    );
+    if (prepared == null) return null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final op = SyncOperation(
+      operationId: operationId,
+      userId: _lanUserId ?? _storage?.userId ?? 'user_${_syncService!.deviceId}',
+      kind: SyncOperationKind.image,
+      state: SyncOperationState.pending,
+      dedupeKey: prepared.dedupeKey,
+      createdAtMs: now,
+      updatedAtMs: now,
+      attemptCount: 0,
+      nextAttemptAtMs: now,
+      payload: prepared.payload,
+    );
+    // push 前本地内容已加密进 payload；pushOperation 内部 catch 一切，绝不抛。
+    await _lanManager!.pushOperation(op);
+
+    // 本地补账（与 _onOperationSucceeded image 分支同构）：缩略图解密字节 +
+    // imageThumbEncryptedBase64 + width/height/format + stableHash。
+    final fullEncrypted = op.payload['content'] as String?;
+    final thumbEncrypted = op.payload['thumb'] as String?;
+    Uint8List? thumbBytes;
+    if (thumbEncrypted != null && thumbEncrypted.isNotEmpty) {
+      try {
+        thumbBytes = await _syncService!.decryptImage(thumbEncrypted);
+      } catch (_) {
+        thumbBytes = null;
+      }
+    }
+    _historyService.addEntry(
+      ClipboardEntry(
+        id: op.operationId,
+        content: '',
+        sourceDeviceId: _syncService!.deviceId,
+        sourceDeviceName: _syncService!.deviceName,
+        sourcePlatform: Platform.operatingSystem,
+        timestamp: DateTime.now(),
+        type: ContentType.image,
+        imageThumbBytes: thumbBytes,
+        imageThumbEncryptedBase64: thumbEncrypted,
+        imageWidth: (op.payload['width'] as num?)?.toInt(),
+        imageHeight: (op.payload['height'] as num?)?.toInt(),
+        imageFormat: op.payload['format'] as String?,
+        stableHash: op.payload['hash'] as String?,
+      ),
+    );
+    if (fullEncrypted != null && fullEncrypted.isNotEmpty) {
+      await _localImageStore.save(op.operationId, fullEncrypted);
+    }
+    _saveHistory();
+    notifyListeners();
+    _syncService!.markUploadSucceeded(prepared.dedupeKey);
+    return operationId;
+  }
+
+  /// LAN-only 文件上传（≤15MiB）：加密 .enc → prepareFile → importEncryptedFile
+  /// （关键：_pushFileOperation 靠 loadEncryptedPath(artifactId) 读 artifact）→
+  /// pushOperation → 本地历史（明文 fileName/mimeType/fileSize/fileHash 仅本地）+
+  /// cache limit + recordFileSignature + markUploadSucceeded。不写云端。
+  Future<String?> _lanOnlyUploadFile({
+    required String encryptedPath,
+    required String fileName,
+    required int fileSize,
+    required String mimeType,
+    required String plaintextHash,
+    required ClipboardFile file,
+  }) async {
+    if (_syncService == null || _lanManager == null) return null;
+    final operationId = const Uuid().v4();
+    final prepared = await _syncService!.prepareFile(
+      plaintextHash: plaintextHash,
+      operationId: operationId,
+      fileName: fileName,
+      fileSize: fileSize,
+      mimeType: mimeType,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+    if (prepared == null) return null;
+    // import 先于 push：LAN 侧 pushFile 依赖 artifactId 读 .enc。
+    await _localFileStore.importEncryptedFile(operationId, encryptedPath);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final op = SyncOperation(
+      operationId: operationId,
+      userId: _lanUserId ?? _storage?.userId ?? 'user_${_syncService!.deviceId}',
+      kind: SyncOperationKind.file,
+      state: SyncOperationState.pending,
+      dedupeKey: prepared.dedupeKey,
+      createdAtMs: now,
+      updatedAtMs: now,
+      attemptCount: 0,
+      nextAttemptAtMs: now,
+      payload: prepared.payload,
+      artifactId: operationId,
+    );
+    // push 前本地 artifact 已落盘；pushOperation 内部 catch 一切，绝不抛。
+    await _lanManager!.pushOperation(op);
+
+    // 本地历史条目：明文 fileName/mimeType/fileSize/fileHash 仅本地，不上 LAN。
+    _historyService.addEntry(
+      ClipboardEntry(
+        id: op.operationId,
+        content: '',
+        sourceDeviceId: _syncService!.deviceId,
+        sourceDeviceName: _syncService!.deviceName,
+        sourcePlatform: Platform.operatingSystem,
+        timestamp: DateTime.now(),
+        type: ContentType.file,
+        fileName: fileName,
+        fileSize: fileSize,
+        mimeType: mimeType,
+        fileHash: plaintextHash,
+      ),
+    );
+    _saveHistory();
+    notifyListeners();
+    await _localFileStore.enforceCacheLimit(
+      AppConstants.localFileCacheMaxBytes,
+      protectedIds: {op.operationId},
+    );
+    // 上传成功（本地 durable）后才记录签名：失败时签名不落地，同文件可重试。
+    _monitor?.recordFileSignature(file);
+    _syncService!.markUploadSucceeded(prepared.dedupeKey);
     return operationId;
   }
 
@@ -1373,12 +1602,19 @@ class ClipboardProvider extends ChangeNotifier
 
       // ② Cloud 权威兜底（每 tick 照常执行）：删除/恢复权威源 + 内容兜底。
       //    LAN 已交付的内容经 decodeCurrentClipboard 时间戳游标自然过滤。
-      //    实验纯 LAN 模式下跳过云端内容兜底（LAN 交付即完成）。
-      if (lanOnlyMode) {
-        if (lanDelivered) {
+      //    LAN-only 模式下跳过云端内容兜底（LAN 交付即完成），状态按真实
+      //    信号派生：已交付 或 有 verified peer → connected；否则 localOnly
+      //    （durable-local，内容保留本地，不静默丢内容）。
+      if (_lanOnlyMode) {
+        final hasPeers = _lanManager?.hasVerifiedPeers ?? false;
+        if (lanDelivered || hasPeers) {
           _consecutiveFailures = 0;
           _serverConnected = true;
+          _lanOnlyUnsyncedAt = null;
           _setStatus(SyncStatus.connected);
+        } else {
+          _lanOnlyUnsyncedAt ??= DateTime.now();
+          _setStatus(SyncStatus.localOnly);
         }
       } else {
       try {

@@ -115,6 +115,10 @@ class LanSyncManager {
 
   bool get isEnabled => _enabled;
 
+  /// 真实握手态：是否存在已 verified 的 LAN peer（驱动 Provider 状态派生，
+  /// 非模拟信号）。initiator 会话建立即 verified（TLS + 票据 + userId 校验通过）。
+  bool get hasVerifiedPeers => _transport.verifiedPeerIds.isNotEmpty;
+
   /// 诊断计数（本会话累计；LAN 启停/切账户清零）。
   LanDiagnostics get diagnostics => _diagnostics;
 

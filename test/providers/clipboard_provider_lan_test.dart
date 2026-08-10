@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:clipflow/models/sync_operation.dart';
@@ -22,6 +23,9 @@ class _LanCloudRepo extends CloudRepository {
   Map<String, dynamic>? currentClipboard;
   bool throwOnFetch = false;
   int downloadCalls = 0;
+  int addHistoryEntryCalls = 0;
+  int setCurrentClipboardCalls = 0;
+  int uploadFileCalls = 0;
 
   @override
   Future<List<Map<String, dynamic>>> getHistoryEntries({int limit = 100}) async =>
@@ -63,10 +67,31 @@ class _LanCloudRepo extends CloudRepository {
   Future<void> setSalt(String salt) async {}
 
   @override
-  Future<void> setCurrentClipboard(Map<String, dynamic> data) async {}
+  Future<void> setCurrentClipboard(Map<String, dynamic> data) async {
+    setCurrentClipboardCalls++;
+  }
 
   @override
-  Future<void> addHistoryEntry(Map<String, dynamic> data) async {}
+  Future<void> addHistoryEntry(Map<String, dynamic> data) async {
+    addHistoryEntryCalls++;
+  }
+
+  @override
+  Future<void> uploadFile({
+    required String encryptedPath,
+    required String historyId,
+    required String plaintextHash,
+    required String fileName,
+    required int fileSize,
+    required String mimeType,
+    required String marker,
+    required String sourceDevice,
+    required String sourceDeviceName,
+    required String sourcePlatform,
+    required int timestamp,
+  }) async {
+    uploadFileCalls++;
+  }
 }
 
 /// fake LanSyncManager：LAN 命中/未命中/禁用/推送全部由测试驱动。
@@ -80,6 +105,12 @@ class _FakeLanSyncManager extends LanSyncManager {
   int stopCalls = 0;
   int fetchCalls = 0;
   final List<SyncOperation> pushed = [];
+
+  /// 真实握手态测试注入：驱动 Provider 状态派生（connected/localOnly）。
+  bool hasVerifiedPeersValue = false;
+
+  @override
+  bool get hasVerifiedPeers => hasVerifiedPeersValue;
 
   /// 若设置，start() 会挂起等待该 gate（模拟真实 socket bind 的
   /// FakeAsync 下永不完成，用于验证 initialize 不阻塞）。
@@ -463,6 +494,127 @@ void main() {
       provider2.dispose();
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(lanManager2.stopCalls, greaterThanOrEqualTo(1));
+    });
+  });
+
+  group('ClipboardProvider LAN-only mode', () {
+    Future<void> mockClipboardText(String text, {bool armed = true}) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return <String, Object?>{'text': armed ? text : null};
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+    }
+
+    test('开启后文本走 LAN（pushed op）、Cloud 零写、无 peer → localOnly + lanOnlyDegraded', () async {
+      final lanManager = _FakeLanSyncManager(); // hasVerifiedPeersValue = false
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      expect(provider.lanOnlyMode, isTrue);
+      expect(provider.lanOnlyDegraded, isTrue);
+
+      await mockClipboardText('lan only text');
+      await provider.debugFileCheck();
+
+      await waitFor(
+        provider,
+        () => lanManager.pushed.any((o) => o.kind == SyncOperationKind.text),
+        message: 'text should be pushed to LAN manager',
+      );
+      expect(repo.addHistoryEntryCalls, 0);
+      expect(repo.setCurrentClipboardCalls, 0);
+      // durable-local：无 peer 也保留本地历史
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.content == 'lan only text'),
+        message: 'text should be kept in local history',
+      );
+      expect(provider.syncStatus, SyncStatus.localOnly);
+    });
+
+    test('开启后文本推送到 LAN 且存在 verified peer → connected（非模拟）', () async {
+      final lanManager = _FakeLanSyncManager()..hasVerifiedPeersValue = true;
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      expect(provider.lanOnlyDegraded, isFalse);
+      expect(provider.syncStatus, SyncStatus.connected);
+
+      await mockClipboardText('lan with peer');
+      await provider.debugFileCheck();
+
+      await waitFor(
+        provider,
+        () => lanManager.pushed.any((o) => o.kind == SyncOperationKind.text),
+        message: 'text should be pushed to LAN manager',
+      );
+      expect(repo.addHistoryEntryCalls, 0);
+      expect(provider.syncStatus, SyncStatus.connected);
+    });
+
+    test('关闭后文本恢复 Cloud 权威（回归锚点：与未开一致）', () async {
+      final lanManager = _FakeLanSyncManager();
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      expect(provider.lanOnlyMode, isTrue);
+      await provider.setLanOnlyMode(false);
+      expect(provider.lanOnlyMode, isFalse);
+      expect(provider.lanOnlyDegraded, isFalse);
+
+      await mockClipboardText('cloud again');
+      await provider.debugFileCheck();
+
+      await waitFor(
+        provider,
+        () => repo.addHistoryEntryCalls > 0,
+        message: 'text should go to Cloud after lanOnly is off',
+      );
+      // Cloud 成功后的 LAN 接力推送属 lanAcceleration 既有行为（加速旁路），
+      // 关闭 lanOnly 的回归锚点是「Cloud 权威写入恢复」，此处只断言 repo 写入。
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.content == 'cloud again'),
+        message: 'cloud text should be in history',
+      );
+    });
+
+    test('降级状态：peer 出现 → lanOnlyDegraded 清除并回 connected；消失 → 恢复 localOnly', () async {
+      final lanManager = _FakeLanSyncManager();
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      expect(provider.lanOnlyDegraded, isTrue);
+      expect(provider.lanOnlyUnsyncedAt, isNotNull);
+
+      // peer 出现：下个 tick 状态派生回 connected
+      lanManager.hasVerifiedPeersValue = true;
+      await provider.triggerSync();
+      expect(provider.syncStatus, SyncStatus.connected);
+      expect(provider.lanOnlyDegraded, isFalse);
+      expect(provider.lanOnlyUnsyncedAt, isNull);
+
+      // peer 消失：回到 localOnly
+      lanManager.hasVerifiedPeersValue = false;
+      await provider.triggerSync();
+      expect(provider.syncStatus, SyncStatus.localOnly);
+      expect(provider.lanOnlyDegraded, isTrue);
+      expect(provider.lanOnlyUnsyncedAt, isNotNull);
     });
   });
 }
