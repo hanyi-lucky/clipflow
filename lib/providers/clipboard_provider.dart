@@ -536,6 +536,11 @@ class ClipboardProvider extends ChangeNotifier
     if (_isLoadingHistory) return; // 防重入
     _isLoadingHistory = true;
     try {
+      // 启动恢复：内存历史为空时先恢复持久化 JSON（含 LAN-only 本地历史），
+      // 再与服务器历史合并——否则重启后 LAN-only 条目被服务器-only 历史覆盖，
+      // 且其图片/文件 artifact 会被下方 cleanupOrphans 当作孤儿物理删除。
+      _restorePersistedHistoryIfEmpty();
+
       final serverEntries = await _cloudRepo!.getHistoryEntries(limit: 200);
 
       // 读取持久化的已删 ID 集合；若服务器仍返回这些行，再次尝试删除
@@ -729,15 +734,25 @@ class ClipboardProvider extends ChangeNotifier
     } catch (e) {
       _errorMessage = AppStrings.loadHistoryFailed('$e');
       notifyListeners();
-      // 失败时保留当前内存历史，不清空
-      if (_historyService.entries.isEmpty) {
-        final savedHistory = _storage?.historyJson;
-        if (savedHistory != null) {
-          _historyService.fromJson(savedHistory);
-        }
-      }
+      // 失败时保留当前内存历史，不清空；内存仍空则从持久化 JSON 恢复
+      _restorePersistedHistoryIfEmpty();
     } finally {
       _isLoadingHistory = false;
+    }
+  }
+
+  /// 内存历史为空时从持久化 JSON 恢复（含 LAN-only 本地历史条目）。
+  ///
+  /// 仅在内存历史为空时生效：会话内刷新等场景已有内存历史，不得覆盖。
+  /// 损坏的持久化 JSON 忽略，继续走服务器加载路径。
+  void _restorePersistedHistoryIfEmpty() {
+    if (_historyService.entries.isNotEmpty) return;
+    final savedHistory = _storage?.historyJson;
+    if (savedHistory == null || savedHistory.isEmpty) return;
+    try {
+      _historyService.fromJson(savedHistory);
+    } catch (_) {
+      // 忽略损坏的持久化 JSON
     }
   }
 
