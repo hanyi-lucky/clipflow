@@ -49,8 +49,8 @@
 - Phase 2.2：LAN 文件传输（≤15MiB）；
 - Phase 2.3：LAN 可靠性/ACK/诊断指标 UI；
 - Phase 2.4：Android 真机 + 后台生命周期 + 原生插件缺陷修复；
-- Phase 2.5：独立 RFC（LAN-only/durable cursor/OSS/6GB）；
-  - **最终方案已落盘**：`docs/phase25-final-plan.md`（5.1 LAN-only 正式化优先，后续 5.2 cursor / 5.3 OSS / 5.4 指标 / 附加稳定性与 Windows）。
+- Phase 2.5：独立 RFC（LAN-only/durable cursor/OSS）——**不含 6GB 容量/流量观测项**（6GB 是 ECS 月度流量额度背景，见下文）；
+  - **最终方案已落盘**：`docs/phase25-final-plan.md`（5.1 LAN-only 正式化优先，后续 5.2 durable cursor+tombstone / 5.3 OSS 独立 RFC / 附加稳定性与 Windows）。
 - mDNS 广播黑名单/白名单细节已按设计实现。
 
 ## 当前验证结果（Phase 2.3，2026-08-10）
