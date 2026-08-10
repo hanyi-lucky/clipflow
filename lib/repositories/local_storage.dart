@@ -23,6 +23,7 @@ class LocalStorage {
   static const _keyMonitorIgnoreFileHashes = 'monitor_ignore_file_hashes';
   static const _keyMonitorLastFileSignatures = 'monitor_last_file_signatures';
   static const _keyLanAcceleration = 'lan_acceleration';
+  static const _keyLanOnlyMode = 'lan_only_mode';
 
   final SharedPreferences _prefs;
 
@@ -190,6 +191,13 @@ class LocalStorage {
 
   Future<void> setLanAcceleration(bool value) async {
     await _prefs.setBool(_keyLanAcceleration, value);
+  }
+
+  // LAN-only 独立模式（Phase 5.1，默认关）
+  bool get lanOnlyMode => _prefs.getBool(_keyLanOnlyMode) ?? false;
+
+  Future<void> setLanOnlyMode(bool value) async {
+    await _prefs.setBool(_keyLanOnlyMode, value);
   }
 
   Map<String, String> get monitorLastFileSignatures {

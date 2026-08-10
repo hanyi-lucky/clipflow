@@ -17,6 +17,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _batteryOptimized = false;
   bool _notificationPermissionGranted = false;
   bool _lanAcceleration = true;
+  bool _lanOnlyMode = false;
 
   bool get autoSync => _autoSync;
   int get historyLimit => _historyLimit;
@@ -28,6 +29,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get batteryOptimized => _batteryOptimized;
   bool get notificationPermissionGranted => _notificationPermissionGranted;
   bool get lanAcceleration => _lanAcceleration;
+  bool get lanOnlyMode => _lanOnlyMode;
 
   Future<void> initialize(LocalStorage storage) async {
     _storage = storage;
@@ -38,6 +40,7 @@ class SettingsProvider extends ChangeNotifier {
     _autoSyncOnResume = storage.autoSyncOnResume;
     _notificationSync = storage.notificationSync;
     _lanAcceleration = storage.lanAcceleration;
+    _lanOnlyMode = storage.lanOnlyMode;
     notifyListeners();
   }
 
@@ -80,6 +83,12 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> setLanAcceleration(bool value) async {
     _lanAcceleration = value;
     await _storage?.setLanAcceleration(value);
+    notifyListeners();
+  }
+
+  Future<void> setLanOnlyMode(bool value) async {
+    _lanOnlyMode = value;
+    await _storage?.setLanOnlyMode(value);
     notifyListeners();
   }
 

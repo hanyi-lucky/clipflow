@@ -58,4 +58,15 @@ void main() {
     await storage.setLanAcceleration(true);
     expect(storage.lanAcceleration, isTrue);
   });
+
+  test('lanOnlyMode 默认关闭，可持久化开启/关闭', () async {
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    expect(storage.lanOnlyMode, isFalse);
+    await storage.setLanOnlyMode(true);
+    expect(storage.lanOnlyMode, isTrue);
+    await storage.setLanOnlyMode(false);
+    expect(storage.lanOnlyMode, isFalse);
+  });
 }
