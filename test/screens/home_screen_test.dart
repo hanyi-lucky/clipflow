@@ -5,7 +5,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:clipflow/l10n/app_strings.dart';
 import 'package:clipflow/providers/clipboard_provider.dart';
-import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/screens/home_screen.dart';
 
 void main() {

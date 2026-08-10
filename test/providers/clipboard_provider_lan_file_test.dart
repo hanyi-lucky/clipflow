@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:clipflow/core/clipboard_channel_constants.dart';
 import 'package:clipflow/models/clipboard_entry.dart';
@@ -14,6 +15,7 @@ import 'package:clipflow/models/sync_operation.dart';
 import 'package:clipflow/providers/clipboard_provider.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
 import 'package:clipflow/repositories/local_file_store.dart';
+import 'package:clipflow/repositories/local_image_store.dart';
 import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/repositories/outbox_store.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
@@ -29,6 +31,9 @@ class _LanFileCloudRepo extends CloudRepository {
   bool throwOnFetch = false;
   final List<String> downloadCalls = [];
   List<int>? downloadBytes;
+  int uploadFileCalls = 0;
+  int addHistoryEntryCalls = 0;
+  int setCurrentClipboardCalls = 0;
 
   @override
   Future<List<Map<String, dynamic>>> getHistoryEntries({int limit = 100}) async => [];
@@ -54,10 +59,31 @@ class _LanFileCloudRepo extends CloudRepository {
   }
 
   @override
-  Future<void> addHistoryEntry(Map<String, dynamic> data) async {}
+  Future<void> addHistoryEntry(Map<String, dynamic> data) async {
+    addHistoryEntryCalls++;
+  }
 
   @override
-  Future<void> setCurrentClipboard(Map<String, dynamic> data) async {}
+  Future<void> setCurrentClipboard(Map<String, dynamic> data) async {
+    setCurrentClipboardCalls++;
+  }
+
+  @override
+  Future<void> uploadFile({
+    required String encryptedPath,
+    required String historyId,
+    required String plaintextHash,
+    required String fileName,
+    required int fileSize,
+    required String mimeType,
+    required String marker,
+    required String sourceDevice,
+    required String sourceDeviceName,
+    required String sourcePlatform,
+    required int timestamp,
+  }) async {
+    uploadFileCalls++;
+  }
 }
 
 /// fake LanSyncManager：文件行由测试注入；只负责 fetch 返回。
@@ -67,6 +93,18 @@ class _FakeLanFileManager extends LanSyncManager {
   Map<String, dynamic>? lanRow;
   int startCalls = 0;
   int stopCalls = 0;
+  final List<SyncOperation> pushed = [];
+
+  /// 真实握手态测试注入：驱动 Provider 状态派生（connected/localOnly）。
+  bool hasVerifiedPeersValue = false;
+
+  @override
+  bool get hasVerifiedPeers => hasVerifiedPeersValue;
+
+  @override
+  Future<void> pushOperation(SyncOperation op) async {
+    pushed.add(op);
+  }
 
   @override
   Future<void> start({
@@ -82,9 +120,6 @@ class _FakeLanFileManager extends LanSyncManager {
   Future<Map<String, dynamic>?> fetchLatestContent() async {
     return lanRow;
   }
-
-  @override
-  Future<void> pushOperation(SyncOperation op) async {}
 
   @override
   Future<void> stop() async {
@@ -175,20 +210,33 @@ void main() {
     }
   });
 
-  void mockFileChannel({bool setFilesResult = true}) {
+  void mockFileChannel({
+    bool hasFiles = false,
+    List<Map<String, Object>>? files,
+    bool setFilesResult = true,
+    bool hasImage = false,
+    Uint8List? imageBytes,
+  }) {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           switch (call.method) {
             case AppChannelMethods.hasImage:
-              return false;
+              return hasImage;
             case AppChannelMethods.hasFiles:
-              return false;
+              return hasFiles;
             case AppChannelMethods.getFiles:
-              return null;
+              if (!hasFiles) return null;
+              return files;
             case AppChannelMethods.setFiles:
               return setFilesResult;
             case AppChannelMethods.getImage:
-              return null;
+              if (!hasImage || imageBytes == null) return null;
+              return <String, Object?>{
+                'bytes': imageBytes,
+                'format': 'png',
+                'width': 8,
+                'height': 8,
+              };
           }
           return null;
         });
@@ -231,6 +279,7 @@ void main() {
     FileDownloadBreaker? breaker,
   }) async {
     final provider = ClipboardProvider(
+      imageStore: LocalImageStore(directoryPath: tempDir.path),
       fileStore: fileStore,
       outbox: _MemoryOutbox(),
       lanSyncManager: lanManager,
@@ -561,6 +610,163 @@ void main() {
       );
       // 探针再失败 → 重新冷却（计数不清零，防抖）
       expect(breaker.isBlocked(historyId), isTrue);
+
+      await settle();
+      provider.dispose();
+    });
+  });
+
+  group('ClipboardProvider LAN-only upload routing (Phase 5.1)', () {
+    Future<void> settle() => Future.delayed(const Duration(milliseconds: 150));
+
+    test('文件 ≤15MiB 走 LAN（pushed file op + artifact .enc），Cloud 零写，无 peer → localOnly', () async {
+      final sourceBytes = List<int>.generate(8192, (i) => i % 251);
+      final sourceFile = File('${tempDir.path}/lan-only.pdf');
+      sourceFile.writeAsBytesSync(sourceBytes);
+      mockFileChannel(
+        hasFiles: true,
+        files: [
+          {
+            'path': sourceFile.path,
+            'name': 'lan-only.pdf',
+            'mimeType': 'application/pdf',
+            'size': sourceBytes.length,
+            'lastModified': 1700000000000,
+            'temp': false,
+          },
+        ],
+      );
+
+      final lanManager = _FakeLanFileManager(); // hasVerifiedPeersValue = false
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      expect(provider.lanOnlyMode, isTrue);
+      expect(provider.lanOnlyDegraded, isTrue);
+
+      await provider.debugFileCheck();
+
+      await waitFor(
+        () => lanManager.pushed.any((o) => o.kind == SyncOperationKind.file),
+        message: 'file should be pushed to LAN manager',
+      );
+      // Cloud 零写
+      expect(repo.uploadFileCalls, 0);
+      expect(repo.addHistoryEntryCalls, 0);
+      // 本地历史 + artifact
+      await waitFor(
+        () => provider.history.any(
+          (e) => e.type == ContentType.file && e.fileName == 'lan-only.pdf',
+        ),
+        message: 'file should be in local history',
+      );
+      final op = lanManager.pushed.firstWhere(
+        (o) => o.kind == SyncOperationKind.file,
+      );
+      final encPath =
+          '${tempDir.path}/${LocalFileStore.encDirName}/${op.artifactId}.enc';
+      expect(File(encPath).existsSync(), isTrue);
+      // _uploadFile 先置 syncing、push 后置派生状态：用 waitFor 收敛竞态。
+      await waitFor(
+        () => provider.syncStatus == SyncStatus.localOnly,
+        message: 'file upload should settle to localOnly (no peer)',
+      );
+      expect(provider.lanOnlyDegraded, isTrue);
+
+      // 切换关闭不丢本地内容（历史保留）
+      await provider.setLanOnlyMode(false);
+      expect(
+        provider.history.any(
+          (e) => e.type == ContentType.file && e.fileName == 'lan-only.pdf',
+        ),
+        isTrue,
+      );
+
+      await settle();
+      provider.dispose();
+    });
+
+    test('文件 >15MiB 在 lanOnly 下仍走 Cloud（repo.uploadFile 写入）', () async {
+      final sourceBytes = List<int>.generate(8192, (i) => i % 251);
+      final sourceFile = File('${tempDir.path}/big.bin');
+      sourceFile.writeAsBytesSync(sourceBytes);
+      mockFileChannel(
+        hasFiles: true,
+        files: [
+          {
+            'path': sourceFile.path,
+            'name': 'big.bin',
+            'mimeType': 'application/octet-stream',
+            // 模拟 16MiB：大于 LAN 15MiB 上限、小于 Cloud 50MiB 上限
+            'size': 16 * 1024 * 1024 + 1,
+            'lastModified': 1700000000000,
+            'temp': false,
+          },
+        ],
+      );
+
+      final lanManager = _FakeLanFileManager();
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+
+      await provider.debugFileCheck();
+
+      await waitFor(
+        () => repo.uploadFileCalls > 0,
+        message: '>15MiB file should go to Cloud (repo.uploadFile)',
+      );
+      await waitFor(
+        () => provider.history.any(
+          (e) => e.type == ContentType.file && e.fileName == 'big.bin',
+        ),
+        message: 'cloud file should be in history',
+      );
+
+      await settle();
+      provider.dispose();
+    });
+
+    test('图片走 LAN（pushed image op + 本地历史 + 全图密文落盘），Cloud 零写', () async {
+      final imgBytes = img.encodePng(img.Image(width: 64, height: 64));
+      mockFileChannel(
+        hasImage: true,
+        imageBytes: Uint8List.fromList(imgBytes),
+      );
+
+      final lanManager = _FakeLanFileManager(); // no peer
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+
+      await provider.debugFileCheck();
+
+      await waitFor(
+        () => lanManager.pushed.any((o) => o.kind == SyncOperationKind.image),
+        message: 'image should be pushed to LAN manager',
+      );
+      expect(repo.addHistoryEntryCalls, 0);
+      expect(repo.setCurrentClipboardCalls, 0);
+      await waitFor(
+        () => provider.history.any((e) => e.type == ContentType.image),
+        message: 'image should be in local history',
+      );
+      final op = lanManager.pushed.firstWhere(
+        (o) => o.kind == SyncOperationKind.image,
+      );
+      final imageCache =
+          '${tempDir.path}/${LocalImageStore.subDirectoryName}/${op.operationId}.bin';
+      expect(File(imageCache).existsSync(), isTrue);
+      await waitFor(
+        () => provider.syncStatus == SyncStatus.localOnly,
+        message: 'image upload should settle to localOnly (no peer)',
+      );
 
       await settle();
       provider.dispose();
