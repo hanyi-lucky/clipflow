@@ -32,7 +32,7 @@ void main() {
     );
   });
 
-  SyncChangesPage _page({int cursor = 5, bool hasMore = false}) =>
+  SyncChangesPage makePage({int cursor = 5, bool hasMore = false}) =>
       SyncChangesPage.fromJson({
         'cursor': cursor,
         'hasMore': hasMore,
@@ -54,7 +54,7 @@ void main() {
       });
 
   test('decodeCurrentClipboard converts an ops page to deletions + restorations and exposes the cursor', () async {
-    final result = await service.decodeCurrentClipboard(null, opsPage: _page());
+    final result = await service.decodeCurrentClipboard(null, opsPage: makePage());
 
     expect(result, isNotNull);
     expect(result!.deletedIds, ['e1']);
@@ -65,7 +65,7 @@ void main() {
   });
 
   test('empty clipboard with non-empty ops returns an empty result, not null', () async {
-    final result = await service.decodeCurrentClipboard(null, opsPage: _page());
+    final result = await service.decodeCurrentClipboard(null, opsPage: makePage());
 
     expect(result, isNotNull);
     expect(result!.hasContent, isFalse);
