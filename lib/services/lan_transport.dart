@@ -110,6 +110,11 @@ class _LanSession {
 
   /// 读串行化：fetchLatest 与 ack-wait 互斥（单订阅流硬约束）。
   final LanReaderSlot readerSlot = LanReaderSlot();
+
+  /// 文件推送在途计数（pushFile 写帧窗口期间 >0）。
+  /// fetchLatest 据此跳过该 peer，避免大文件推送期间 fetch 穿插导致
+  /// 300ms 假超时（与 readerSlot busy 跳过同语义）。
+  int filePushInFlight = 0;
 }
 
 /// 单会话文件接收状态机：`fileStart`/`fileChunk` 帧校验 + 流式落盘。
@@ -620,13 +625,20 @@ class LanTransport {
   Future<Map<String, dynamic>?> fetchLatest(String peerDeviceId) async {
     final session = _initiatorSessions[peerDeviceId];
     if (session == null) return null;
+    // 大文件推送窗口：跳过本轮（与 readerSlot busy 同语义），避免 fetch 在
+    // fileChunk 帧流之间穿插导致 300ms 假超时。
+    if (session.filePushInFlight > 0) return null;
     if (!session.readerSlot.tryAcquire()) return null; // busy：跳过该 peer
     try {
       session.connection.write(<String, dynamic>{
         'v': LanConstants.lanProtoVersion,
         'type': 'latestRequest',
       });
-      final response = await session.connection.read();
+      // 逐帧读有界超时（lanFrameTimeout=5s）：健康慢响应 5s 内必到；真死连接
+      // 5s 兜底 drop（缓冲已污染，不能复用）——「manager 300ms 超时不 drop」
+      // 后，离线 peer 的 localOnly 降级语义保留在帧级超时路径。
+      final response =
+          await session.connection.read().timeout(LanConstants.lanFrameTimeout);
       if (response['type'] != 'latestResponse') {
         _dropInitiatorSession(peerDeviceId, session);
         return null;
@@ -634,6 +646,9 @@ class LanTransport {
       final row = response['row'];
       if (row is! Map<String, dynamic>) return null;
       return row;
+    } on TimeoutException {
+      _dropInitiatorSession(peerDeviceId, session);
+      return null;
     } on LanProtocolException {
       _dropInitiatorSession(peerDeviceId, session);
       return null;
@@ -644,6 +659,12 @@ class LanTransport {
       session.readerSlot.release();
     }
   }
+
+  /// 该 peer 是否处于文件推送窗口（pushFile 写帧在途）。
+  /// manager 的 fetchLatestContent 据此跳过该 peer，避免大文件推送期间
+  /// fetch 穿插导致 300ms 假超时。
+  bool isFilePushInFlight(String peerDeviceId) =>
+      (_initiatorSessions[peerDeviceId]?.filePushInFlight ?? 0) > 0;
 
   /// 该 peer 的 initiator 会话是否支持 acks（hello 携带 `acks:1`）。
   /// 旧 peer / 无会话 → false（Phase 2.2 写后即返回语义）。
@@ -720,6 +741,9 @@ class LanTransport {
   }) async {
     final session = _initiatorSessions[peerDeviceId];
     if (session == null) return LanPushResult.noSession;
+    // 写帧窗口置位：fetchLatest 跳过该 peer（避免大文件推送期间 fetch
+    // 穿插导致 300ms 假超时）。finally 复位，支持并发 pushFile 计数。
+    session.filePushInFlight++;
     try {
       await writeFileFrames(
         write: session.connection.write,
@@ -741,6 +765,8 @@ class LanTransport {
     } on SocketException {
       _dropInitiatorSession(peerDeviceId, session);
       return LanPushResult.pending;
+    } finally {
+      session.filePushInFlight--;
     }
   }
 

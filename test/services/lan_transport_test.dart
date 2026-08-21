@@ -151,6 +151,26 @@ void main() {
       expect(responder.responderSessionCount, 1);
     });
 
+    test('对端关闭 → fetchLatest 真错误路径仍 drop（降级语义不回退）', () async {
+      final responder = _newTransport(cloud);
+      final port = await startResponder(responder);
+      final init = _newTransport(cloud);
+      addTearDown(() => init.closeAll());
+      await connectInitiator(init, port: port);
+      expect(init.initiatorSessionCount, 1);
+
+      // 对端整体关闭（模拟离线）：initiator 下一次 fetch 读到 EOF →
+      // LanProtocolException → _dropInitiatorSession（identity 校验通过）。
+      await responder.closeAll();
+      // 等待 FIN 传播到 initiator 侧，避免偶发时序抖动。
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      final row = await init
+          .fetchLatest('device-b')
+          .timeout(const Duration(seconds: 2));
+      expect(row, isNull);
+      expect(init.initiatorSessionCount, 0);
+    });
+
     test('initiator 重复 connect：旧 socket 销毁、条目不重复、新会话可用', () async {
       final responder = _newTransport(cloud);
       addTearDown(() => responder.closeAll());

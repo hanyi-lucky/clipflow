@@ -82,6 +82,8 @@ class _FakeTransport extends LanTransport {
   final List<String> dropped = [];
   final Map<String, Future<Map<String, dynamic>?>> fetchResults = {};
   int fetchCalls = 0;
+  bool isFilePushInFlightResult = false;
+  Object? fetchError;
 
   @override
   Future<int> startServer({
@@ -119,6 +121,8 @@ class _FakeTransport extends LanTransport {
   @override
   Future<Map<String, dynamic>?> fetchLatest(String peerDeviceId) async {
     fetchCalls++;
+    final error = fetchError;
+    if (error != null) throw error;
     return fetchResults[peerDeviceId] ?? Future.value(null);
   }
 
@@ -128,6 +132,9 @@ class _FakeTransport extends LanTransport {
   bool peerSupportsOpsResult = true;
   final List<String> pushedOpsTo = [];
   final List<Map<String, dynamic>> pushedOpFrames = [];
+
+  @override
+  bool isFilePushInFlight(String peerDeviceId) => isFilePushInFlightResult;
 
   @override
   bool supportsAcks(String peerDeviceId) => peerSupportsAcksResult;
@@ -565,7 +572,7 @@ void main() {
       expect(row['_restoredEntries'], isEmpty);
     });
 
-    test('fetch 超时（300ms 上限）→ 丢弃该会话并继续下一个 peer', () async {
+    test('fetch 超时（300ms 上限）→ 保留会话、跳过该 peer 并继续下一个', () async {
       discovery.candidatesResult = [_peer('peer-slow'), _peer('peer-fast')];
       final manager = createManager(fetchTimeout: const Duration(milliseconds: 30));
       await manager.start(
@@ -594,10 +601,91 @@ void main() {
 
       expect(row, isNotNull);
       expect(row!['history_id'], 'h-fast');
-      // 慢 peer 被超时丢弃（会话清理），总耗时受 300ms 上限约束
-      expect(transport.dropped, contains('peer-slow'));
+      // 超时不再 drop 健康会话（下一轮同会话续读），总耗时受 300ms 上限约束
+      expect(transport.dropped, isNot(contains('peer-slow')));
       expect(sw.elapsedMilliseconds, lessThan(300));
       never.complete(null);
+    });
+
+    test('fetch 连续超时保留会话：后续恢复后同会话续读命中，不触发重连', () async {
+      discovery.candidatesResult = [_peer('peer-slow')];
+      final manager = createManager(fetchTimeout: const Duration(milliseconds: 30));
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final never = Completer<Map<String, dynamic>?>();
+      transport.fetchResults['peer-slow'] = never.future;
+
+      // 连续两轮超时：会话保留、未触发重连
+      expect(await manager.fetchLatestContent(), isNull);
+      expect(await manager.fetchLatestContent(), isNull);
+      expect(transport.dropped, isEmpty);
+      expect(transport.connectAttempts, hasLength(1));
+
+      // 慢响应到达：同会话续读命中（若超时已 drop，verifiedPeerIds 为空
+      // 且需重连后才能恢复）
+      final rowFuture = manager.fetchLatestContent();
+      never.complete(<String, dynamic>{
+        'history_id': 'h-recovered',
+        'type': 'text',
+        'content': 'enc',
+        'source_device': 'peer-slow',
+        'source_device_name': 'Peer Slow',
+        'source_platform': 'macos',
+        'timestamp': 100,
+        '_deletedIds': <String>[],
+        '_restoredEntries': <Map<String, dynamic>>[],
+      });
+      final row = await rowFuture;
+      expect(row, isNotNull);
+      expect(row!['history_id'], 'h-recovered');
+      expect(transport.dropped, isEmpty);
+      expect(transport.connectAttempts, hasLength(1));
+    });
+
+    test('真 socket 错误仍 drop 会话（降级语义不回退）', () async {
+      discovery.candidatesResult = [_peer('peer-err')];
+      final manager = createManager(fetchTimeout: const Duration(milliseconds: 30));
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.fetchError = SocketException('connection reset by peer');
+      expect(await manager.fetchLatestContent(), isNull);
+      expect(transport.dropped, contains('peer-err'));
+      expect(
+        manager.diagnostics.fallbackCount(LanFallbackReason.fetchError),
+        greaterThan(0),
+      );
+    });
+
+    test('pushFile 在途时 fetch 跳过该 peer（不穿插、不假超时、不 drop）', () async {
+      discovery.candidatesResult = [_peer('peer-file')];
+      final manager = createManager(fetchTimeout: const Duration(milliseconds: 30));
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.isFilePushInFlightResult = true;
+      transport.fetchResults['peer-file'] = Future.value(<String, dynamic>{
+        'history_id': 'h-file',
+        'type': 'text',
+        'content': 'enc',
+        'source_device': 'peer-file',
+        'source_device_name': 'Peer File',
+        'source_platform': 'macos',
+        'timestamp': 100,
+        '_deletedIds': <String>[],
+        '_restoredEntries': <Map<String, dynamic>>[],
+      });
+
+      expect(await manager.fetchLatestContent(), isNull);
+      expect(transport.fetchCalls, 0); // 未发起 fetchLatest
+      expect(transport.dropped, isEmpty);
     });
 
     test('已见过的 historyId（同 row 重复 fetch）不再返回', () async {

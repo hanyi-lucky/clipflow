@@ -429,16 +429,20 @@ class LanSyncManager {
     var tried = 0;
     for (var i = 0; i < peerIds.length && tried < LanConstants.maxVerifiedPeers; i++) {
       final peerId = peerIds[(_roundRobinIndex + i) % peerIds.length];
+      // 大文件推送窗口：跳过该 peer（与 readerSlot busy 跳过同语义，不计数）。
+      if (_transport.isFilePushInFlight(peerId)) continue;
       tried++;
       Map<String, dynamic>? row;
       try {
         row = await _transport.fetchLatest(peerId).timeout(
               _fetchTimeout,
               onTimeout: () {
-                // 超时：会话可能处于脏状态，丢弃让下一轮重连。
+                // 300ms 超时 ≠ 会话损坏：健康会话偶发慢响应（RTT>300ms /
+                // 大文件在途）不销毁连接，下一轮同会话续读。真断连由
+                // transport 帧级读超时（lanFrameTimeout=5s）兜底 drop，
+                // 保持离线 peer 的 localOnly 降级语义不回退。
                 _diagnostics.lanFetchMiss++;
                 _diagnostics.recordFallback(LanFallbackReason.fetchTimeout);
-                _transport.dropSession(peerId);
                 return null;
               },
             );
