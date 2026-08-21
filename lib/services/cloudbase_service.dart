@@ -301,6 +301,42 @@ class CloudBaseService {
     }
   }
 
+  /// 拉取增量同步操作（durable cursor）。旧服务器返回 404 → null（legacy 回退，
+  /// 会话内由调用方降级到 30s 窗口路径），其他错误原样抛出。
+  Future<Map<String, dynamic>?> fetchSyncChanges({
+    required int after,
+    int? limit,
+  }) async {
+    try {
+      final query = '/sync/changes?after=$after${limit != null ? '&limit=$limit' : ''}';
+      final result = await _callApi('GET', query);
+      if (result['code'] != 'SUCCESS') return null;
+      return result['data'] as Map<String, dynamic>?;
+    } on Exception catch (e) {
+      if (e.toString().contains('HTTP 404')) return null;
+      rethrow;
+    }
+  }
+
+  /// 提交删除/恢复操作（服务端幂等：duplicate / 409 / ignored）。
+  Future<Map<String, dynamic>> commitSyncOperation({
+    required String operationId,
+    required String kind,
+    required String entryId,
+    Map<String, dynamic>? payload,
+  }) async {
+    final result = await _callApi('POST', '/sync/commit', body: {
+      'operationId': operationId,
+      'kind': kind,
+      'entryId': entryId,
+      if (payload != null && payload.isNotEmpty) 'payload': payload,
+    });
+    if (result['code'] != 'SUCCESS') {
+      throw Exception('commitSyncOperation failed: ${result['message']}');
+    }
+    return result;
+  }
+
   /// 倾倒垃圾桶：永久删除当前用户所有软删历史条目，返回删除数量。
   Future<int> emptyTrash() async {
     final result = await _callApi('DELETE', '/history/trash');

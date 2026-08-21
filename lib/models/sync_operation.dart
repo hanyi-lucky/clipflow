@@ -1,5 +1,5 @@
 /// The kind of content carried by a durable sync operation.
-enum SyncOperationKind { text, image, file }
+enum SyncOperationKind { text, image, file, delete, restore }
 
 /// Lifecycle states persisted in the outbox manifest.
 enum SyncOperationState { pending, sending, retryable, dead }

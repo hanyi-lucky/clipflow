@@ -12,6 +12,9 @@ import 'package:clipflow/services/encryption_service.dart';
 
 /// 模拟服务器（可注入当前剪切板行），用于验证「打开并同步」的 triggerSync 下载路径。
 class OpenSyncRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   OpenSyncRepo() : super(CloudBaseService());
 
   List<Map<String, dynamic>> history = [];

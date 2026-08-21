@@ -25,6 +25,9 @@ import 'package:clipflow/services/lan_sync_manager.dart';
 
 /// 模拟服务器：LAN 文件测试只关心 downloadFile 是否被调用 + Cloud 兜底内容。
 class _LanFileCloudRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   _LanFileCloudRepo() : super(CloudBaseService());
 
   Map<String, dynamic>? currentClipboard;

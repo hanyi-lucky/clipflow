@@ -19,6 +19,9 @@ import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/encryption_service.dart';
 
 class FileProviderFakeRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   FileProviderFakeRepo() : super(CloudBaseService());
 
   Map<String, dynamic>? currentClipboard;

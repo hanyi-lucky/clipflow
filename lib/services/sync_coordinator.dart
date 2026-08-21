@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:uuid/uuid.dart';
 
+import '../models/sync_changes_page.dart';
 import '../models/sync_operation.dart';
 import '../repositories/local_file_store.dart';
 import '../repositories/outbox_store.dart';
@@ -22,7 +23,8 @@ class SyncCoordinator {
   final Duration retryBaseDelay;
   final DateTime Function() _now;
   final Uuid _uuid;
-  final Future<void> Function(SyncOperation)? _onOperationSucceeded;
+  final Future<void> Function(SyncOperation, {Map<String, dynamic>? response})?
+      _onOperationSucceeded;
   bool _draining = false;
   bool _closed = false;
 
@@ -35,7 +37,8 @@ class SyncCoordinator {
     this.retryBaseDelay = const Duration(milliseconds: 500),
     DateTime Function()? now,
     Uuid? uuid,
-    Future<void> Function(SyncOperation)? onOperationSucceeded,
+    Future<void> Function(SyncOperation, {Map<String, dynamic>? response})?
+        onOperationSucceeded,
   })  : _syncService = syncService,
         _transport = transport,
         _outbox = outbox,
@@ -51,7 +54,8 @@ class SyncCoordinator {
     required OutboxStore outbox,
     required LocalFileStore fileStore,
     Duration retryBaseDelay = const Duration(milliseconds: 500),
-    Future<void> Function(SyncOperation)? onOperationSucceeded,
+    Future<void> Function(SyncOperation, {Map<String, dynamic>? response})?
+        onOperationSucceeded,
   }) {
     return SyncCoordinator(
       userId: userId,
@@ -172,9 +176,53 @@ class SyncCoordinator {
     return FileUploadResult(historyId: operationId);
   }
 
+  /// 下载最新内容：优先 durable 模式（先拉 /api/sync/changes 增量，再拉
+  /// /api/clipboard 内容，decode 时把 op log 转成删除/恢复形状）。
+  /// 旧服务器（changes 404 → null）自动回退 legacy 30s 窗口路径。
+  /// 入队删除操作：稳定 opId = `del:<entryId>`；活动期重复入队直接复用（幂等）。
+  Future<void> enqueueDelete(String entryId) async {
+    await _enqueueSyncOp(SyncOperationKind.delete, 'del:$entryId', entryId);
+  }
+
+  /// 入队恢复操作：稳定 opId = `rest:<entryId>`。
+  Future<void> enqueueRestore(String entryId) async {
+    await _enqueueSyncOp(SyncOperationKind.restore, 'rest:$entryId', entryId);
+  }
+
+  Future<void> _enqueueSyncOp(
+    SyncOperationKind kind,
+    String operationId,
+    String entryId,
+  ) async {
+    if (_closed) return;
+    final existing = await _outbox.findActiveByDedupeKey(
+      userId,
+      kind,
+      operationId,
+    );
+    if (existing != null) {
+      // 已在 outbox（含 retryable）→ 只触发一次 drain，不重复入队
+      await drainOnce();
+      return;
+    }
+    final prepared = kind == SyncOperationKind.delete
+        ? _syncService.prepareDelete(entryId)
+        : _syncService.prepareRestore(entryId);
+    await _enqueue(prepared, operationId);
+    await drainOnce();
+  }
+
   Future<DownloadResult?> downloadLatestContent() async {
     if (_closed) return null;
+    final after = _syncService.lastAppliedCursor ?? 0;
+    final opsPage = await _transport.fetchSyncChanges(after: after);
     final current = await _transport.fetchCurrentClipboardWithDeletions();
+    if (opsPage != null) {
+      return _syncService.decodeCurrentClipboard(
+        current,
+        opsPage: SyncChangesPage.fromJson(opsPage),
+      );
+    }
     return _syncService.decodeCurrentClipboard(current);
   }
 
@@ -182,6 +230,7 @@ class SyncCoordinator {
     if (_closed || _draining) return;
     _draining = true;
     try {
+      await _sweepExpiredOps();
       final operations = await _outbox.loadActive(userId);
       for (final operation in operations) {
         if (operation.state == SyncOperationState.retryable &&
@@ -239,7 +288,7 @@ class SyncCoordinator {
     );
     await _outbox.update(sending);
     try {
-      await _transport.send(sending);
+      final response = await _transport.send(sending);
       _syncService.markUploadSucceeded(sending.dedupeKey);
       await _outbox.remove(userId, sending.operationId);
       // 回执挂在 durable success 点之后：send 已返回、去重状态已写、
@@ -247,8 +296,16 @@ class SyncCoordinator {
       // 后台 drain 重试、dedupe 路径 drain、401 重放成功）的发送成功都
       // 收敛到这里；回调异常绝不 rethrow，否则会把已删除 manifest 的
       // 已成功操作重新写回 outbox → 下次 drain 重复上传。
-      await _notifySuccess(sending);
+      await _notifySuccess(sending, response: response);
     } catch (error) {
+      // delete/restore 走稳定 opId + 服务端幂等：4xx/dead 立即移出 outbox
+      // （不无限重试、不留 dead 文件），本地 deletedEntryIds 兜底防复活。
+      final isSyncOp = sending.kind == SyncOperationKind.delete ||
+          sending.kind == SyncOperationKind.restore;
+      if (isSyncOp && _isDead(error)) {
+        await _outbox.remove(userId, sending.operationId);
+        rethrow;
+      }
       final attemptCount = sending.attemptCount + 1;
       final dead = _isDead(error);
       final updated = sending.copyWith(
@@ -268,13 +325,30 @@ class SyncCoordinator {
     }
   }
 
-  Future<void> _notifySuccess(SyncOperation operation) async {
+  Future<void> _notifySuccess(
+    SyncOperation operation, {
+    Map<String, dynamic>? response,
+  }) async {
     final callback = _onOperationSucceeded;
     if (callback == null) return;
     try {
-      await callback(operation);
+      await callback(operation, response: response);
     } catch (error) {
       debugPrint('[SYNC-COORDINATOR] Success callback failed: $error');
+    }
+  }
+
+  /// 轻量 sweep：delete/restore 操作超过 7 天（与服务端 op 保留期一致）直接移除，
+  /// 避免无限重试/无限残留；text/image/file 生命周期零改动。
+  Future<void> _sweepExpiredOps() async {
+    final cutoff = _now().millisecondsSinceEpoch - 7 * 24 * 60 * 60 * 1000;
+    final active = await _outbox.loadActive(userId);
+    for (final operation in active) {
+      final isSyncOp = operation.kind == SyncOperationKind.delete ||
+          operation.kind == SyncOperationKind.restore;
+      if (isSyncOp && operation.createdAtMs < cutoff) {
+        await _outbox.remove(userId, operation.operationId);
+      }
     }
   }
 

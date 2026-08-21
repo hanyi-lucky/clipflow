@@ -13,6 +13,9 @@ import 'package:clipflow/services/encryption_service.dart';
 
 /// 模拟服务器延迟，用于测试并发刷新
 class SlowFakeRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   SlowFakeRepo() : super(CloudBaseService());
 
   List<Map<String, dynamic>> history = [];

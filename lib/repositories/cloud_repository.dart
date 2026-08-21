@@ -99,6 +99,29 @@ class CloudRepository {
     return await _cloud.getClipboardWithDeletedIds();
   }
 
+  // --- 同步操作（durable cursor + tombstone，Phase 5.2）---
+
+  /// 拉取一页增量同步操作（旧服务器返回 null → legacy 回退）。
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async {
+    return await _cloud.fetchSyncChanges(after: after, limit: limit);
+  }
+
+  /// 提交删除/恢复操作，返回服务端响应 `data`（seq/duplicate/ignored/row）。
+  Future<Map<String, dynamic>> commitSyncOperation({
+    required String operationId,
+    required String kind,
+    required String entryId,
+    Map<String, dynamic>? payload,
+  }) async {
+    final result = await _cloud.commitSyncOperation(
+      operationId: operationId,
+      kind: kind,
+      entryId: entryId,
+      payload: payload,
+    );
+    return result['data'] as Map<String, dynamic>? ?? const <String, dynamic>{};
+  }
+
   /// 获取垃圾箱条目
   Future<List<Map<String, dynamic>>> getTrashEntries() async {
     return await _cloud.queryDocuments('trash');

@@ -15,20 +15,25 @@ import 'package:clipflow/services/sync_transport.dart';
 class _RecordingTransport implements SyncTransport {
   final List<SyncOperation> sent = [];
   int failuresRemaining;
+  Map<String, dynamic>? sendResponse;
 
   _RecordingTransport({this.failuresRemaining = 0});
 
   @override
-  Future<void> send(SyncOperation operation) async {
+  Future<Map<String, dynamic>?> send(SyncOperation operation) async {
     sent.add(operation);
     if (failuresRemaining > 0) {
       failuresRemaining--;
       throw const SocketException('offline');
     }
+    return sendResponse;
   }
 
   @override
   Future<Map<String, dynamic>?> fetchCurrentClipboardWithDeletions() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> fetchSyncChanges({required int after}) async => null;
 
   @override
   Future<void> close() async {}
@@ -44,14 +49,18 @@ class _ReplayingTransport implements SyncTransport {
   int internalAttempts = 0;
 
   @override
-  Future<void> send(SyncOperation operation) async {
+  Future<Map<String, dynamic>?> send(SyncOperation operation) async {
     sent.add(operation);
     internalAttempts++;
     // 重放成功：send 正常返回，coordinator 视为一次成功发送。
+    return null;
   }
 
   @override
   Future<Map<String, dynamic>?> fetchCurrentClipboardWithDeletions() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> fetchSyncChanges({required int after}) async => null;
 
   @override
   Future<void> close() async {}
@@ -168,7 +177,7 @@ void main() {
       transport: transport,
       outbox: outbox,
       fileStore: fileStore,
-      onOperationSucceeded: (op) async => succeeded.add(op),
+      onOperationSucceeded: (op, {response}) async => succeeded.add(op),
     );
 
     final operationId = await coordinator.uploadContent('hello-receipt');
@@ -188,7 +197,7 @@ void main() {
       transport: transport,
       outbox: outbox,
       fileStore: fileStore,
-      onOperationSucceeded: (op) async => succeeded.add(op),
+      onOperationSucceeded: (op, {response}) async => succeeded.add(op),
     );
 
     await expectLater(
@@ -209,7 +218,7 @@ void main() {
       transport: transport,
       outbox: outbox,
       fileStore: fileStore,
-      onOperationSucceeded: (op) async => throw Exception('ui boom'),
+      onOperationSucceeded: (op, {response}) async => throw Exception('ui boom'),
     );
 
     await coordinator.uploadContent('boom-receipt');
@@ -234,7 +243,7 @@ void main() {
       fileStore: fileStore,
       now: () => now,
       retryBaseDelay: const Duration(milliseconds: 10),
-      onOperationSucceeded: (op) async => succeeded.add(op),
+      onOperationSucceeded: (op, {response}) async => succeeded.add(op),
     );
 
     await expectLater(
@@ -262,7 +271,7 @@ void main() {
       transport: transport,
       outbox: outbox,
       fileStore: fileStore,
-      onOperationSucceeded: (op) async => succeeded.add(op),
+      onOperationSucceeded: (op, {response}) async => succeeded.add(op),
     );
 
     final operationId = await coordinator.uploadContent('replay-receipt');
@@ -274,4 +283,151 @@ void main() {
     expect(transport.sent.single.operationId, operationId);
     expect(await outbox.loadActive('user-1'), isEmpty);
   });
+  test('enqueueDelete persists a delete op with a stable id and dedupe key', () async {
+    final transport = _RecordingTransport(failuresRemaining: 999);
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+    );
+
+    await expectLater(
+      coordinator.enqueueDelete('entry-1'),
+      throwsA(isA<SocketException>()),
+    );
+
+    final active = await outbox.loadActive('user-1');
+    expect(active, hasLength(1));
+    expect(active.single.kind, SyncOperationKind.delete);
+    expect(active.single.operationId, 'del:entry-1');
+    expect(active.single.dedupeKey, 'del:entry-1');
+    expect(active.single.payload['entryId'], 'entry-1');
+    expect(transport.sent, hasLength(1));
+  });
+
+  test('enqueueDelete dedupes an already active op', () async {
+    final transport = _RecordingTransport(failuresRemaining: 999);
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+    );
+
+    await expectLater(
+      coordinator.enqueueDelete('entry-1'),
+      throwsA(isA<SocketException>()),
+    );
+    await coordinator.enqueueDelete('entry-1');
+
+    expect(await outbox.loadActive('user-1'), hasLength(1));
+    expect(transport.sent, hasLength(1));
+  });
+
+  test('enqueueRestore persists a restore op with a stable id', () async {
+    final transport = _RecordingTransport(failuresRemaining: 999);
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+    );
+
+    await expectLater(
+      coordinator.enqueueRestore('entry-2'),
+      throwsA(isA<SocketException>()),
+    );
+
+    final active = await outbox.loadActive('user-1');
+    expect(active.single.kind, SyncOperationKind.restore);
+    expect(active.single.operationId, 'rest:entry-2');
+    expect(active.single.payload['entryId'], 'entry-2');
+  });
+
+  test('forward the send response to the success callback', () async {
+    final transport = _RecordingTransport()
+      ..sendResponse = {'seq': 7, 'row': {'id': 'entry-1'}};
+    final responses = <Map<String, dynamic>?>[];
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+      onOperationSucceeded: (op, {response}) async => responses.add(response),
+    );
+
+    await coordinator.enqueueDelete('entry-1');
+
+    expect(responses.single?['seq'], 7);
+    expect(await outbox.loadActive('user-1'), isEmpty);
+  });
+
+  test('a dead (4xx) delete op is removed from the outbox immediately', () async {
+    final transport = _RecordingTransport()..failuresRemaining = 0;
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: _DeadTransport(),
+      outbox: outbox,
+      fileStore: fileStore,
+    );
+
+    await expectLater(
+      coordinator.enqueueDelete('entry-x'),
+      throwsA(isA<Exception>()),
+    );
+
+    expect(await outbox.loadActive('user-1'), isEmpty);
+    final deadFile = File('${directory.path}/clipflow_outbox/user-1/del:entry-x.json');
+    expect(deadFile.existsSync(), isFalse,
+        reason: 'dead delete op must be removed, not persisted as dead file');
+  });
+
+  test('sweep removes delete ops older than 7 days without sending them', () async {
+    final transport = _RecordingTransport(failuresRemaining: 999);
+    var now = DateTime.fromMillisecondsSinceEpoch(1_000_000);
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+      now: () => now,
+    );
+
+    await expectLater(
+      coordinator.enqueueDelete('entry-old'),
+      throwsA(isA<SocketException>()),
+    );
+    expect(await outbox.loadActive('user-1'), hasLength(1));
+    expect(transport.sent, hasLength(1));
+
+    // 8 天后：createdAt 已超 7 天 → drainOnce 内 sweep 直接移除，不再发送
+    now = now.add(const Duration(days: 8));
+    await coordinator.drainOnce();
+
+    expect(await outbox.loadActive('user-1'), isEmpty);
+    expect(transport.sent, hasLength(1));
+  });
+}
+
+class _DeadTransport implements SyncTransport {
+  @override
+  Future<Map<String, dynamic>?> send(SyncOperation operation) async {
+    throw Exception('HTTP 409 CONFLICT');
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchCurrentClipboardWithDeletions() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> fetchSyncChanges({required int after}) async => null;
+
+  @override
+  Future<void> close() async {}
 }

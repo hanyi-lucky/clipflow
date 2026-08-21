@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:uuid/uuid.dart';
 import '../repositories/cloud_repository.dart';
 import '../services/encryption_service.dart';
@@ -8,6 +9,7 @@ import '../core/hex_utils.dart';
 import '../core/exceptions.dart';
 import '../core/constants.dart';
 import '../models/clipboard_entry.dart';
+import '../models/sync_changes_page.dart';
 import '../models/sync_operation.dart';
 
 /// 包含从服务器下载的内容及其来源设备信息
@@ -33,6 +35,8 @@ class DownloadResult {
   final int? fileSize;
   final String? mimeType;
   final String? fileHash;
+  // durable cursor：成功应用后由 Provider 持久化（LocalStorage.syncCursor）
+  final int? syncCursor;
 
   const DownloadResult({
     required this.content,
@@ -55,12 +59,14 @@ class DownloadResult {
     this.fileSize,
     this.mimeType,
     this.fileHash,
+    this.syncCursor,
   });
 
   /// 创建一个只有同步数据的空结果（无新内容需要下载）
   factory DownloadResult.empty({
     List<String> deletedIds = const [],
     List<Map<String, dynamic>> restoredEntries = const [],
+    int? syncCursor,
   }) {
     return DownloadResult(
       content: '',
@@ -70,6 +76,7 @@ class DownloadResult {
       timestamp: DateTime.fromMillisecondsSinceEpoch(0),
       deletedIds: deletedIds,
       restoredEntries: restoredEntries,
+      syncCursor: syncCursor,
     );
   }
 
@@ -121,12 +128,22 @@ class SyncService {
 
   String _lastUploadedHash = '';
   DateTime? _lastReceivedTimestamp;
+  int? _lastAppliedCursor;
 
   String get deviceId => _deviceId;
   String get deviceName => _deviceName;
+  String get devicePlatform => _devicePlatform;
   String get lastUploadedHash => _lastUploadedHash;
   DateTime? get lastReceivedTimestamp => _lastReceivedTimestamp;
   Uint8List get key => _key;
+
+  /// 已成功应用的 durable cursor（内存态；持久化由 Provider 经 LocalStorage 负责）。
+  int? get lastAppliedCursor => _lastAppliedCursor;
+
+  /// 应用成功后推进 cursor（与 markAsReceived 同纪律：成功才推进）。
+  void setLastAppliedCursor(int? cursor) {
+    _lastAppliedCursor = cursor;
+  }
 
   /// 更新设备名（供重命名当前设备后使用）
   void updateDeviceName(String name) {
@@ -275,6 +292,37 @@ class SyncService {
     );
   }
 
+  /// 准备删除操作：稳定 opId = `del:<entryId>`，payload 只含来源元数据（LAN 红线：
+  /// 请求体绝不携带行数据/密码/token/salt/指纹/明文文件名）。
+  PreparedSyncOperation prepareDelete(String entryId) {
+    return PreparedSyncOperation(
+      kind: SyncOperationKind.delete,
+      dedupeKey: 'del:$entryId',
+      payload: {
+        'entryId': entryId,
+        'sourceDevice': _deviceId,
+        'sourceDeviceName': _deviceName,
+        'sourcePlatform': _devicePlatform,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      },
+    );
+  }
+
+  /// 准备恢复操作：稳定 opId = `rest:<entryId>`。
+  PreparedSyncOperation prepareRestore(String entryId) {
+    return PreparedSyncOperation(
+      kind: SyncOperationKind.restore,
+      dedupeKey: 'rest:$entryId',
+      payload: {
+        'entryId': entryId,
+        'sourceDevice': _deviceId,
+        'sourceDeviceName': _deviceName,
+        'sourcePlatform': _devicePlatform,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      },
+    );
+  }
+
   void markUploadSucceeded(String dedupeKey) {
     _lastUploadedHash = dedupeKey;
   }
@@ -397,18 +445,62 @@ class SyncService {
   }
 
   Future<DownloadResult?> decodeCurrentClipboard(
-    Map<String, dynamic>? current,
-  ) async {
-    if (current == null) return null;
+    Map<String, dynamic>? current, {
+    SyncChangesPage? opsPage,
+  }) async {
+    // 提取 deletedIds 和 restoredEntries：
+    // durable 模式（opsPage != null）把 op log 转成既有形状（restore row:null 跳过，
+    // 快照已 GC 时由启动全量刷新收敛）；legacy 模式读取 /api/clipboard 的 30s 窗口字段。
+    final deletedIds = <String>[];
+    final restoredRaw = <Map<String, dynamic>>[];
+    int? syncCursor;
+    if (opsPage != null) {
+      syncCursor = opsPage.cursor;
+      for (final change in opsPage.changes) {
+        if (change.isDelete) {
+          deletedIds.add(change.entryId);
+        } else if (change.isRestore) {
+          final row = change.row;
+          if (row != null) {
+            restoredRaw.add(row);
+          } else {
+            debugPrint(
+              '[SYNC] restore op row:null (snapshot GC), skip: ${change.entryId}',
+            );
+          }
+        }
+      }
+    } else if (current != null) {
+      deletedIds.addAll(
+        (current['_deletedIds'] as List?)?.cast<String>() ?? const [],
+      );
+      restoredRaw.addAll(
+        (current['_restoredEntries'] as List?)?.cast<Map<String, dynamic>>() ??
+            const [],
+      );
+    }
 
-    // 提取 deletedIds 和 restoredEntries（每次轮询都需要，不受内容过滤影响）
-    final deletedIds = (current['_deletedIds'] as List?)?.cast<String>() ?? [];
-    final restoredRaw = (current['_restoredEntries'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    // 空剪切板边界：clipboard 为 null 但 ops 非空时返回 empty 结果（不能整体 null，
+    // 否则空剪切板用户丢 tombstone）。即使 ops 全部被跳过（restore row:null），
+    // 只要 op log 有变更就必须返回非空以推进 cursor，否则同一 op 会被无限重取。
+    if (current == null) {
+      if (opsPage == null) return null; // legacy NOT_FOUND：无 ops 通道
+      if (opsPage.changes.isEmpty) return null; // 无变更：无需推进
+      return DownloadResult.empty(
+        deletedIds: deletedIds,
+        restoredEntries: restoredRaw,
+        syncCursor: syncCursor,
+      );
+    }
 
     final sourceDevice = current['source_device'] as String?;
     if (sourceDevice == _deviceId) {
       if (deletedIds.isEmpty && restoredRaw.isEmpty) return null;
-      return DownloadResult.empty(deletedIds: deletedIds, restoredEntries: restoredRaw);
+      return DownloadResult.empty(
+        deletedIds: deletedIds,
+        restoredEntries: restoredRaw,
+        syncCursor: syncCursor,
+      );
     }
 
     final timestamp = DateTime.fromMillisecondsSinceEpoch(
@@ -418,7 +510,11 @@ class SyncService {
     if (_lastReceivedTimestamp != null &&
         !timestamp.isAfter(_lastReceivedTimestamp!)) {
       if (deletedIds.isEmpty && restoredRaw.isEmpty) return null;
-      return DownloadResult.empty(deletedIds: deletedIds, restoredEntries: restoredRaw);
+      return DownloadResult.empty(
+        deletedIds: deletedIds,
+        restoredEntries: restoredRaw,
+        syncCursor: syncCursor,
+      );
     }
 
     try {
@@ -454,6 +550,7 @@ class SyncService {
           imageHeight: current['height'] as int?,
           imageFormat: current['format'] as String?,
           id: current['history_id'] as String?,
+          syncCursor: syncCursor,
         );
       }
 
@@ -488,6 +585,7 @@ class SyncService {
           fileSize: current['file_size'] as int?,
           mimeType: current['mime_type'] as String?,
           fileHash: current['hash'] as String?,
+          syncCursor: syncCursor,
         );
       }
 
@@ -506,6 +604,7 @@ class SyncService {
         deletedIds: deletedIds,
         restoredEntries: restoredRaw,
         id: current['history_id'] as String?,
+        syncCursor: syncCursor,
       );
     } catch (e) {
       throw DecryptionException('Failed to decrypt content: $e');

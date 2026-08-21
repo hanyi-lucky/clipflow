@@ -12,8 +12,34 @@ class FakeCloudRepository extends CloudRepository {
   final List<Map<String, dynamic>> currentWrites = [];
   final List<Map<String, dynamic>> historyWrites = [];
   Map<String, dynamic>? fileUpload;
+  final List<Map<String, dynamic>> commitCalls = [];
+  final List<int> changesAfterCalls = [];
+  Map<String, dynamic>? commitResponse;
+  Map<String, dynamic>? changesResponse;
 
   FakeCloudRepository() : super(CloudBaseService());
+
+  @override
+  Future<Map<String, dynamic>> commitSyncOperation({
+    required String operationId,
+    required String kind,
+    required String entryId,
+    Map<String, dynamic>? payload,
+  }) async {
+    commitCalls.add({
+      'operationId': operationId,
+      'kind': kind,
+      'entryId': entryId,
+      'payload': payload,
+    });
+    return commitResponse ?? const <String, dynamic>{'seq': 1};
+  }
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async {
+    changesAfterCalls.add(after);
+    return changesResponse;
+  }
 
   @override
   Future<void> setCurrentClipboard(Map<String, dynamic> data) async {
@@ -131,6 +157,96 @@ void main() {
 
     expect(repo.fileUpload?['encryptedPath'], artifact);
     expect(repo.fileUpload?['historyId'], 'op-file');
+  });
+  test('sends a delete via commitSyncOperation and returns the data', () async {
+    final repo = FakeCloudRepository()
+      ..commitResponse = {'seq': 7};
+    final transport = CloudSyncTransport(
+      repository: repo,
+      fileStore: LocalFileStore(directoryPath: '/tmp/clipflow-test-files'),
+    );
+
+    final response = await transport.send(
+      SyncOperation(
+        operationId: 'del:entry-1',
+        userId: 'user-1',
+        kind: SyncOperationKind.delete,
+        state: SyncOperationState.sending,
+        dedupeKey: 'del:entry-1',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        attemptCount: 0,
+        nextAttemptAtMs: 0,
+        payload: const {'entryId': 'entry-1'},
+      ),
+    );
+
+    expect(repo.commitCalls.single['operationId'], 'del:entry-1');
+    expect(repo.commitCalls.single['kind'], 'delete');
+    expect(repo.commitCalls.single['entryId'], 'entry-1');
+    expect(response, {'seq': 7});
+  });
+
+  test('sends a restore via commitSyncOperation and returns row data', () async {
+    final repo = FakeCloudRepository()
+      ..commitResponse = {
+        'seq': 8,
+        'row': {'id': 'entry-2', 'content': 'cipher', 'type': 'text'},
+      };
+    final transport = CloudSyncTransport(
+      repository: repo,
+      fileStore: LocalFileStore(directoryPath: '/tmp/clipflow-test-files'),
+    );
+
+    final response = await transport.send(
+      SyncOperation(
+        operationId: 'rest:entry-2',
+        userId: 'user-1',
+        kind: SyncOperationKind.restore,
+        state: SyncOperationState.sending,
+        dedupeKey: 'rest:entry-2',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        attemptCount: 0,
+        nextAttemptAtMs: 0,
+        payload: const {'entryId': 'entry-2'},
+      ),
+    );
+
+    expect(repo.commitCalls.single['kind'], 'restore');
+    expect(response?['seq'], 8);
+    expect(response?['row']?['id'], 'entry-2');
+  });
+
+  test('fetchSyncChanges delegates the after cursor and returns the page', () async {
+    final repo = FakeCloudRepository()
+      ..changesResponse = {
+        'cursor': 9,
+        'hasMore': false,
+        'changes': <Map<String, dynamic>>[],
+      };
+    final transport = CloudSyncTransport(
+      repository: repo,
+      fileStore: LocalFileStore(directoryPath: '/tmp/clipflow-test-files'),
+    );
+
+    final page = await transport.fetchSyncChanges(after: 3);
+
+    expect(repo.changesAfterCalls.single, 3);
+    expect(page?['cursor'], 9);
+    expect(page?['hasMore'], false);
+  });
+
+  test('fetchSyncChanges returns null for a legacy server (404 fallback)', () async {
+    final repo = FakeCloudRepository()..changesResponse = null;
+    final transport = CloudSyncTransport(
+      repository: repo,
+      fileStore: LocalFileStore(directoryPath: '/tmp/clipflow-test-files'),
+    );
+
+    final page = await transport.fetchSyncChanges(after: 0);
+
+    expect(page, isNull);
   });
 }
 

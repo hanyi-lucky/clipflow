@@ -1451,7 +1451,10 @@ class ClipboardProvider extends ChangeNotifier
   /// 无法经 upload* 返回值通知 Provider，统一在此按 op.kind 三分流补账。
   /// 直接路径的返回分支补账与回执并存，靠 `HistoryService.addEntry` 按
   /// ID → image stableHash → file fileHash 三级去重收敛。
-  Future<void> _onOperationSucceeded(SyncOperation op) async {
+  Future<void> _onOperationSucceeded(
+    SyncOperation op, {
+    Map<String, dynamic>? response,
+  }) async {
     if (_disposed || _syncService == null) return;
     try {
       switch (op.kind) {
@@ -1551,6 +1554,10 @@ class ClipboardProvider extends ChangeNotifier
           );
           _saveHistory();
           notifyListeners();
+          break;
+        case SyncOperationKind.delete:
+        case SyncOperationKind.restore:
+          // Phase 3 补账（deletedEntryIds 移除、本地 artifact 清理、LAN push w/ response）
           break;
       }
       // LAN 接力推送：补账之后、同 try/catch 内；异常只日志，绝不 rethrow

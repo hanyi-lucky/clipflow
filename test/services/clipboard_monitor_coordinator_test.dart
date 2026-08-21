@@ -15,10 +15,16 @@ class _Transport implements SyncTransport {
   final List<SyncOperation> sent = [];
 
   @override
-  Future<void> send(SyncOperation operation) async => sent.add(operation);
+  Future<Map<String, dynamic>?> send(SyncOperation operation) async {
+    sent.add(operation);
+    return null;
+  }
 
   @override
   Future<Map<String, dynamic>?> fetchCurrentClipboardWithDeletions() async => null;
+
+  @override
+  Future<Map<String, dynamic>?> fetchSyncChanges({required int after}) async => null;
 
   @override
   Future<void> close() async {}

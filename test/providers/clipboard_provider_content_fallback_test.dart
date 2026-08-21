@@ -15,6 +15,9 @@ import 'package:clipflow/services/encryption_service.dart';
 /// 解密失败 → 按 id 调 GET /api/history/:id/content 拉全量密文重试一次 →
 /// 成功入历史 / 垃圾箱正常显示；仍失败才跳过/降级。
 class FakeFallbackRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   FakeFallbackRepo() : super(CloudBaseService());
 
   List<Map<String, dynamic>> history = [];

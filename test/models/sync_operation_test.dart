@@ -48,4 +48,68 @@ void main() {
       throwsA(isA<SyncOperationFormatException>()),
     );
   });
+  test('delete kind round-trips with schemaVersion 1', () {
+    final operation = SyncOperation(
+      operationId: 'del:entry-1',
+      userId: 'user-1',
+      kind: SyncOperationKind.delete,
+      state: SyncOperationState.pending,
+      dedupeKey: 'del:entry-1',
+      createdAtMs: 100,
+      updatedAtMs: 100,
+      attemptCount: 0,
+      nextAttemptAtMs: 100,
+      payload: {'entryId': 'entry-1'},
+    );
+
+    final restored = SyncOperation.fromJson(operation.toJson());
+
+    expect(restored.kind, SyncOperationKind.delete);
+    expect(restored.operationId, 'del:entry-1');
+    expect(restored.dedupeKey, 'del:entry-1');
+    expect(restored.payload['entryId'], 'entry-1');
+    expect(restored.toJson()['schemaVersion'], 1);
+  });
+
+  test('restore kind round-trips with schemaVersion 1', () {
+    final operation = SyncOperation(
+      operationId: 'rest:entry-2',
+      userId: 'user-1',
+      kind: SyncOperationKind.restore,
+      state: SyncOperationState.pending,
+      dedupeKey: 'rest:entry-2',
+      createdAtMs: 100,
+      updatedAtMs: 100,
+      attemptCount: 0,
+      nextAttemptAtMs: 100,
+      payload: {'entryId': 'entry-2'},
+    );
+
+    final restored = SyncOperation.fromJson(operation.toJson());
+
+    expect(restored.kind, SyncOperationKind.restore);
+    expect(restored.operationId, 'rest:entry-2');
+    expect(restored.toJson()['schemaVersion'], 1);
+  });
+
+  test('legacy schemaVersion 1 json with delete kind is accepted', () {
+    final restored = SyncOperation.fromJson({
+      'schemaVersion': 1,
+      'operationId': 'del:legacy-1',
+      'userId': 'user-1',
+      'kind': 'delete',
+      'state': 'pending',
+      'dedupeKey': 'del:legacy-1',
+      'createdAtMs': 100,
+      'updatedAtMs': 100,
+      'attemptCount': 0,
+      'nextAttemptAtMs': 100,
+      'payload': <String, dynamic>{'entryId': 'legacy-1'},
+      'artifactId': null,
+      'lastError': null,
+    });
+
+    expect(restored.kind, SyncOperationKind.delete);
+  });
+
 }

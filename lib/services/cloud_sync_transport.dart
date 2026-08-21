@@ -14,13 +14,14 @@ class CloudSyncTransport implements SyncTransport {
         _fileStore = fileStore;
 
   @override
-  Future<void> send(SyncOperation operation) async {
+  Future<Map<String, dynamic>?> send(SyncOperation operation) async {
     switch (operation.kind) {
       case SyncOperationKind.text:
       case SyncOperationKind.image:
         final payload = Map<String, dynamic>.from(operation.payload);
         await _repository.setCurrentClipboard(payload);
         await _repository.addHistoryEntry({...payload, 'pinned': false});
+        return null;
       case SyncOperationKind.file:
         final artifactId = operation.artifactId ?? operation.operationId;
         final encryptedPath = await _fileStore.loadEncryptedPath(artifactId);
@@ -41,7 +42,22 @@ class CloudSyncTransport implements SyncTransport {
           sourcePlatform: payload['sourcePlatform'] as String,
           timestamp: payload['timestamp'] as int,
         );
+        return null;
+      case SyncOperationKind.delete:
+      case SyncOperationKind.restore:
+        final payload = operation.payload;
+        return await _repository.commitSyncOperation(
+          operationId: operation.operationId,
+          kind: operation.kind.name,
+          entryId: payload['entryId'] as String? ?? '',
+          payload: payload,
+        );
     }
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchSyncChanges({required int after}) {
+    return _repository.getSyncChanges(after: after);
   }
 
   @override

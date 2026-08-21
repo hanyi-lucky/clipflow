@@ -21,6 +21,9 @@ import 'package:clipflow/services/lan_sync_manager.dart';
 
 /// 模拟服务器：可注入当前剪切板行，可让 fetch 抛错。
 class _LanCloudRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   _LanCloudRepo() : super(CloudBaseService());
 
   Map<String, dynamic>? currentClipboard;

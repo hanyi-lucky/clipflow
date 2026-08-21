@@ -15,6 +15,9 @@ import 'package:clipflow/services/encryption_service.dart';
 /// GET /api/history/:id/content 回补全量密文；解密结果必须走 isolate
 /// 并统一截断到 AppConstants.maxContentLength（50000）。
 class FakeTrashRepo extends CloudRepository {
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   FakeTrashRepo() : super(CloudBaseService());
 
   List<Map<String, dynamic>> history = [];
