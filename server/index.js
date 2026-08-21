@@ -13,6 +13,13 @@ const PORT = process.env.PORT || 3000;
 // 列表响应中文本行 content 的截断长度（避免超大文本行撑爆列表响应）
 const HISTORY_LIST_CONTENT_LIMIT = 10000;
 
+// 同步操作（durable cursor + tombstone）保留期与分页上限：
+// op log 保留 7 天（覆盖离线 >30s 甚至数天的收敛）；tombstone 快照保留 24 小时
+// （与垃圾箱/24h 物理清理 UX 对齐，同时钉死快照存储上界——全图密文快照至多滞留 24h）
+const SYNC_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const SYNC_TOMBSTONE_RETENTION_MS = 24 * 60 * 60 * 1000;
+const SYNC_PAGE_LIMIT = 100;
+
 // 文件同步配额（均可用环境变量覆盖，smoke-test 注入小值验证 413/507）
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -321,6 +328,29 @@ db.exec(`
     stack TEXT,
     reported_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS sync_operations (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    payload TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_operations_user_op ON sync_operations (user_id, operation_id);
+  CREATE INDEX IF NOT EXISTS idx_sync_operations_user_seq ON sync_operations (user_id, seq);
+
+  CREATE TABLE IF NOT EXISTS sync_tombstones (
+    user_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    entry_type TEXT NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    restored_at INTEGER,
+    seq INTEGER,
+    snapshot TEXT,
+    PRIMARY KEY (user_id, entry_id)
+  );
 `);
 
 
@@ -354,6 +384,13 @@ try { db.exec('ALTER TABLE history ADD COLUMN file_key TEXT'); } catch(e) {}
 try { db.exec('ALTER TABLE tokens ADD COLUMN device_id TEXT'); } catch(e) {}
 // 设备软删除标记（移除后禁止重新登录，防“删了又复活”）
 try { db.exec('ALTER TABLE devices ADD COLUMN removed_at INTEGER'); } catch(e) {}
+
+// 清理过期同步状态：op log 保留 7 天、tombstone 快照保留 24 小时。
+// 启动时调用一次 + 并入小时任务；不依赖任何客户端心跳，重启即生效。
+function pruneSyncState(now) {
+  db.prepare('DELETE FROM sync_operations WHERE created_at < ?').run(now - SYNC_RETENTION_MS);
+  db.prepare('DELETE FROM sync_tombstones WHERE deleted_at < ?').run(now - SYNC_TOMBSTONE_RETENTION_MS);
+}
 
 // 认证中间件（token 从数据库读取，重启不丢失）
 function authenticate(req, res, next) {
@@ -818,6 +855,191 @@ app.post('/api/history/:id/restore', authenticate, (req, res) => {
   res.json({ code: 'SUCCESS' });
 });
 
+// ==================== 同步操作 API（durable cursor + tombstone）====================
+
+// 行整形：与 /api/clipboard 的 restoredEntries 同规则（file 行只暴露空 content，
+// 避免旧客户端把文件标记当文本处理；image/text 保留完整密文）
+function shapeSyncRow(row) {
+  if (!row) return null;
+  return row.type === 'file' ? { ...row, content: '' } : row;
+}
+
+// 取 restore 的权威 row：现行未删除行 → tombstone 快照 → null
+// （快照被 24h GC 后仍会在 op log 中留 restore op，客户端收到 row:null 跳过，
+//   最终态由启动/手动全量刷新收敛）
+function resolveRestoreRow(userId, entryId) {
+  const current = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+    .get(entryId, userId);
+  if (current && current.deleted_at === null) {
+    return shapeSyncRow(current);
+  }
+  const tomb = db.prepare('SELECT snapshot FROM sync_tombstones WHERE user_id = ? AND entry_id = ?')
+    .get(userId, entryId);
+  if (tomb && tomb.snapshot) {
+    try {
+      return shapeSyncRow(JSON.parse(tomb.snapshot));
+    } catch (err) {
+      console.error('Invalid tombstone snapshot for', entryId, err);
+    }
+  }
+  return null;
+}
+
+// 从快照重建 history 行：deleted_at=NULL、restored_at=now、pinned 从快照恢复。
+// file 行的 file_key 指向的磁盘字节可能已被 trash 倾倒删除——恢复仅元数据（下载 404），
+// 属 durable tombstone 的已知边界（architect D3）。
+function rebuildFromSnapshot(userId, entryId, snap) {
+  db.prepare(`INSERT OR REPLACE INTO history (id, user_id, content, source_device, source_device_name, source_platform, timestamp, type, pinned, deleted_at, restored_at, hash, thumb, width, height, format, file_name, file_size, mime_type, file_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(
+      snap.id || entryId, userId, snap.content || '', snap.source_device || 'unknown',
+      snap.source_device_name || 'Unknown', snap.source_platform || 'unknown',
+      snap.timestamp || Date.now(), snap.type || 'text',
+      snap.pinned ? 1 : 0, null, Date.now(),
+      snap.hash || null, snap.thumb || null, snap.width || null,
+      snap.height || null, snap.format || null, snap.file_name || null,
+      snap.file_size || null, snap.mime_type || null, snap.file_key || null
+    );
+}
+
+// 提交删除/恢复操作：幂等（duplicate）、冲突拒绝（409）、未知条目忽略（ignored）。
+// 删除分支服务端自建全列快照（客户端不上传行数据，LAN 红线无忧）。
+app.post('/api/sync/commit', authenticate, (req, res) => {
+  const { operationId, kind, entryId, payload } = req.body || {};
+
+  if (typeof operationId !== 'string' || operationId.length === 0 ||
+      typeof kind !== 'string' || typeof entryId !== 'string' || entryId.length === 0) {
+    return res.json({ code: 'ERROR', message: 'operationId, kind, entryId are required' });
+  }
+
+  let expectedKind = null;
+  let derivedId = null;
+  if (operationId.startsWith('del:')) { expectedKind = 'delete'; derivedId = operationId.slice(4); }
+  else if (operationId.startsWith('rest:')) { expectedKind = 'restore'; derivedId = operationId.slice(5); }
+  else {
+    return res.json({ code: 'ERROR', message: 'operationId must be del:<id> or rest:<id>' });
+  }
+  if (kind !== expectedKind) {
+    return res.json({ code: 'ERROR', message: 'kind does not match operationId prefix' });
+  }
+
+  // 幂等：同 (user, operationId) 已存在 → duplicate（restore 额外带 row 供重放）；kind/entryId 不一致 → 409
+  const existing = db.prepare('SELECT * FROM sync_operations WHERE user_id = ? AND operation_id = ?')
+    .get(req.userId, operationId);
+  if (existing) {
+    if (existing.kind !== kind || existing.entry_id !== entryId) {
+      return res.status(409).json({ code: 'CONFLICT', message: 'operationId already used with different kind/entryId' });
+    }
+    const row = kind === 'restore' ? resolveRestoreRow(req.userId, entryId) : null;
+    const data = { duplicate: true, seq: existing.seq };
+    if (kind === 'restore') data.row = row;
+    return res.json({ code: 'SUCCESS', data });
+  }
+
+  if (entryId !== derivedId) {
+    return res.json({ code: 'ERROR', message: 'entryId does not match operationId' });
+  }
+
+  const now = Date.now();
+
+  if (kind === 'delete') {
+    const row = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+      .get(entryId, req.userId);
+    if (!row) {
+      // 未知条目/无 tombstone：SUCCESS + ignored，不写 log、不产生噪音
+      return res.json({ code: 'SUCCESS', data: { ignored: true, seq: null } });
+    }
+    const seq = db.transaction(() => {
+      const info = db.prepare(`INSERT INTO sync_operations (operation_id, user_id, kind, entry_id, payload, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(operationId, req.userId, 'delete', entryId,
+          payload ? JSON.stringify(payload) : null, now);
+      const opSeq = Number(info.lastInsertRowid);
+      db.prepare(`INSERT OR REPLACE INTO sync_tombstones (user_id, entry_id, entry_type, deleted_at, restored_at, seq, snapshot)
+        VALUES (?, ?, ?, ?, NULL, ?, ?)`)
+        .run(req.userId, entryId, row.type || 'text', now, opSeq, JSON.stringify(row));
+      db.prepare('UPDATE history SET deleted_at = ? WHERE id = ? AND user_id = ?')
+        .run(now, entryId, req.userId);
+      return opSeq;
+    })();
+    return res.json({ code: 'SUCCESS', data: { seq } });
+  }
+
+  // restore 分支
+  const current = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+    .get(entryId, req.userId);
+  const tomb = db.prepare('SELECT * FROM sync_tombstones WHERE user_id = ? AND entry_id = ?')
+    .get(req.userId, entryId);
+
+  if (!current && !(tomb && tomb.snapshot)) {
+    // 未知条目/无快照：SUCCESS + ignored + row:null
+    return res.json({ code: 'SUCCESS', data: { ignored: true, seq: null, row: null } });
+  }
+
+  const seq = db.transaction(() => {
+    if (current) {
+      db.prepare('UPDATE history SET deleted_at = NULL, restored_at = ? WHERE id = ? AND user_id = ?')
+        .run(now, entryId, req.userId);
+    } else {
+      let snap = null;
+      try { snap = JSON.parse(tomb.snapshot); } catch (err) { snap = null; }
+      if (snap) rebuildFromSnapshot(req.userId, entryId, snap);
+    }
+    const info = db.prepare(`INSERT INTO sync_operations (operation_id, user_id, kind, entry_id, payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(operationId, req.userId, 'restore', entryId,
+        payload ? JSON.stringify(payload) : null, now);
+    const opSeq = Number(info.lastInsertRowid);
+    // 标记 tombstone 已恢复（保留快照供 24h 内再次物理删除后恢复）
+    if (tomb) {
+      db.prepare('UPDATE sync_tombstones SET restored_at = ? WHERE user_id = ? AND entry_id = ?')
+        .run(now, req.userId, entryId);
+    }
+    return opSeq;
+  })();
+
+  const row = resolveRestoreRow(req.userId, entryId);
+  return res.json({ code: 'SUCCESS', data: { seq, row } });
+});
+
+// 获取增量变更：独立于 /api/clipboard（绕开空剪切板 NOT_FOUND 边界）。
+// after 游标（容忍缺失/0/负数），limit 钳制 1..SYNC_PAGE_LIMIT；
+// 返回升序 changes，restore 的 row 按 restoredEntries 同规则整形（file → content=''）。
+app.get('/api/sync/changes', authenticate, (req, res) => {
+  let after = Number.parseInt(req.query.after, 10);
+  if (!Number.isFinite(after) || after < 0) after = 0;
+
+  let limit = Number.parseInt(req.query.limit, 10);
+  if (!Number.isFinite(limit)) limit = SYNC_PAGE_LIMIT;
+  limit = Math.max(1, Math.min(SYNC_PAGE_LIMIT, limit));
+
+  const rows = db.prepare('SELECT * FROM sync_operations WHERE user_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?')
+    .all(req.userId, after, limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  const changes = page.map((op) => {
+    const change = {
+      seq: op.seq,
+      operationId: op.operation_id,
+      kind: op.kind,
+      entryId: op.entry_id,
+    };
+    if (op.kind === 'restore') {
+      change.row = resolveRestoreRow(req.userId, op.entry_id);
+    }
+    return change;
+  });
+
+  const cursor = page.length > 0 ? page[page.length - 1].seq : after;
+
+  res.json({
+    code: 'SUCCESS',
+    data: { cursor, hasMore, changes },
+  });
+});
+
 // ==================== 设备 API ====================
 
 // 注册/更新设备
@@ -1060,6 +1282,9 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   console.log(`ClipFlow server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/ping`);
 
+  // 启动时清理一次过期同步状态（op 7d / tombstone 24h），重启即生效
+  pruneSyncState(Date.now());
+
   // 登录限流桶与崩溃限流桶定时清理（防内存膨胀；重启清零=更宽松，接受）
   setInterval(() => {
     pruneAuthBuckets(Date.now());
@@ -1071,8 +1296,9 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     pruneLanVerifyBuckets(Date.now());
   }, LAN_VERIFY_CLEANUP_MS);
 
-  // 每小时清理过期 token、超过 24h 的已删除条目，以及超过 30 天的崩溃报告
+  // 每小时清理过期 token、超过 24h 的已删除条目、超过 30 天的崩溃报告，以及过期同步状态
   setInterval(() => {
+    pruneSyncState(Date.now());
     db.prepare("DELETE FROM tokens WHERE created_at < datetime('now', '-1 day')").run();
     db.prepare('DELETE FROM crash_reports WHERE reported_at < ?').run(Date.now() - CRASH_RETENTION_MS);
 

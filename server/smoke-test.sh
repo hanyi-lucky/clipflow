@@ -29,7 +29,7 @@ cleanup() {
   stop_server
   rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
   rm -f "${BIG_PAYLOAD}" "${FILE1}" "${FILE1_DL}" "${FILE_REAL}" "${FILE_REAL_DL}" "${BIG1}" \
-    "${MISMATCH1}" "${MISMATCH_BODY}" "${RATE_BODY}" "${RATE_HEADERS}"
+    "${MISMATCH1}" "${MISMATCH_BODY}" "${RATE_BODY}" "${RATE_HEADERS}" "${SCRIPT_DIR}/.smoke-sync-seq.txt"
   rm -rf "${FILE_DIR}"
 }
 trap cleanup EXIT
@@ -753,5 +753,273 @@ if [ "$LAN_TICKET_C_CODE" != "403" ]; then
   exit 1
 fi
 echo "    ok (ticket for removed device -> 403)"
+
+
+echo "==> 28. sync/commit delete：op log + tombstone + deleted_at 置位；changes 游标返回；重复 commit 幂等；同 opId 换 entryId -> 409"
+SYNC_DEL_ID="smoke-sync-del-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_DEL_CIPHER\",\"hash\":\"HASH_SYNC_DEL_1\",\"type\":\"text\",\"historyId\":\"${SYNC_DEL_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000008000}" \
+  >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_DEL_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_DEL_ID}\"}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL commit delete: "+s);process.exit(1)}
+  if(typeof j.data.seq!=="number"||j.data.seq<=0){console.error("FAIL seq: "+s);process.exit(1)}
+  process.stdout.write(String(j.data.seq));
+})' > "${SCRIPT_DIR}/.smoke-sync-seq.txt"
+SYNC_DEL_SEQ=$(cat "${SCRIPT_DIR}/.smoke-sync-seq.txt")
+echo "    ok (seq=${SYNC_DEL_SEQ})"
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const ops = db.prepare("SELECT * FROM sync_operations WHERE operation_id = ?").all(process.argv[3]);
+if (ops.length !== 1) { console.error("FAIL: sync_operations rows = " + ops.length); process.exit(1); }
+if (ops[0].kind !== "delete" || ops[0].entry_id !== "smoke-sync-del-1") { console.error("FAIL op fields: " + JSON.stringify(ops[0])); process.exit(1); }
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get("smoke-sync-del-1");
+if (!h || typeof h.deleted_at !== "number") { console.error("FAIL: deleted_at not set"); process.exit(1); }
+const t = db.prepare("SELECT * FROM sync_tombstones WHERE entry_id = ?").get("smoke-sync-del-1");
+if (!t || !t.snapshot) { console.error("FAIL: tombstone snapshot missing"); process.exit(1); }
+console.log("    ok (op log 1 row, deleted_at set, tombstone snapshot present)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "del:${SYNC_DEL_ID}"
+curl -fsS "${BASE}/sync/changes?after=0" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL changes: "+s);process.exit(1)}
+  const d=j.data;
+  if(typeof d.cursor!=="number"||d.cursor<0){console.error("FAIL cursor: "+s);process.exit(1)}
+  const ch=(d.changes||[]).find(c=>c.operationId==="del:smoke-sync-del-1");
+  if(!ch){console.error("FAIL delete op missing in changes: "+s);process.exit(1)}
+  if(ch.kind!=="delete"||ch.entryId!=="smoke-sync-del-1"){console.error("FAIL change fields: "+JSON.stringify(ch));process.exit(1)}
+  console.log("    ok (changes has delete op, cursor="+d.cursor+", hasMore="+d.hasMore+")");
+})'
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_DEL_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_DEL_ID}\"}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.data.duplicate!==true){console.error("FAIL duplicate flag: "+s);process.exit(1)}
+  if(String(j.data.seq)!==process.argv[1]){console.error("FAIL duplicate seq mismatch: "+s);process.exit(1)}
+  console.log("    ok (duplicate=true seq="+j.data.seq+")");
+})' "${SYNC_DEL_SEQ}"
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const n = db.prepare("SELECT COUNT(*) AS n FROM sync_operations WHERE operation_id = ?").get(process.argv[3]).n;
+if (n !== 1) { console.error("FAIL: duplicate committed second op row, count=" + n); process.exit(1); }
+console.log("    ok (op log still 1 row after duplicate)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "del:${SYNC_DEL_ID}"
+CODE=$(curl -sS -o "${RATE_BODY}" -w '%{http_code}' -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_DEL_ID}\",\"kind\":\"delete\",\"entryId\":\"other-id\"}" || true)
+if [ "$CODE" != "409" ]; then
+  echo "FAIL: same opId different entryId expect 409 got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok (same opId different entryId -> 409)"
+
+echo "==> 29. sync/commit restore：行还在 → 现行恢复 + pinned 保留；changes 返回 restore op + row"
+SYNC_REST_ID="smoke-sync-rest-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_REST_CIPHER\",\"hash\":\"HASH_SYNC_REST_1\",\"type\":\"text\",\"historyId\":\"${SYNC_REST_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000009000}" \
+  >/dev/null
+curl -fsS -X PATCH "${BASE}/history/${SYNC_REST_ID}" -H "$AUTH" -H 'Content-Type: application/json' -d '{"pinned":true}' >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_REST_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_REST_ID}\"}" >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"rest:${SYNC_REST_ID}\",\"kind\":\"restore\",\"entryId\":\"${SYNC_REST_ID}\"}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL commit restore: "+s);process.exit(1)}
+  if(typeof j.data.seq!=="number"||j.data.seq<=0){console.error("FAIL restore seq: "+s);process.exit(1)}
+  if(!j.data.row||j.data.row.id!=="smoke-sync-rest-1"){console.error("FAIL restore row missing: "+s);process.exit(1)}
+  if(j.data.row.deleted_at!==null){console.error("FAIL restore row deleted_at: "+s);process.exit(1)}
+  if(j.data.row.pinned!==1){console.error("FAIL restore row pinned lost: "+s);process.exit(1)}
+  console.log("    ok (restore seq="+j.data.seq+", row.id="+j.data.row.id+", pinned="+j.data.row.pinned+")");
+})'
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(process.argv[3]);
+if (!h || h.deleted_at !== null) { console.error("FAIL: history not restored"); process.exit(1); }
+if (typeof h.restored_at !== "number") { console.error("FAIL: restored_at not set"); process.exit(1); }
+if (h.pinned !== 1) { console.error("FAIL: pinned not preserved"); process.exit(1); }
+const t = db.prepare("SELECT * FROM sync_tombstones WHERE entry_id = ?").get(process.argv[3]);
+if (!t || typeof t.restored_at !== "number") { console.error("FAIL: tombstone restored_at not set"); process.exit(1); }
+console.log("    ok (history restored, deleted_at NULL, restored_at set, pinned=1, tombstone restored_at set)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_REST_ID}"
+curl -fsS "${BASE}/sync/changes?after=0" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const ch=(j.data.changes||[]).find(c=>c.operationId==="rest:smoke-sync-rest-1");
+  if(!ch){console.error("FAIL restore op missing in changes: "+s);process.exit(1)}
+  if(ch.kind!=="restore"||!ch.row||ch.row.id!=="smoke-sync-rest-1"){console.error("FAIL restore change row: "+JSON.stringify(ch));process.exit(1)}
+  console.log("    ok (changes has restore op with row)");
+})'
+
+echo "==> 30. 空 clipboard 可达：无最新 clipboard 行时 /api/sync/changes 仍返回 tombstone；物理删除后快照恢复"
+SYNC_EMPTY_ID="smoke-sync-empty-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_EMPTY_CIPHER\",\"hash\":\"HASH_SYNC_EMPTY_1\",\"type\":\"text\",\"historyId\":\"${SYNC_EMPTY_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000010000}" \
+  >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_EMPTY_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_EMPTY_ID}\"}" >/dev/null
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+db.prepare("DELETE FROM clipboard WHERE user_id = ?").run(process.argv[3]);
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "user_smoke_v13"
+curl -fsS "${BASE}/sync/changes?after=0" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL empty-clipboard changes: "+s);process.exit(1)}
+  const ch=(j.data.changes||[]).find(c=>c.operationId==="del:smoke-sync-empty-1");
+  if(!ch){console.error("FAIL empty-clipboard tombstone missing: "+s);process.exit(1)}
+  console.log("    ok (empty clipboard: tombstone still reachable via /api/sync/changes)");
+})'
+SYNC_PHYS_ID="smoke-sync-phys-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_PHYS_CIPHER\",\"hash\":\"HASH_SYNC_PHYS_1\",\"type\":\"text\",\"historyId\":\"${SYNC_PHYS_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000011000}" \
+  >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_PHYS_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_PHYS_ID}\"}" >/dev/null
+curl -fsS -X DELETE "${BASE}/history/trash" -H "$AUTH" >/dev/null
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(process.argv[3]);
+if (h) { console.error("FAIL: history row should be physically deleted"); process.exit(1); }
+console.log("    ok (row physically removed by trash)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_PHYS_ID}"
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"rest:${SYNC_PHYS_ID}\",\"kind\":\"restore\",\"entryId\":\"${SYNC_PHYS_ID}\"}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL snapshot restore: "+s);process.exit(1)}
+  if(!j.data.row||j.data.row.id!=="smoke-sync-phys-1"){console.error("FAIL snapshot restore row: "+s);process.exit(1)}
+  console.log("    ok (snapshot restore seq="+j.data.seq+")");
+})'
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(process.argv[3]);
+if (!h || h.deleted_at !== null || typeof h.restored_at !== "number") {
+  console.error("FAIL: history not rebuilt from snapshot"); process.exit(1);
+}
+if (h.content !== "SYNC_PHYS_CIPHER") { console.error("FAIL: rebuilt content mismatch: " + h.content); process.exit(1); }
+console.log("    ok (history rebuilt from snapshot, content preserved)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_PHYS_ID}"
+
+echo "==> 31. 重启持久化：commit delete/restore 后重启，changes 仍返回"
+SYNC_RST_ID="smoke-sync-rst-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_RST_CIPHER\",\"hash\":\"HASH_SYNC_RST_1\",\"type\":\"text\",\"historyId\":\"${SYNC_RST_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000012000}" \
+  >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_RST_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_RST_ID}\"}" >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"rest:${SYNC_RST_ID}\",\"kind\":\"restore\",\"entryId\":\"${SYNC_RST_ID}\"}" >/dev/null
+stop_server
+start_server
+curl -fsS "${BASE}/sync/changes?after=0" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL restart changes: "+s);process.exit(1)}
+  const ids=(j.data.changes||[]).map(c=>c.operationId);
+  if(!ids.includes("del:smoke-sync-rst-1")||!ids.includes("rest:smoke-sync-rst-1")){
+    console.error("FAIL ops missing after restart: "+JSON.stringify(ids));process.exit(1);
+  }
+  console.log("    ok (ops persisted across restart)");
+})'
+
+echo "==> 32. changes 游标分页：after 续页、hasMore、limit 钳制"
+CURSOR_A=$(curl -fsS "${BASE}/sync/changes?after=0&limit=2" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const d=j.data;
+  if(d.changes.length>2){console.error("FAIL limit not honored: "+d.changes.length);process.exit(1)}
+  process.stdout.write(String(d.cursor));
+})')
+echo "    ok (page1 cursor=${CURSOR_A}, hasMore expected)"
+CURSOR_B=$(curl -fsS "${BASE}/sync/changes?after=${CURSOR_A}" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const d=j.data;
+  if(d.changes.length===0){console.error("FAIL page2 empty (should have more ops)");process.exit(1)}
+  const seqs=d.changes.map(c=>c.seq);
+  for(const seq of seqs){if(seq<=Number(process.argv[1])){console.error("FAIL seq not > after: "+seq);process.exit(1)}}
+  process.stdout.write(String(d.cursor));
+})' "${CURSOR_A}")
+echo "    ok (page2 cursor=${CURSOR_B})"
+curl -fsS "${BASE}/sync/changes?after=${CURSOR_B}&limit=500" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const d=j.data;
+  if(d.changes.length>100){console.error("FAIL limit clamp >100: "+d.changes.length);process.exit(1)}
+  if(d.hasMore!==false){console.error("FAIL final page hasMore: "+s);process.exit(1)}
+  console.log("    ok (limit clamped to 100, hasMore=false at tail)");
+})'
+curl -fsS "${BASE}/sync/changes?after=0&limit=0" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL limit=0 tolerance: "+s);process.exit(1)}
+  console.log("    ok (after=0/limit=0 tolerated)");
+})'
+
+echo "==> 33. GC：直改 DB 造 8 天前数据，重启后 pruneSyncState 清理 ops 与 tombstones"
+SYNC_GC_ID="smoke-sync-gc-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_GC_CIPHER\",\"hash\":\"HASH_SYNC_GC_1\",\"type\":\"text\",\"historyId\":\"${SYNC_GC_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000013000}" \
+  >/dev/null
+curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"operationId\":\"del:${SYNC_GC_ID}\",\"kind\":\"delete\",\"entryId\":\"${SYNC_GC_ID}\"}" >/dev/null
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+db.prepare("UPDATE sync_operations SET created_at = ? WHERE entry_id = ?").run(eightDaysAgo, process.argv[3]);
+db.prepare("UPDATE sync_tombstones SET deleted_at = ? WHERE entry_id = ?").run(eightDaysAgo, process.argv[3]);
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_GC_ID}"
+stop_server
+start_server
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const op = db.prepare("SELECT COUNT(*) AS n FROM sync_operations WHERE entry_id = ?").get(process.argv[3]).n;
+const t = db.prepare("SELECT COUNT(*) AS n FROM sync_tombstones WHERE entry_id = ?").get(process.argv[3]).n;
+if (op !== 0) { console.error("FAIL: old op not pruned, count=" + op); process.exit(1); }
+if (t !== 0) { console.error("FAIL: old tombstone not pruned, count=" + t); process.exit(1); }
+console.log("    ok (old op + tombstone pruned on startup)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_GC_ID}"
 
 echo "SMOKE TEST PASSED"
