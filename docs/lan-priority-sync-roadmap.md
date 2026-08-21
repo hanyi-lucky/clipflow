@@ -136,6 +136,24 @@
 - `flutter test`：**458/458 全部通过**；`flutter analyze`：0 error（83 issues 与基线一致）。
 - 生产服务器 LAN 端点已上线并验证（ticket/verify 401/403 语义正确）。
 
+## Phase 2.5 进度（2026-08-21）
+
+### 5.1 LAN-only 独立模式正式化 — ✅ 已完成并真机验收
+- 实现：设置页「仅局域网同步（实验）」开关（默认关、实验提示）、三型内容（文本/图片/≤15MiB 文件）LAN-only 路由、`SyncStatus.localOnly` 真实状态、降级横幅、启动恢复持久化历史（跨重启保留本地内容）。
+- 单测：`flutter test` 474/474；`flutter analyze` 0 error；红线零触碰。
+- **真机回归（Xiaomi 15 / Android 16 + macOS debug，同 Wi-Fi）全部通过**：
+  1. LAN-only 文本/图片/≤15MiB 文件双向交付，服务器 DB **零内容写入**（客观验证：服务器最近写入全部为 Mac 来源）。
+  2. **重启保留本地内容**（reviewer 遗留注记闭合）：复制图片 → 杀进程重开 → 历史条目 + `.bin`/`.enc` artifact 全部保留。
+  3. 对端离线降级：横幅「内容仅在本地、未同步到其他设备」+ 状态 `localOnly`；对端恢复回 `connected`。
+  4. 开关切换不丢内容：LAN-only 时内容零写入、关闭后走 Cloud（服务器有写入）、本地历史不丢。
+  5. 回归锚点：关闭 LAN-only 后 Cloud 行为与未开启一致。
+- P2 修复（真机发现）：LAN-only 图片条目重启后缩略图灰色 → `_rebuildRestoredImageThumbs` 恢复时重建 `imageThumbBytes`（复用 decryptImage，失败静默保留占位）；单测覆盖 + 密文损坏边界验证通过。
+- 决策：`docs/decisions/007-lan-only-mode-phase51.md`。
+
+### 5.2 durable cursor + tombstone（下一里程碑）
+- 范围：服务端 operation log/单调 cursor/tombstone + `/api/sync/*` + 客户端 `SyncOperationKind.delete/restore` + 删除/恢复 LAN 分发（默认 Cloud-only 兜底）。
+- 档位：完整（触数据库结构红线）。
+
 ## 重要约束
 
 - 不删除或重构现有 CloudBaseService/CloudRepository/服务端 API（只能 additive）。
