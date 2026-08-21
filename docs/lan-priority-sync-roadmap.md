@@ -136,7 +136,7 @@
 - `flutter test`：**458/458 全部通过**；`flutter analyze`：0 error（83 issues 与基线一致）。
 - 生产服务器 LAN 端点已上线并验证（ticket/verify 401/403 语义正确）。
 
-## Phase 2.5 进度（2026-08-21）
+## Phase 2.5 进度（2026-08-22）
 
 ### 5.1 LAN-only 独立模式正式化 — ✅ 已完成并真机验收
 - 实现：设置页「仅局域网同步（实验）」开关（默认关、实验提示）、三型内容（文本/图片/≤15MiB 文件）LAN-only 路由、`SyncStatus.localOnly` 真实状态、降级横幅、启动恢复持久化历史（跨重启保留本地内容）。
@@ -150,9 +150,11 @@
 - P2 修复（真机发现）：LAN-only 图片条目重启后缩略图灰色 → `_rebuildRestoredImageThumbs` 恢复时重建 `imageThumbBytes`（复用 decryptImage，失败静默保留占位）；单测覆盖 + 密文损坏边界验证通过。
 - 决策：`docs/decisions/007-lan-only-mode-phase51.md`。
 
-### 5.2 durable cursor + tombstone（下一里程碑）
-- 范围：服务端 operation log/单调 cursor/tombstone + `/api/sync/*` + 客户端 `SyncOperationKind.delete/restore` + 删除/恢复 LAN 分发（默认 Cloud-only 兜底）。
-- 档位：完整（触数据库结构红线）。
+### 5.2 durable cursor + tombstone — ✅ 已完成（2026-08-22）
+- 实现：服务端 `sync_operations`/`sync_tombstones`（零 FK）+ `/api/sync/commit`（幂等/冲突 409/ignored、服务端自建快照）+ `/api/sync/changes`（单调游标分页）+ `pruneSyncState`（op 7d / tombstone 24h）；客户端 `SyncOperationKind.delete/restore` 稳定 opId 走统一 outbox + durable cursor 替换 30s 窗口；删除/恢复 LAN `op` 帧分发（hello `ops:1` 能力位门控，默认 Cloud-only 兜底）；能力探测 404 回退 legacy，旧客户端/旧 API 零影响。
+- 整改闭环：删除→恢复→再删除周期改为「当前状态与 op 意图匹配」判定（周期后缀 opId 新事件）；LAN restore row 白名单清洗（零 userId/明文 file_name/mime_type/file_key）。
+- 验证：`server/smoke-test.sh` 34/34（含第 34 节周期用例）；`flutter test` 511/511；`flutter analyze` 0 error；红线零触碰。
+- 决策：`docs/decisions/008-durable-cursor-tombstone-phase52.md`。
 
 ## 重要约束
 
