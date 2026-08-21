@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../core/constants.dart';
 import '../repositories/cloud_repository.dart';
@@ -429,6 +429,7 @@ class LanTransport {
     required Uint8List accountKey,
   }) async {
     var sessionPeerId = '';
+    _LanSession? registeredSession;
     LanFileReceiver? fileReceiver;
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
@@ -448,7 +449,7 @@ class LanTransport {
           .timeout(LanConstants.lanHandshakeTimeout);
       sessionPeerId = session.peerDeviceId;
       final peerSupportsAcks = session.peerSupportsAcks;
-      _responderSessions[sessionPeerId] = _LanSession(
+      final newSession = _LanSession(
         peerDeviceId: session.peerDeviceId,
         expiresAtMs: session.expiresAtMs,
         socket: socket,
@@ -457,6 +458,14 @@ class LanTransport {
         peerSupportsAcks: peerSupportsAcks,
         peerSupportsOps: session.peerSupportsOps,
       );
+      // 幂等替换：同 peer 旧会话 socket 先销毁（杜绝同 peer 双连接窗口与
+      // closeAll 漏关旧 socket；旧循环收尾走 identity 校验不会误删新会话）。
+      final old = _responderSessions[sessionPeerId];
+      if (old != null && !identical(old, newSession)) {
+        old.socket.destroy();
+      }
+      _responderSessions[sessionPeerId] = newSession;
+      registeredSession = newSession;
       fileReceiver = LanFileReceiver(
         sink: fileSink,
         onComplete: (row, encPath) {
@@ -527,7 +536,10 @@ class LanTransport {
     } finally {
       // 断链/中止：清理未完成文件传输（删 .part，不产生 .enc）。
       fileReceiver?.abort();
-      if (sessionPeerId.isNotEmpty) {
+      // 按 identity 删除：只清理本循环登记的会话条目，绝不误删同 peer
+      // 新会话（旧循环收尾竞态：新会话已覆盖登记后，旧 finally 不得 remove）。
+      if (sessionPeerId.isNotEmpty &&
+          identical(_responderSessions[sessionPeerId], registeredSession)) {
         _responderSessions.remove(sessionPeerId);
       }
       socket.destroy();
@@ -569,7 +581,7 @@ class LanTransport {
             accountKey: accountKey,
           )
           .timeout(LanConstants.lanHandshakeTimeout);
-      _initiatorSessions[peerDeviceId] = _LanSession(
+      final newSession = _LanSession(
         peerDeviceId: session.peerDeviceId,
         expiresAtMs: session.expiresAtMs,
         socket: socket,
@@ -578,6 +590,13 @@ class LanTransport {
         peerSupportsAcks: session.peerSupportsAcks,
         peerSupportsOps: session.peerSupportsOps,
       );
+      // 幂等替换：新会话登记前先销毁同 peer 旧 socket（杜绝双连接泄漏 /
+      // closeAll 漏关旧 socket；旧操作收尾走 identity 校验，不会误删新会话）。
+      final old = _initiatorSessions[peerDeviceId];
+      if (old != null && !identical(old, newSession)) {
+        old.socket.destroy();
+      }
+      _initiatorSessions[peerDeviceId] = newSession;
     } catch (e) {
       socket.destroy();
       rethrow;
@@ -609,17 +628,17 @@ class LanTransport {
       });
       final response = await session.connection.read();
       if (response['type'] != 'latestResponse') {
-        _dropInitiatorSession(peerDeviceId);
+        _dropInitiatorSession(peerDeviceId, session);
         return null;
       }
       final row = response['row'];
       if (row is! Map<String, dynamic>) return null;
       return row;
     } on LanProtocolException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
       return null;
     } on SocketException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
       return null;
     } finally {
       session.readerSlot.release();
@@ -648,9 +667,9 @@ class LanTransport {
         'op': opFrame,
       });
     } on LanProtocolException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
     } on SocketException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
     }
   }
 
@@ -678,10 +697,10 @@ class LanTransport {
         LanConstants.lanAckTimeoutText,
       );
     } on LanProtocolException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
       return LanPushResult.pending;
     } on SocketException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
       return LanPushResult.pending;
     }
   }
@@ -717,10 +736,10 @@ class LanTransport {
         LanConstants.lanAckTimeoutFile,
       );
     } on LanProtocolException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
       return LanPushResult.pending;
     } on SocketException {
-      _dropInitiatorSession(peerDeviceId);
+      _dropInitiatorSession(peerDeviceId, session);
       return LanPushResult.pending;
     }
   }
@@ -745,15 +764,15 @@ class LanTransport {
         return LanPushResult.delivered;
       }
       // 协议违规（historyId 不匹配 / status 非 ok / 其它帧类型）→ 断会话自愈。
-      _dropInitiatorSession(session.peerDeviceId);
+      _dropInitiatorSession(session.peerDeviceId, session);
       return LanPushResult.pending;
     } on TimeoutException {
       return LanPushResult.pending;
     } on LanProtocolException {
-      _dropInitiatorSession(session.peerDeviceId);
+      _dropInitiatorSession(session.peerDeviceId, session);
       return LanPushResult.pending;
     } on SocketException {
-      _dropInitiatorSession(session.peerDeviceId);
+      _dropInitiatorSession(session.peerDeviceId, session);
       return LanPushResult.pending;
     } finally {
       session.readerSlot.release();
@@ -762,15 +781,27 @@ class LanTransport {
 
   /// 丢弃单个 initiator 会话（超时/帧错误后连接可能处于脏状态）。
   void dropSession(String peerDeviceId) {
-    _dropInitiatorSession(peerDeviceId);
-  }
-
-  void _dropInitiatorSession(String peerDeviceId) {
+    // 调用方（manager）显式意图：丢弃该 peer 当前登记的任何会话。
     final session = _initiatorSessions.remove(peerDeviceId);
     if (session == null) return;
     session.socket.destroy();
     onSessionDropped?.call(peerDeviceId);
   }
+
+  void _dropInitiatorSession(String peerDeviceId, _LanSession session) {
+    // identity 校验：只销毁调用方持有的会话实例；若该 peer 已登记新会话
+    //（幂等替换后），旧操作收尾不得误删新会话。
+    if (!identical(_initiatorSessions[peerDeviceId], session)) return;
+    _initiatorSessions.remove(peerDeviceId);
+    session.socket.destroy();
+    onSessionDropped?.call(peerDeviceId);
+  }
+
+  @visibleForTesting
+  int get initiatorSessionCount => _initiatorSessions.length;
+
+  @visibleForTesting
+  int get responderSessionCount => _responderSessions.length;
 
   /// 关闭服务器与全部会话。
   Future<void> closeAll() async {
