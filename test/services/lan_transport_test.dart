@@ -108,15 +108,25 @@ void main() {
     LanTransport init, {
     required int port,
     String deviceId = 'device-a',
-  }) {
-    return init.connect(
-      peerDeviceId: 'device-b',
-      host: '127.0.0.1',
-      port: port,
-      userId: 'user_test',
-      deviceId: deviceId,
-      accountKey: accountKey,
-    );
+  }) async {
+    // 全量并行负载下 TLS 建连偶发 Connection reset by peer（环境性抖动），
+    // 重试兜底；握手拒绝（LanHandshakeException）等逻辑错误不重试。
+    for (var attempt = 0;; attempt++) {
+      try {
+        await init.connect(
+          peerDeviceId: 'device-b',
+          host: '127.0.0.1',
+          port: port,
+          userId: 'user_test',
+          deviceId: deviceId,
+          accountKey: accountKey,
+        );
+        return;
+      } on SocketException {
+        if (attempt >= 2) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
   }
 
   group('LanTransport 会话生命周期（幂等替换 + identity 清理）', () {
