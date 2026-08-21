@@ -19,7 +19,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 // Native implementation of the "clipflow/lan_network" MethodChannel and the
 // "clipflow/lan_network_events" EventChannel on Windows.
@@ -74,6 +76,60 @@ class LanNetworkPlugin {
   void PostTask(std::function<void()> fn);
   // Executes any queued tasks synchronously (platform thread, on teardown).
   void DrainQueue();
+
+  // ---- Advertise state machine (platform thread only) ----
+  //
+  // The register completion callback is shared by DnsServiceRegister and
+  // DnsServiceDeRegister; it fires once per operation. RegisterContext is
+  // owned by AdvertiseOp and lives until the operation's callback has been
+  // processed on the platform thread (it is read by the thunk before the task
+  // is posted, so freeing it there is safe).
+  struct RegisterContext {
+    LanNetworkPlugin* self;
+    uint64_t operation_id;
+  };
+
+  struct AdvertiseOp {
+    std::unique_ptr<RegisterContext> context;
+    std::vector<wchar_t> instance_name;
+    std::vector<std::vector<wchar_t>> keys;
+    std::vector<std::vector<wchar_t>> values;
+    std::vector<PWSTR> key_ptrs;
+    std::vector<PWSTR> value_ptrs;
+    DNS_SERVICE_INSTANCE instance{};
+    DNS_SERVICE_REGISTER_REQUEST request{};
+  };
+
+  enum class AdvertiseState {
+    kIdle,
+    kPendingRegister,
+    kRegistered,
+    kPendingDeregister,
+  };
+
+  void StartRegister();
+  void OnRegisterComplete(DNS_STATUS status, uint64_t operation_id);
+  void CompletePendingRegistration();
+  void StopAllInternal(bool complete_inflight);
+  static void AddTxt(AdvertiseOp* op, const std::wstring& key,
+                     const std::wstring& value);
+  static void CALLBACK OnRegisterCallbackThunk(DNS_STATUS status,
+                                               PVOID context,
+                                               PDNS_SERVICE_INSTANCE instance);
+
+  AdvertiseState adv_state_ = AdvertiseState::kIdle;
+  std::unique_ptr<AdvertiseOp> adv_op_;
+  DNS_SERVICE_CANCEL adv_cancel_{};
+  uint64_t adv_operation_id_ = 0;
+  std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> adv_result_;
+  // Pending advertise request captured while a deregistration is in flight
+  // (re-entrant advertise).
+  std::optional<std::wstring> adv_pending_device_id_;
+  std::optional<std::wstring> adv_pending_caps_;
+  std::optional<int32_t> adv_pending_port_;
+  std::wstring adv_device_id_;
+  std::wstring adv_caps_;
+  int32_t adv_port_ = 0;
 
   HWND hwnd_ = nullptr;
   UINT marshal_message_ = 0;
