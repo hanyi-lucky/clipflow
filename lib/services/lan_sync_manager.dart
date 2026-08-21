@@ -639,6 +639,39 @@ class LanSyncManager {
   /// - 只对 supportsOps 的 peer 发（旧 peer 未知帧会断链自愈）；
   /// - 不进 LAN outbox、不等 ack（fire-once；对端离线由 Cloud 游标兜底）；
   /// - 不回推来源设备（payload.sourceDevice == peerId 跳过）。
+  /// LAN restore row 清洗（白名单）：与 `_toFileServerRow` 同构的 LAN
+  /// server-shape——零 userId、零明文 file_name、零 mime_type、零 file_key、
+  /// 零 enc_file_name、零服务端内部状态列（deleted_at/restored_at/pinned 等）。
+  /// 保留：id/history_id、type、content（密文）、hash、source_*、timestamp，
+  /// file 行额外保留 file_size，image 行额外保留 thumb/width/height/format。
+  /// 接收端 file 行缺 file_name/enc_file_name 时按既有占位 'file' 展示，
+  /// 历史 refresh 自然修正（与 sync_service.dart 的 enc_file_name 回退同模式）。
+  Map<String, dynamic> _sanitizeRestoreRow(Map<String, dynamic> row) {
+    final type = row['type'] as String? ?? 'text';
+    final sanitized = <String, dynamic>{
+      if (row['id'] != null) 'id': row['id'],
+      if (row['history_id'] != null) 'history_id': row['history_id'],
+      'type': type,
+      if (row['content'] != null) 'content': row['content'],
+      if (row['hash'] != null) 'hash': row['hash'],
+      if (row['source_device'] != null) 'source_device': row['source_device'],
+      if (row['source_device_name'] != null)
+        'source_device_name': row['source_device_name'],
+      if (row['source_platform'] != null)
+        'source_platform': row['source_platform'],
+      if (row['timestamp'] != null) 'timestamp': row['timestamp'],
+    };
+    if (type == 'file') {
+      if (row['file_size'] != null) sanitized['file_size'] = row['file_size'];
+    } else if (type == 'image') {
+      if (row['thumb'] != null) sanitized['thumb'] = row['thumb'];
+      if (row['width'] != null) sanitized['width'] = row['width'];
+      if (row['height'] != null) sanitized['height'] = row['height'];
+      if (row['format'] != null) sanitized['format'] = row['format'];
+    }
+    return sanitized;
+  }
+
   Future<void> _pushOpOperation(
     SyncOperation op, {
     Map<String, dynamic>? response,
@@ -655,7 +688,9 @@ class LanSyncManager {
     if (op.kind == SyncOperationKind.restore) {
       final row = response?['row'];
       if (row is Map<String, dynamic>) {
-        opFrame['row'] = row;
+        // LAN 红线：绝不原样转发服务端 row（含 user_id/明文 file_name/
+        // mime_type/file_key 等敏感字段），必须清洗为 LAN server-shape。
+        opFrame['row'] = _sanitizeRestoreRow(row);
       }
     }
     if (_registerOpId(op.operationId)) return; // 已推过，去重

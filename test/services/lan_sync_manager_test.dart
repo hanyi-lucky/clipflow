@@ -1491,6 +1491,104 @@ void main() {
       expect(op['row'], row);
     });
 
+    test('restore op 帧 file row 白名单清洗：零 userId/明文 file_name/mime_type/file_key/enc_file_name，保留 server-shape 字段', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final row = <String, dynamic>{
+        'id': 'file-entry-1',
+        'user_id': 'user_secret',
+        'type': 'file',
+        'content': '',
+        'hash': 'h-file',
+        'file_name': 'TopSecretName.xlsx',
+        'mime_type': 'application/vnd.ms-excel',
+        'file_key': 'internal-key-123',
+        'enc_file_name': 'enc-name-b64',
+        'file_size': 12345,
+        'source_device': 'device-a',
+        'source_device_name': 'Mac A',
+        'source_platform': 'macos',
+        'timestamp': 42,
+        'deleted_at': 1,
+        'restored_at': null,
+      };
+
+      await manager.pushOperation(
+        _restoreOp('file-entry-1'),
+        response: {'seq': 7, 'row': row},
+      );
+
+      final op = transport.pushedOpFrames.single['op'] as Map<String, dynamic>;
+      final frameRow = op['row'] as Map<String, dynamic>;
+      expect(frameRow['id'], 'file-entry-1');
+      expect(frameRow['type'], 'file');
+      expect(frameRow['content'], '');
+      expect(frameRow['hash'], 'h-file');
+      expect(frameRow['file_size'], 12345);
+      expect(frameRow['source_device'], 'device-a');
+      expect(frameRow['source_device_name'], 'Mac A');
+      expect(frameRow['source_platform'], 'macos');
+      expect(frameRow['timestamp'], 42);
+      // 红线：LAN 报文零敏感明文（含内嵌 row）
+      expect(frameRow.containsKey('user_id'), isFalse);
+      expect(frameRow.containsKey('file_name'), isFalse);
+      expect(frameRow.containsKey('mime_type'), isFalse);
+      expect(frameRow.containsKey('file_key'), isFalse);
+      expect(frameRow.containsKey('enc_file_name'), isFalse);
+      // 服务端内部字段（软删状态等）不进 LAN
+      expect(frameRow.containsKey('deleted_at'), isFalse);
+      expect(frameRow.containsKey('restored_at'), isFalse);
+    });
+
+    test('restore op 帧 image row 保留 thumb/width/height/format/密文，剥离 user_id', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final row = <String, dynamic>{
+        'id': 'img-entry-1',
+        'user_id': 'user_secret',
+        'type': 'image',
+        'content': 'FULL_CIPHER',
+        'hash': 'h-img',
+        'thumb': 'THUMB_CIPHER',
+        'width': 100,
+        'height': 50,
+        'format': 'jpeg',
+        'source_device': 'device-a',
+        'source_device_name': 'Mac A',
+        'source_platform': 'macos',
+        'timestamp': 43,
+      };
+
+      await manager.pushOperation(
+        _restoreOp('img-entry-1'),
+        response: {'seq': 8, 'row': row},
+      );
+
+      final op = transport.pushedOpFrames.single['op'] as Map<String, dynamic>;
+      final frameRow = op['row'] as Map<String, dynamic>;
+      expect(frameRow['id'], 'img-entry-1');
+      expect(frameRow['type'], 'image');
+      expect(frameRow['content'], 'FULL_CIPHER');
+      expect(frameRow['hash'], 'h-img');
+      expect(frameRow['thumb'], 'THUMB_CIPHER');
+      expect(frameRow['width'], 100);
+      expect(frameRow['height'], 50);
+      expect(frameRow['format'], 'jpeg');
+      expect(frameRow['source_device'], 'device-a');
+      expect(frameRow['timestamp'], 43);
+      expect(frameRow.containsKey('user_id'), isFalse);
+    });
+
     test('不回推来源设备（payload.sourceDevice == peerId 跳过）', () async {
       discovery.candidatesResult = [_peer('device-a'), _peer('device-c')];
       final manager = createManager();
