@@ -53,7 +53,7 @@
 
 
 ### 附加待办（独立，可插队）
-- **LAN 会话稳定性优化**：迟到帧竞态导致的周期断开（不阻塞交付，但产生反复握手）→ 减少重连噪声。
+- ~~**LAN 会话稳定性优化**~~ → **已完成（2026-08-22）**：fetch 300ms 超时不 drop + 逐帧读超时/EOF 分类 + 幂等会话替换 + `sessionDropped` 诊断计数；`flutter test` 523/523、analyze 0 error。
 - **Windows LAN 支持**：参考 macOS/Android 补 Windows 原生 mDNS（WinRT Dnssd）+ TLS + 注册 `generated_plugin_registrant.cc`。
 
 ## 关键约束（贯穿全部）

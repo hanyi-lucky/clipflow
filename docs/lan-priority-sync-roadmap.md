@@ -157,6 +157,12 @@
 - **真机回归（2026-08-22，生产服务器已部署 5.2）**：删除/恢复跨端收敛、离线 >35s 重放、重启不复活、周期删除新事件（`del:<id>#n`）、**LAN op 帧端到端**全部通过（Mac + Xiaomi 15/Android 16，密码 0000；Mac `flutter.sync_cursor` 随 op log 推进确证 durable 路径；Android 诊断「握手成功=2、推送发送=1」确证 LAN op 帧）。初版 Mac 曾因 `cp -R` 嵌套安装跑旧 build，已 ditto 重装修复并复验。详见 `.codex/pipeline/phase25-5.2-device-verification.md`。
 - 决策：`docs/decisions/008-durable-cursor-tombstone-phase52.md`。
 
+### 附加待办 · LAN 会话稳定性优化 — ✅ 已完成（2026-08-22）
+- 根因（explorer 实证）：`socket closed before frame completed` 的真源不是网络错误，而是 initiator 侧 **300ms fetch 超时 `onTimeout: dropSession` 销毁健康 socket**（真实 Wi-Fi RTT/拥塞或 pushFile 大文件推送窗口内 fetch 穿插），对端被动 EOF 触发 responder drop；次因：会话按 peerId 覆盖登记 + 旧循环 `finally` 无条件 remove 误删新会话。
+- 修复：① fetch 300ms 超时不再 drop 健康会话（pushFile 在途跳过 fetch）；② 逐帧读超时 5s 防卡死 + EOF 帧间/半帧分类（真死连接 5s 后仍 drop，离线降级不回退）；③ 幂等会话替换 + 旧循环按 identity 删除；④ `onSessionDropped` 接线 + `sessionDropped` 诊断计数（设置页展示）。
+- 验证：`flutter test` 523/523（含新建 `lan_transport_test.dart` 会话级集成 8 用例，explorer 6 项测试缺口全部闭合）；`flutter analyze` 0 error；LAN 聚焦 90/90 三轮全绿；协议帧/v/能力位/原生插件零改动。
+- 后续：Windows LAN 支持（roadmap 附加待办剩余项）。
+
 ## 重要约束
 
 - 不删除或重构现有 CloudBaseService/CloudRepository/服务端 API（只能 additive）。
