@@ -164,17 +164,52 @@ void main() {
     });
 
     test('对端关闭 → fetchLatest 真错误路径仍 drop（降级语义不回退）', () async {
-      final responder = _newTransport(cloud);
-      final port = await startResponder(responder);
+      // 手工 responder（真实 TLS + 真实握手）：握手完成后立即关闭 socket
+      // （模拟对端离线/断开），initiator fetchLatest 读到 EOF →
+      // LanProtocolException → _dropInitiatorSession。fetchLatest 自带帧级
+      // 读超时兜底，保证无论 EOF 传播快慢都必返 null。
+      final context = await LanTls.createServerSecurityContext();
+      final server = await SecureServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+        context,
+      );
+      final port = server.port;
+      final serverSockets = <Socket>[];
+      final serverSub = server.listen((socket) async {
+        serverSockets.add(socket);
+        try {
+          final conn = LanFrameConnection(
+            socket,
+            timeout: const Duration(seconds: 5),
+          );
+          await LanHandshakeService(
+            cloudRepository: cloud,
+          ).performHandshake(
+            socket: socket,
+            existingConnection: conn,
+            isInitiator: false,
+            deviceId: 'device-b',
+            userId: 'user_test',
+            accountKey: accountKey,
+          );
+          socket.destroy(); // 握手完成即关闭（对端断链）
+        } catch (_) {
+          // 握手/测试清理错误忽略。
+        }
+      });
+      addTearDown(() async {
+        await serverSub.cancel();
+        for (final s in serverSockets) {
+          s.destroy();
+        }
+      });
+
       final init = _newTransport(cloud);
       addTearDown(() => init.closeAll());
       await connectInitiator(init, port: port);
       expect(init.initiatorSessionCount, 1);
 
-      // 对端整体关闭（模拟离线）：initiator 下一次 fetch 读到 EOF →
-      // LanProtocolException → _dropInitiatorSession（identity 校验通过）。
-      // fetchLatest 自带帧级读超时兜底，保证无论 EOF 传播快慢都必返 null。
-      await responder.closeAll();
       final row = await init.fetchLatest('device-b');
       expect(row, isNull);
       expect(init.initiatorSessionCount, 0);
