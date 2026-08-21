@@ -1593,6 +1593,12 @@ class ClipboardProvider extends ChangeNotifier
           // 本机条目经 changes 游标 _handleRestoredEntries 重建（restore op 带
           // 服务端权威 row）；LAN restore 推送用 response.row（Phase 4 接线），
           // 这里不直接插入，避免与游标重放重复写。
+          // 周期计数 fast-path：本机 restore 刚 commit 成功即递增，覆盖
+          // 「恢复后立刻再删除」的竞态窗口（feed 到达前下一次 delete 也唯一）。
+          final restoredLocalId = op.payload['entryId'] as String?;
+          if (restoredLocalId != null && restoredLocalId.isNotEmpty) {
+            _syncService?.markRestoreObserved(restoredLocalId);
+          }
           break;
       }
       // LAN 接力推送：补账之后、同 try/catch 内；异常只日志，绝不 rethrow
@@ -1830,6 +1836,14 @@ class ClipboardProvider extends ChangeNotifier
     var changed = false;
     for (final entry in restoredEntries) {
       final type = entry['type'] as String? ?? 'text';
+
+      // 周期计数：任何来源（Cloud changes / LAN restore 帧）观察到恢复，
+      // 递增该条目删除周期，保证下一次 delete/restore 生成唯一 opId
+      // （服务端 UNIQUE 幂等不吞新事件、LAN _knownOpIds 去重不误杀第二次删除）。
+      final restoredEntryId = entry['id'] as String?;
+      if (restoredEntryId != null && restoredEntryId.isNotEmpty) {
+        _syncService?.markRestoreObserved(restoredEntryId);
+      }
 
       if (type == ContentType.image.name) {
         final entryId = entry['id'] as String? ?? const Uuid().v4();

@@ -53,6 +53,23 @@ void main() {
         ],
       });
 
+  test('prepareDelete/prepareRestore 周期计数：restore 观察后 opId 递增周期后缀（第二次删除/恢复 opId 唯一）', () {
+    expect(service.prepareDelete('e1').dedupeKey, 'del:e1');
+    expect(service.prepareRestore('e1').dedupeKey, 'rest:e1');
+
+    service.markRestoreObserved('e1');
+    expect(service.prepareDelete('e1').dedupeKey, 'del:e1#1');
+    expect(service.prepareRestore('e1').dedupeKey, 'rest:e1#1');
+
+    service.markRestoreObserved('e1');
+    expect(service.prepareDelete('e1').dedupeKey, 'del:e1#2');
+    expect(service.prepareRestore('e1').dedupeKey, 'rest:e1#2');
+
+    // 其他条目不受影响
+    expect(service.prepareDelete('other').dedupeKey, 'del:other');
+    expect(service.prepareRestore('other').dedupeKey, 'rest:other');
+  });
+
   test('decodeCurrentClipboard converts an ops page to deletions + restorations and exposes the cursor', () async {
     final result = await service.decodeCurrentClipboard(null, opsPage: makePage());
 

@@ -130,6 +130,12 @@ class SyncService {
   DateTime? _lastReceivedTimestamp;
   int? _lastAppliedCursor;
 
+  /// 每条目「删除周期计数」：恢复被观察到（本机/远端）后递增。
+  /// 下一次 delete/restore 的 opId 追加周期后缀（`del:<id>#<n>`），保证
+  /// 「删除→恢复→再删除」产生唯一 opId——服务端 UNIQUE 幂等不吞新事件、
+  /// LAN `_knownOpIds` 去重不误杀第二次删除。
+  final Map<String, int> _deleteCycleByEntry = {};
+
   String get deviceId => _deviceId;
   String get deviceName => _deviceName;
   String get devicePlatform => _devicePlatform;
@@ -139,6 +145,15 @@ class SyncService {
 
   /// 已成功应用的 durable cursor（内存态；持久化由 Provider 经 LocalStorage 负责）。
   int? get lastAppliedCursor => _lastAppliedCursor;
+
+  /// 当前删除周期计数（0 = 首轮，opId 无后缀）。
+  int deleteCycleFor(String entryId) => _deleteCycleByEntry[entryId] ?? 0;
+
+  /// 记录一次「恢复已被观察到」（本机 outbox 成功 or Cloud/LAN 恢复帧），
+  /// 使该条目下一次 delete/restore 使用唯一 opId（周期后缀）。
+  void markRestoreObserved(String entryId) {
+    _deleteCycleByEntry[entryId] = deleteCycleFor(entryId) + 1;
+  }
 
   /// 应用成功后推进 cursor（与 markAsReceived 同纪律：成功才推进）。
   void setLastAppliedCursor(int? cursor) {
@@ -292,12 +307,14 @@ class SyncService {
     );
   }
 
-  /// 准备删除操作：稳定 opId = `del:<entryId>`，payload 只含来源元数据（LAN 红线：
-  /// 请求体绝不携带行数据/密码/token/salt/指纹/明文文件名）。
+  /// 准备删除操作：opId = `del:<entryId>`（恢复过则为 `del:<entryId>#<n>`），
+  /// payload 只含来源元数据（LAN 红线：请求体绝不携带行数据/密码/token/salt/指纹/明文文件名）。
   PreparedSyncOperation prepareDelete(String entryId) {
+    final cycle = deleteCycleFor(entryId);
+    final suffix = cycle > 0 ? '#$cycle' : '';
     return PreparedSyncOperation(
       kind: SyncOperationKind.delete,
-      dedupeKey: 'del:$entryId',
+      dedupeKey: 'del:$entryId$suffix',
       payload: {
         'entryId': entryId,
         'sourceDevice': _deviceId,
@@ -308,11 +325,13 @@ class SyncService {
     );
   }
 
-  /// 准备恢复操作：稳定 opId = `rest:<entryId>`。
+  /// 准备恢复操作：opId = `rest:<entryId>`（再次删除过则为 `rest:<entryId>#<n>`）。
   PreparedSyncOperation prepareRestore(String entryId) {
+    final cycle = deleteCycleFor(entryId);
+    final suffix = cycle > 0 ? '#$cycle' : '';
     return PreparedSyncOperation(
       kind: SyncOperationKind.restore,
-      dedupeKey: 'rest:$entryId',
+      dedupeKey: 'rest:$entryId$suffix',
       payload: {
         'entryId': entryId,
         'sourceDevice': _deviceId,

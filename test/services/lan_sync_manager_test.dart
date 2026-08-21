@@ -1545,6 +1545,78 @@ void main() {
       expect(restored, hasLength(1));
       expect(restored.single['id'], 'rx-2');
     });
+
+    test('删除→恢复→再删除：第二次删除用周期后缀 opId（del:<id>#1），_knownOpIds 不误杀、两次都推送', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+
+      await manager.pushOperation(_deleteOp('cycle-1'));
+      expect(transport.pushedOpFrames, hasLength(1));
+      expect(
+        transport.pushedOpFrames.single['op']['operationId'],
+        'del:cycle-1',
+      );
+
+      // 第二次删除（恢复后）：opId 唯一（del:cycle-1#1），不得被 _knownOpIds 去重吞掉
+      await manager.pushOperation(SyncOperation(
+        operationId: 'del:cycle-1#1',
+        userId: 'user_test',
+        kind: SyncOperationKind.delete,
+        state: SyncOperationState.sending,
+        dedupeKey: 'del:cycle-1#1',
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        attemptCount: 0,
+        nextAttemptAtMs: 1,
+        payload: <String, dynamic>{
+          'entryId': 'cycle-1',
+          'sourceDevice': 'device-a',
+          'sourceDeviceName': 'Mac A',
+          'sourcePlatform': 'macos',
+          'timestamp': 2,
+        },
+      ));
+      expect(transport.pushedOpFrames, hasLength(2));
+      expect(
+        transport.pushedOpFrames.last['op']['operationId'],
+        'del:cycle-1#1',
+      );
+    });
+
+    test('收到 del:<id> 与 del:<id>#1 两帧：周期后缀 opId 不被 _knownOpIds 去重，delete 回调各触发一次', () async {
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final deleted = <String>[];
+      manager.onDeleteOpReceived = (entryId) => deleted.add(entryId);
+
+      final frame1 = <String, dynamic>{
+        'v': 1,
+        'type': 'op',
+        'op': {'kind': 'delete', 'operationId': 'del:cyc-rx', 'entryId': 'cyc-rx'},
+      };
+      final frame2 = <String, dynamic>{
+        'v': 1,
+        'type': 'op',
+        'op': {
+          'kind': 'delete',
+          'operationId': 'del:cyc-rx#1',
+          'entryId': 'cyc-rx',
+        },
+      };
+      transport.onOpReceived?.call(frame1);
+      transport.onOpReceived?.call(frame2);
+
+      expect(deleted, ['cyc-rx', 'cyc-rx']);
+    });
   });
 
 }

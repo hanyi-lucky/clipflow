@@ -179,22 +179,27 @@ class SyncCoordinator {
   /// 下载最新内容：优先 durable 模式（先拉 /api/sync/changes 增量，再拉
   /// /api/clipboard 内容，decode 时把 op log 转成删除/恢复形状）。
   /// 旧服务器（changes 404 → null）自动回退 legacy 30s 窗口路径。
-  /// 入队删除操作：稳定 opId = `del:<entryId>`；活动期重复入队直接复用（幂等）。
+  /// 入队删除操作：opId 由 SyncService 按周期计数派生（`del:<entryId>` 或
+  /// `del:<entryId>#<n>`）；活动期重复入队直接复用（幂等）。
   Future<void> enqueueDelete(String entryId) async {
-    await _enqueueSyncOp(SyncOperationKind.delete, 'del:$entryId', entryId);
+    await _enqueueSyncOp(SyncOperationKind.delete, entryId);
   }
 
-  /// 入队恢复操作：稳定 opId = `rest:<entryId>`。
+  /// 入队恢复操作：opId 由 SyncService 按周期计数派生（`rest:<entryId>` 或
+  /// `rest:<entryId>#<n>`）。
   Future<void> enqueueRestore(String entryId) async {
-    await _enqueueSyncOp(SyncOperationKind.restore, 'rest:$entryId', entryId);
+    await _enqueueSyncOp(SyncOperationKind.restore, entryId);
   }
 
   Future<void> _enqueueSyncOp(
     SyncOperationKind kind,
-    String operationId,
     String entryId,
   ) async {
     if (_closed) return;
+    final prepared = kind == SyncOperationKind.delete
+        ? _syncService.prepareDelete(entryId)
+        : _syncService.prepareRestore(entryId);
+    final operationId = prepared.dedupeKey;
     final existing = await _outbox.findActiveByDedupeKey(
       userId,
       kind,
@@ -205,9 +210,6 @@ class SyncCoordinator {
       await drainOnce();
       return;
     }
-    final prepared = kind == SyncOperationKind.delete
-        ? _syncService.prepareDelete(entryId)
-        : _syncService.prepareRestore(entryId);
     await _enqueue(prepared, operationId);
     await drainOnce();
   }

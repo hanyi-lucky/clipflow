@@ -307,6 +307,28 @@ void main() {
     expect(transport.sent, hasLength(1));
   });
 
+  test('enqueueDelete after restore observed uses cycle-suffixed opId (LAN _knownOpIds 不误杀第二次删除)', () async {
+    syncService.markRestoreObserved('entry-1');
+    final transport = _RecordingTransport(failuresRemaining: 999);
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+    );
+
+    await expectLater(
+      coordinator.enqueueDelete('entry-1'),
+      throwsA(isA<SocketException>()),
+    );
+
+    final active = await outbox.loadActive('user-1');
+    expect(active.single.operationId, 'del:entry-1#1');
+    expect(active.single.dedupeKey, 'del:entry-1#1');
+    expect(active.single.payload['entryId'], 'entry-1');
+  });
+
   test('enqueueDelete dedupes an already active op', () async {
     final transport = _RecordingTransport(failuresRemaining: 999);
     final coordinator = SyncCoordinator(
