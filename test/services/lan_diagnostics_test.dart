@@ -13,6 +13,7 @@ void main() {
     expect(d.pushReceived, 0);
     expect(d.ackSent, 0);
     expect(d.ackReceived, 0);
+    expect(d.sessionDropped, 0);
     expect(d.fallbackSnapshot, isEmpty);
   });
 
@@ -22,6 +23,7 @@ void main() {
     d.handshakeSuccess++;
     d.pushSent++;
     d.ackSent++;
+    d.sessionDropped++;
     d.recordFallback(LanFallbackReason.noPeer);
     d.recordFallback(LanFallbackReason.noPeer);
     d.recordFallback(LanFallbackReason.fetchTimeout);
@@ -30,6 +32,7 @@ void main() {
     expect(d.handshakeSuccess, 1);
     expect(d.pushSent, 1);
     expect(d.ackSent, 1);
+    expect(d.sessionDropped, 1);
     expect(d.fallbackCount(LanFallbackReason.noPeer), 2);
     expect(d.fallbackCount(LanFallbackReason.fetchTimeout), 1);
     expect(d.fallbackCount(LanFallbackReason.duplicate), 0);
@@ -57,6 +60,7 @@ void main() {
     d.pushReceived = 1;
     d.ackSent = 2;
     d.ackReceived = 3;
+    d.sessionDropped = 4;
     d.recordFallback(LanFallbackReason.artifactMismatch);
 
     d.reset();
@@ -70,6 +74,7 @@ void main() {
     expect(d.pushReceived, 0);
     expect(d.ackSent, 0);
     expect(d.ackReceived, 0);
+    expect(d.sessionDropped, 0);
     expect(d.fallbackSnapshot, isEmpty);
   });
 }

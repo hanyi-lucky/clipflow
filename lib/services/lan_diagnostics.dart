@@ -34,6 +34,11 @@ class LanDiagnostics {
   /// 本端作为 initiator 收到并匹配的 fileAck 帧数。
   int ackReceived = 0;
 
+  /// LAN 会话被丢弃次数（initiator dropSession/_dropInitiatorSession）。
+  /// Phase 25 量化「反复握手」：超时不再 drop 后，此计数应显著下降；
+  /// 真断连（socket 错误/帧级读超时）仍计入。
+  int sessionDropped = 0;
+
   final Map<LanFallbackReason, int> _fallbackReasons = {};
 
   /// 记录一次 Cloud 兜底原因（LAN 未命中/失败的分类）。
@@ -60,6 +65,7 @@ class LanDiagnostics {
     pushReceived = 0;
     ackSent = 0;
     ackReceived = 0;
+    sessionDropped = 0;
     _fallbackReasons.clear();
   }
 }

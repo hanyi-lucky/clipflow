@@ -77,6 +77,8 @@ class LanSyncManager {
     };
     _transport.onFilePushReceived = _handleFilePushReceived;
     _transport.onOpReceived = _handleOpReceived;
+    // Phase 25：会话丢弃 → 诊断计数（量化反复握手；reset 随 LanDiagnostics 清零）。
+    _transport.onSessionDropped = (_) => _diagnostics.sessionDropped++;
   }
 
   late final LanDiscoveryService _discovery;

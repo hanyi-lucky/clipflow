@@ -79,6 +79,7 @@ abstract final class AppStrings {
   static const String diagnosticsPushReceived = '推送接收';
   static const String diagnosticsAckSent = 'ACK 发送';
   static const String diagnosticsAckReceived = 'ACK 接收';
+  static const String diagnosticsSessionDropped = '会话断开';
   static const String diagnosticsFallbackTitle = '回退原因';
   static const String diagnosticsFallbackLanDisabled = 'LAN 未启用';
   static const String diagnosticsFallbackNoPeer = '无可用设备';

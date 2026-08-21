@@ -183,6 +183,7 @@ class _FakeTransport extends LanTransport {
   void dropSession(String peerDeviceId) {
     dropped.add(peerDeviceId);
     sessions.remove(peerDeviceId);
+    onSessionDropped?.call(peerDeviceId);
   }
 
   @override
@@ -603,6 +604,8 @@ void main() {
       expect(row!['history_id'], 'h-fast');
       // 超时不再 drop 健康会话（下一轮同会话续读），总耗时受 300ms 上限约束
       expect(transport.dropped, isNot(contains('peer-slow')));
+      // 会话未丢弃 → 诊断计数不增长（量化「反复握手」减少）
+      expect(manager.diagnostics.sessionDropped, 0);
       expect(sw.elapsedMilliseconds, lessThan(300));
       never.complete(null);
     });
@@ -660,6 +663,8 @@ void main() {
         manager.diagnostics.fallbackCount(LanFallbackReason.fetchError),
         greaterThan(0),
       );
+      // 真错误 → drop → onSessionDropped 接线 → 计数增长
+      expect(manager.diagnostics.sessionDropped, greaterThan(0));
     });
 
     test('pushFile 在途时 fetch 跳过该 peer（不穿插、不假超时、不 drop）', () async {
@@ -1481,6 +1486,50 @@ void main() {
       expect(d.ackSent, 1);
       expect(initiatorDiag.ackReceived, 1);
 
+      await manager.stop();
+    });
+
+    test('默认构造接线：onSessionDropped → diagnostics.sessionDropped 计数', () async {
+      final fakeCloud = _FakeCloudRepository();
+      final accountKey =
+          Uint8List.fromList(List<int>.generate(32, (i) => i));
+      final manager = LanSyncManager(
+        cloudRepository: fakeCloud,
+        fileStore: fileStore,
+        outboxStore: LanOutboxStore(directoryPath: tempDir.path),
+        fetchTimeout: const Duration(milliseconds: 50),
+      );
+      final d = manager.diagnostics;
+      expect(d.sessionDropped, 0);
+
+      final peer = LanTransport(
+        handshakeService: LanHandshakeService(cloudRepository: fakeCloud),
+      );
+      addTearDown(() => peer.closeAll());
+      final peerPort = await peer.startServer(
+        deviceId: 'device-b',
+        userId: 'user_test',
+        accountKey: accountKey,
+      );
+      await manager.debugTransport.connect(
+        peerDeviceId: 'device-b',
+        host: '127.0.0.1',
+        port: peerPort,
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: accountKey,
+      );
+      expect(d.sessionDropped, 0);
+
+      // 对端关闭 → initiator fetchLatest 真错误路径 drop → onSessionDropped
+      // 接线（manager 构造时注入）→ sessionDropped 计数增长。
+      await peer.closeAll();
+      await manager.debugTransport.fetchLatest('device-b');
+      expect(d.sessionDropped, greaterThan(0));
+
+      // reset 清零（设置页「清零」按钮同路径）。
+      manager.resetDiagnostics();
+      expect(d.sessionDropped, 0);
       await manager.stop();
     });
   });

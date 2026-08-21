@@ -466,6 +466,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             _diagRow(AppStrings.diagnosticsAckSent, diagnostics.ackSent),
             _diagRow(AppStrings.diagnosticsAckReceived, diagnostics.ackReceived),
+            _diagRow(
+              AppStrings.diagnosticsSessionDropped,
+              diagnostics.sessionDropped,
+            ),
           ]);
           final fallback = diagnostics.fallbackSnapshot;
           if (fallback.isNotEmpty) {
