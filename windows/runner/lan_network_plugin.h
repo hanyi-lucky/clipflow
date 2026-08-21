@@ -20,7 +20,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Native implementation of the "clipflow/lan_network" MethodChannel and the
@@ -130,6 +132,67 @@ class LanNetworkPlugin {
   std::wstring adv_device_id_;
   std::wstring adv_caps_;
   int32_t adv_port_ = 0;
+
+  // ---- Browse/discover state machine (platform thread only) ----
+  //
+  // The browse completion callback fires once per discovered service set on a
+  // system thread-pool thread. DNS_RECORD data is only valid during the
+  // callback, so the thunk copies every PTR instance name before posting the
+  // task. A per-callback ResolveContext is heap allocated for each
+  // DnsServiceResolve and deleted inside its completion callback (which fires
+  // exactly once per resolve), so no dangling context can be posted.
+  struct ResolveContext {
+    LanNetworkPlugin* self;
+    uint64_t generation;
+    std::wstring fqn;
+    uint64_t resolve_id;
+  };
+
+  struct ResolveOp {
+    std::vector<wchar_t> fqn_buf;
+    std::wstring fqn;
+    DNS_SERVICE_RESOLVE_REQUEST request{};
+    DNS_SERVICE_CANCEL cancel{};
+  };
+
+  // Data copied out of DNS_SERVICE_INSTANCE on the callback thread; the
+  // platform thread only ever touches these values.
+  struct ResolvedService {
+    uint64_t generation = 0;
+    uint64_t resolve_id = 0;
+    std::wstring fqn;
+    std::string name;
+    std::string host;
+    int32_t port = 0;
+    std::string txt_proto;
+    std::string txt_device;
+    std::string txt_caps;
+  };
+
+  enum class BrowseState { kIdle, kBrowsing };
+
+  void StartBrowse(
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void StopBrowse();
+  void OnBrowseResult(DNS_STATUS status, uint64_t generation,
+                      const std::vector<std::wstring>& found);
+  void StartResolve(const std::wstring& fqn, uint64_t generation);
+  void OnResolveComplete(DNS_STATUS status, const ResolvedService& data);
+  void EmitDiscoveryEvent(const ResolvedService& data);
+  static void ExtractResolved(PDNS_SERVICE_INSTANCE instance,
+                              ResolvedService* out);
+  static void CALLBACK OnBrowseCallbackThunk(DNS_STATUS status, PVOID context,
+                                             PDNS_RECORD record);
+  static void CALLBACK OnResolveCompleteThunk(
+      DNS_STATUS status, PVOID context, PDNS_SERVICE_INSTANCE instance);
+
+  BrowseState browse_state_ = BrowseState::kIdle;
+  DNS_SERVICE_BROWSE_REQUEST browse_request_{};
+  DNS_SERVICE_CANCEL browse_cancel_{};
+  std::atomic<uint64_t> browse_generation_{0};
+  std::set<std::wstring> resolving_names_;
+  std::unordered_map<uint64_t, std::unique_ptr<ResolveOp>> resolves_;
+  uint64_t next_resolve_id_ = 0;
 
   HWND hwnd_ = nullptr;
   UINT marshal_message_ = 0;

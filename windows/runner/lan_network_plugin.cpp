@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -41,6 +42,11 @@ void Log(const char* message) {
   ::OutputDebugStringA(message);
   ::OutputDebugStringA("\n");
 }
+
+// mDNS service type browsed/registered by this plugin (Dart ignores the
+// serviceType argument on every platform and this value matches
+// LanConstants.lanServiceType).
+constexpr wchar_t kServiceQueryName[] = L"_clipflow._tcp.local";
 
 // Mutable wide-character buffer (null-terminated) for fields the OS may touch.
 std::vector<wchar_t> WStringBuffer(const std::wstring& text) {
@@ -285,18 +291,18 @@ void LanNetworkPlugin::HandleAdvertise(
   }
 }
 
-// M1/M2 boundary: browse is wired in M3. Report success so the Dart LAN
-// discovery flow can start; no discovery events are emitted yet.
 void LanNetworkPlugin::HandleBrowse(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  (void)call;
+  (void)call;  // serviceType is ignored on every platform.
   if (!IsSupported()) {
     result->Error("unsupported", "LAN network requires Windows 10 1709+");
     return;
   }
-  Log("browse: not yet implemented (M3)");
-  result->Success();
+  // Re-entrant browse: cancel the previous browse and its resolves first, then
+  // start a fresh generation (matches Android stopDiscovery + discoverServices).
+  StopBrowse();
+  StartBrowse(std::move(result));
 }
 
 void LanNetworkPlugin::HandleStopAll(
@@ -441,6 +447,7 @@ void LanNetworkPlugin::StopAllInternal(bool complete_inflight) {
     default:
       break;
   }
+  StopBrowse();
 }
 
 void LanNetworkPlugin::AddTxt(AdvertiseOp* op, const std::wstring& key,
@@ -465,6 +472,228 @@ void CALLBACK LanNetworkPlugin::OnRegisterCallbackThunk(
       return;
     }
     self->OnRegisterComplete(status, operation_id);
+  });
+}
+
+void LanNetworkPlugin::StartBrowse(
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  browse_generation_++;
+  browse_request_.Version = DNS_QUERY_REQUEST_VERSION1;
+  browse_request_.InterfaceIndex = 0;
+  browse_request_.QueryName = kServiceQueryName;
+  browse_request_.pBrowseCallback = &LanNetworkPlugin::OnBrowseCallbackThunk;
+  browse_request_.pQueryContext = this;
+  browse_cancel_ = {};
+  DNS_STATUS status = DnsServiceBrowse(&browse_request_, &browse_cancel_);
+  if (status == DNS_REQUEST_PENDING) {
+    browse_state_ = BrowseState::kBrowsing;
+    result->Success();
+  } else {
+    browse_state_ = BrowseState::kIdle;
+    result->Error("browseFailed", DnsStatusMessage(status));
+  }
+}
+
+void LanNetworkPlugin::StopBrowse() {
+  if (browse_state_ == BrowseState::kBrowsing) {
+    DnsServiceBrowseCancel(&browse_cancel_);
+    browse_cancel_ = {};
+    browse_state_ = BrowseState::kIdle;
+  }
+  // Cancel every in-flight resolve. The ResolveOp objects are kept in
+  // |resolves_| until their completion callbacks arrive (which free them) so
+  // the OS never sees a freed DNS_SERVICE_RESOLVE_REQUEST.
+  for (auto& entry : resolves_) {
+    if (entry.second) {
+      DnsServiceResolveCancel(&entry.second->cancel);
+    }
+  }
+  resolving_names_.clear();
+  browse_generation_++;  // Invalidates late callbacks from the old generation.
+}
+
+void LanNetworkPlugin::OnBrowseResult(
+    DNS_STATUS status, uint64_t generation,
+    const std::vector<std::wstring>& found) {
+  if (generation != browse_generation_.load(std::memory_order_acquire)) {
+    return;  // Stale browse (superseded by stopAll / re-entrant browse).
+  }
+  if (status != ERROR_SUCCESS) {
+    // The browse start result was already answered; report errors by log only
+    // (a browse-level failure after a successful start means no events flow).
+    Log("browse callback reported an error status");
+    return;
+  }
+  for (const std::wstring& fqn : found) {
+    if (resolving_names_.count(fqn) != 0) {
+      continue;  // Already resolving this instance in this generation.
+    }
+    resolving_names_.insert(fqn);
+    StartResolve(fqn, generation);
+  }
+}
+
+void LanNetworkPlugin::StartResolve(const std::wstring& fqn,
+                                    uint64_t generation) {
+  auto op = std::make_unique<ResolveOp>();
+  op->fqn = fqn;
+  op->fqn_buf = WStringBuffer(fqn);
+  op->request.Version = DNS_QUERY_REQUEST_VERSION1;
+  op->request.InterfaceIndex = 0;
+  op->request.QueryName = op->fqn_buf.data();
+  op->request.pResolveCompletionCallback =
+      &LanNetworkPlugin::OnResolveCompleteThunk;
+  uint64_t resolve_id = ++next_resolve_id_;
+  auto* ctx = new ResolveContext();
+  ctx->self = this;
+  ctx->generation = generation;
+  ctx->fqn = fqn;
+  ctx->resolve_id = resolve_id;
+  op->request.pQueryContext = ctx;
+  op->cancel = {};
+  DNS_STATUS status = DnsServiceResolve(&op->request, &op->cancel);
+  if (status == DNS_REQUEST_PENDING) {
+    resolves_[resolve_id] = std::move(op);
+  } else {
+    delete ctx;
+    resolving_names_.erase(fqn);
+    // Single instance resolve failure: ignore and keep browsing (matches
+    // Android onResolveFailed semantics).
+  }
+}
+
+void LanNetworkPlugin::OnResolveComplete(DNS_STATUS status,
+                                         const ResolvedService& data) {
+  // The completion callback has fired, so the request/op can be freed.
+  auto it = resolves_.find(data.resolve_id);
+  if (it != resolves_.end()) {
+    resolves_.erase(it);
+  }
+  if (status != ERROR_SUCCESS) {
+    return;  // Single resolve failure: ignore, keep browsing.
+  }
+  if (data.generation != browse_generation_.load(std::memory_order_acquire)) {
+    return;  // Stale resolve from a superseded browse.
+  }
+  if (data.host.empty()) {
+    return;  // Dart drops events with an empty host.
+  }
+  EmitDiscoveryEvent(data);
+}
+
+void LanNetworkPlugin::EmitDiscoveryEvent(const ResolvedService& data) {
+  if (!event_sink_) {
+    return;
+  }
+  flutter::EncodableMap txt;
+  txt[flutter::EncodableValue("proto")] =
+      flutter::EncodableValue(data.txt_proto);
+  txt[flutter::EncodableValue("device")] =
+      flutter::EncodableValue(data.txt_device);
+  txt[flutter::EncodableValue("caps")] =
+      flutter::EncodableValue(data.txt_caps);
+  flutter::EncodableMap event;
+  event[flutter::EncodableValue("name")] = flutter::EncodableValue(data.name);
+  event[flutter::EncodableValue("host")] = flutter::EncodableValue(data.host);
+  event[flutter::EncodableValue("port")] = flutter::EncodableValue(data.port);
+  event[flutter::EncodableValue("txt")] =
+      flutter::EncodableValue(std::move(txt));
+  event_sink_->Success(flutter::EncodableValue(std::move(event)));
+}
+
+void LanNetworkPlugin::ExtractResolved(PDNS_SERVICE_INSTANCE instance,
+                                       ResolvedService* out) {
+  if (instance->pszInstanceName != nullptr) {
+    std::wstring fqn = instance->pszInstanceName;
+    size_t dot = fqn.find(L'.');
+    out->name = WideToUtf8(dot == std::wstring::npos ? fqn : fqn.substr(0, dot));
+  }
+  // Prefer the numeric IPv4 address (matches Android semantics; dart:io on
+  // Windows is not guaranteed to resolve .local mDNS names).
+  if (instance->ip4Address != nullptr) {
+    IN_ADDR address{};
+    address.S_un.S_addr = *instance->ip4Address;
+    wchar_t buffer[INET_ADDRSTRLEN] = {};
+    if (::InetNtopW(AF_INET, &address, buffer, INET_ADDRSTRLEN) != nullptr) {
+      out->host = WideToUtf8(buffer);
+    }
+  }
+  if (out->host.empty() && instance->pszHostName != nullptr) {
+    out->host = WideToUtf8(instance->pszHostName);
+  }
+  out->port = static_cast<int32_t>(instance->wPort);
+  // TXT whitelist on the event side too: only proto/device/caps (a port key,
+  // if present, is deliberately ignored here).
+  if (instance->keys != nullptr && instance->values != nullptr) {
+    for (DWORD i = 0; i < instance->dwPropertyCount; ++i) {
+      if (instance->keys[i] == nullptr || instance->values[i] == nullptr) {
+        continue;
+      }
+      std::wstring key = instance->keys[i];
+      std::string value = WideToUtf8(instance->values[i]);
+      if (key == L"proto") {
+        out->txt_proto = std::move(value);
+      } else if (key == L"device") {
+        out->txt_device = std::move(value);
+      } else if (key == L"caps") {
+        out->txt_caps = std::move(value);
+      }
+    }
+  }
+}
+
+void CALLBACK LanNetworkPlugin::OnBrowseCallbackThunk(DNS_STATUS status,
+                                                      PVOID context,
+                                                      PDNS_RECORD record) {
+  auto* self = static_cast<LanNetworkPlugin*>(context);
+  if (self->stopped_.load(std::memory_order_acquire)) {
+    return;
+  }
+  uint64_t generation = self->browse_generation_.load(std::memory_order_acquire);
+  // DNS_RECORD data is only valid for the duration of this callback, so copy
+  // every PTR instance name before posting back to the platform thread.
+  std::vector<std::wstring> found;
+  if (status == ERROR_SUCCESS && record != nullptr) {
+    for (PDNS_RECORD current = record; current != nullptr;
+         current = current->pNext) {
+      if (current->wType != DNS_TYPE_PTR ||
+          current->Data.PTR.pNameHost == nullptr) {
+        continue;
+      }
+      if (current->Flags.S.Delete) {
+        continue;  // No explicit removal event; Dart expiry handles cleanup.
+      }
+      found.emplace_back(current->Data.PTR.pNameHost);
+    }
+  }
+  self->PostTask([self, status, generation, found]() {
+    if (self->stopped_.load(std::memory_order_acquire)) {
+      return;
+    }
+    self->OnBrowseResult(status, generation, found);
+  });
+}
+
+void CALLBACK LanNetworkPlugin::OnResolveCompleteThunk(
+    DNS_STATUS status, PVOID context, PDNS_SERVICE_INSTANCE instance) {
+  auto* ctx = static_cast<ResolveContext*>(context);
+  LanNetworkPlugin* self = ctx->self;
+  ResolvedService data;
+  data.generation = ctx->generation;
+  data.resolve_id = ctx->resolve_id;
+  data.fqn = ctx->fqn;
+  if (status == ERROR_SUCCESS && instance != nullptr) {
+    ExtractResolved(instance, &data);
+  }
+  delete ctx;  // Consumed: the resolve callback fires exactly once.
+  if (self->stopped_.load(std::memory_order_acquire)) {
+    return;
+  }
+  self->PostTask([self, status, data]() {
+    if (self->stopped_.load(std::memory_order_acquire)) {
+      return;
+    }
+    self->OnResolveComplete(status, data);
   });
 }
 
