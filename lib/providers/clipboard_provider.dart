@@ -539,7 +539,8 @@ class ClipboardProvider extends ChangeNotifier
       // 启动恢复：内存历史为空时先恢复持久化 JSON（含 LAN-only 本地历史），
       // 再与服务器历史合并——否则重启后 LAN-only 条目被服务器-only 历史覆盖，
       // 且其图片/文件 artifact 会被下方 cleanupOrphans 当作孤儿物理删除。
-      _restorePersistedHistoryIfEmpty();
+      // await：缩略图重建完成后才进入合并，避免重建结果被 clear+重放覆盖。
+      await _restorePersistedHistoryIfEmpty();
 
       final serverEntries = await _cloudRepo!.getHistoryEntries(limit: 200);
 
@@ -735,7 +736,7 @@ class ClipboardProvider extends ChangeNotifier
       _errorMessage = AppStrings.loadHistoryFailed('$e');
       notifyListeners();
       // 失败时保留当前内存历史，不清空；内存仍空则从持久化 JSON 恢复
-      _restorePersistedHistoryIfEmpty();
+      await _restorePersistedHistoryIfEmpty();
     } finally {
       _isLoadingHistory = false;
     }
@@ -745,7 +746,8 @@ class ClipboardProvider extends ChangeNotifier
   ///
   /// 仅在内存历史为空时生效：会话内刷新等场景已有内存历史，不得覆盖。
   /// 损坏的持久化 JSON 忽略，继续走服务器加载路径。
-  void _restorePersistedHistoryIfEmpty() {
+  /// 恢复后为 image 条目重建缩略图解密字节（fromJson 只还原密文）。
+  Future<void> _restorePersistedHistoryIfEmpty() async {
     if (_historyService.entries.isNotEmpty) return;
     final savedHistory = _storage?.historyJson;
     if (savedHistory == null || savedHistory.isEmpty) return;
@@ -753,7 +755,35 @@ class ClipboardProvider extends ChangeNotifier
       _historyService.fromJson(savedHistory);
     } catch (_) {
       // 忽略损坏的持久化 JSON
+      return;
     }
+    await _rebuildRestoredImageThumbs();
+  }
+
+  /// 为从持久化 JSON 恢复的 image 条目异步重建缩略图解密字节。
+  ///
+  /// ClipboardEntry.fromMap 只还原 imageThumbEncryptedBase64（密文），
+  /// imageThumbBytes 仅内存不序列化；Cloud 路径下载时会解密重建，LAN-only
+  /// 本地恢复不会。此处复用 decryptImage 补齐，否则重启后缩略图为灰色占位。
+  /// 解密失败/密文损坏保持现状（灰色占位），不阻塞、不抛错。
+  Future<void> _rebuildRestoredImageThumbs() async {
+    if (_syncService == null) return;
+    final images = _historyService.entries
+        .where((e) =>
+            e.type == ContentType.image &&
+            e.imageThumbEncryptedBase64 != null &&
+            e.imageThumbEncryptedBase64!.isNotEmpty)
+        .toList();
+    for (final entry in images) {
+      try {
+        final thumbBytes =
+            await _syncService!.decryptImage(entry.imageThumbEncryptedBase64!);
+        _historyService.addEntry(entry.copyWith(imageThumbBytes: thumbBytes));
+      } catch (_) {
+        // 缩略图解密失败：保持现状，不阻塞、不抛错
+      }
+    }
+    notifyListeners();
   }
 
   /// 备份导入完成后重新从服务器加载历史记录。

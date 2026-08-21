@@ -4,7 +4,10 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:clipflow/core/clipboard_channel_constants.dart';
+import 'package:clipflow/models/clipboard_entry.dart';
 import 'package:clipflow/models/sync_operation.dart';
 import 'package:clipflow/providers/clipboard_provider.dart';
 import 'package:clipflow/repositories/outbox_store.dart';
@@ -644,6 +647,111 @@ void main() {
         restarted.history.any((e) => e.content == 'restart survives text'),
         isTrue,
         reason: 'LAN-only 本地历史应在重启后从持久化 JSON 恢复',
+      );
+      restarted.dispose();
+    });
+
+    Uint8List encodePng(int width, int height) {
+      final image = img.Image(width: width, height: height, numChannels: 3);
+      for (var y = 0; y < height; y++) {
+        for (var x = 0; x < width; x++) {
+          image.setPixelRgba(x, y, 80, 160, 240, 255);
+        }
+      }
+      return Uint8List.fromList(img.encodePng(image));
+    }
+
+    /// mock 原生图片通道：detectImage=true 时首次 syncClipboard 返回重编码
+    /// 字节触发 LAN-only 图片上传；后续不再检测，避免污染恢复断言。
+    void mockImageChannel({
+      required Uint8List readBackBytes,
+      bool detectImage = false,
+    }) {
+      var imageDetectionsLeft = detectImage ? 1 : 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(AppChannelNames.clipboard),
+        (call) async {
+          if (call.method == AppChannelMethods.hasImage) {
+            return imageDetectionsLeft > 0;
+          }
+          if (call.method == AppChannelMethods.getImage) {
+            if (imageDetectionsLeft <= 0) return null;
+            imageDetectionsLeft--;
+            return {
+              'bytes': readBackBytes,
+              'format': 'png',
+              'width': 120,
+              'height': 90,
+            };
+          }
+          if (call.method == AppChannelMethods.setImage) return true;
+          return null;
+        },
+      );
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+          const MethodChannel(AppChannelNames.clipboard),
+          null,
+        );
+      });
+    }
+
+    test('重启恢复：LAN-only 图片本地历史恢复后重建缩略图字节（可渲染）', () async {
+      final sourceImage = encodePng(120, 90);
+      mockImageChannel(readBackBytes: sourceImage, detectImage: true);
+
+      final lanManager = _FakeLanSyncManager();
+      final provider = await createProvider(lanManager);
+      await settle();
+      provider.stopSync();
+
+      await provider.setLanOnlyMode(true);
+      await provider.debugFileCheck();
+
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.type == ContentType.image),
+        message: 'image should be in local history before restart',
+      );
+      final before = provider.history.firstWhere(
+        (e) => e.type == ContentType.image,
+      );
+      expect(
+        before.imageThumbBytes,
+        isNotNull,
+        reason: 'LAN-only 图片上传后应先有解密缩略图字节',
+      );
+      // 图片路径 addEntry 与 _saveHistory() 之间有 localImageStore.save await，
+      // 落盘前 dispose 会丢历史；等持久化 JSON 出现该条目后再模拟退出。
+      await waitFor(
+        provider,
+        () => (storage.historyJson ?? '').contains(before.id),
+        message: 'image history should be persisted before restart',
+      );
+
+      provider.dispose();
+      await settle();
+
+      final restarted = await createProvider(_FakeLanSyncManager());
+      await waitFor(
+        restarted,
+        () {
+          final image = restarted.history
+              .where((e) => e.type == ContentType.image)
+              .toList();
+          return image.isNotEmpty && image.first.imageThumbBytes != null;
+        },
+        message: 'LAN-only 图片条目重启恢复后应重建缩略图字节',
+      );
+      final restored = restarted.history.firstWhere(
+        (e) => e.type == ContentType.image,
+      );
+      expect(
+        restored.imageThumbBytes,
+        isNotNull,
+        reason: '重启后 imageThumbBytes 应为非空（可渲染缩略图）',
       );
       restarted.dispose();
     });
