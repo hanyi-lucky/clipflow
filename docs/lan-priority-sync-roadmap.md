@@ -154,6 +154,7 @@
 - 实现：服务端 `sync_operations`/`sync_tombstones`（零 FK）+ `/api/sync/commit`（幂等/冲突 409/ignored、服务端自建快照）+ `/api/sync/changes`（单调游标分页）+ `pruneSyncState`（op 7d / tombstone 24h）；客户端 `SyncOperationKind.delete/restore` 稳定 opId 走统一 outbox + durable cursor 替换 30s 窗口；删除/恢复 LAN `op` 帧分发（hello `ops:1` 能力位门控，默认 Cloud-only 兜底）；能力探测 404 回退 legacy，旧客户端/旧 API 零影响。
 - 整改闭环：删除→恢复→再删除周期改为「当前状态与 op 意图匹配」判定（周期后缀 opId 新事件）；LAN restore row 白名单清洗（零 userId/明文 file_name/mime_type/file_key）。
 - 验证：`server/smoke-test.sh` 34/34（含第 34 节周期用例）；`flutter test` 511/511；`flutter analyze` 0 error；红线零触碰。
+- **真机回归（2026-08-22，生产服务器已部署 5.2）**：删除/恢复跨端收敛（Cloud durable cursor）、离线 >35s 重放、重启不复活、周期删除新事件（`del:<id>#n`）全部通过（Mac + Xiaomi 15/Android 16，密码 0000）；LAN op 帧端到端未验证——Mac 端 mDNS 未广播（疑 macOS 本地网络权限未授予新装 release，非 5.2 缺陷，单测覆盖），Cloud 兜底生效。详见 `.codex/pipeline/phase25-5.2-device-verification.md`。
 - 决策：`docs/decisions/008-durable-cursor-tombstone-phase52.md`。
 
 ## 重要约束
