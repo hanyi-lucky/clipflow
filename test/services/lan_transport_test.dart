@@ -8,6 +8,8 @@ import 'package:clipflow/repositories/cloud_repository.dart';
 import 'package:clipflow/repositories/local_file_store.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/lan_handshake_service.dart';
+import 'package:clipflow/services/lan_protocol.dart';
+import 'package:clipflow/services/lan_tls.dart';
 import 'package:clipflow/services/lan_transport.dart';
 
 /// 最小 fake Cloud：LAN 票据签发/校验无需真实服务器（与 lan_sync_manager_test
@@ -161,12 +163,9 @@ void main() {
 
       // 对端整体关闭（模拟离线）：initiator 下一次 fetch 读到 EOF →
       // LanProtocolException → _dropInitiatorSession（identity 校验通过）。
+      // fetchLatest 自带帧级读超时兜底，保证无论 EOF 传播快慢都必返 null。
       await responder.closeAll();
-      // 等待 FIN 传播到 initiator 侧，避免偶发时序抖动。
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-      final row = await init
-          .fetchLatest('device-b')
-          .timeout(const Duration(seconds: 2));
+      final row = await init.fetchLatest('device-b');
       expect(row, isNull);
       expect(init.initiatorSessionCount, 0);
     });
@@ -257,6 +256,156 @@ void main() {
       await _waitUntil(() async => (await tmpParts()).isEmpty);
       expect(File('${encDir.path}/h-interrupted.enc').existsSync(), isFalse);
       await _waitUntil(() async => responder.responderSessionCount == 0);
+    });
+  });
+
+  group('EOF 分类（_SocketFrameReader）', () {
+    Future<(Socket, Socket)> socketPair() async {
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final client = await Socket.connect('127.0.0.1', server.port);
+      final serverSocket = await server.first;
+      await server.close();
+      return (client, serverSocket);
+    }
+
+    test('帧间 EOF（上帧完整后对端关闭）→ peer closed connection between frames', () async {
+      final (client, server) = await socketPair();
+      addTearDown(() {
+        client.destroy();
+        server.destroy();
+      });
+      final conn = LanFrameConnection(
+        server,
+        timeout: const Duration(seconds: 2),
+      );
+      // 写一完整帧 + 关闭：read 首帧成功，下一帧 read 读到「帧间 EOF」。
+      client.add(encodeFrame(<String, dynamic>{'v': 1, 'type': 'ping'}));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      client.destroy();
+
+      final first = await conn.read();
+      expect(first['type'], 'ping');
+      await expectLater(
+        conn.read(),
+        throwsA(
+          isA<LanProtocolException>().having(
+            (e) => e.message,
+            'message',
+            contains('peer closed connection between frames'),
+          ),
+        ),
+      );
+    });
+
+    test('半帧 EOF（长度头后关闭）→ socket closed before frame completed', () async {
+      final (client, server) = await socketPair();
+      addTearDown(() {
+        client.destroy();
+        server.destroy();
+      });
+      final conn = LanFrameConnection(
+        server,
+        timeout: const Duration(seconds: 2),
+      );
+      // 长度头声明 100 字节，但只发 4 字节后关闭 → 帧中 EOF。
+      final header = Uint8List(4);
+      ByteData.sublistView(header).setUint32(0, 100);
+      client.add(header);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      client.destroy();
+
+      await expectLater(
+        conn.read(),
+        throwsA(
+          isA<LanProtocolException>().having(
+            (e) => e.message,
+            'message',
+            contains('socket closed before frame completed'),
+          ),
+        ),
+      );
+    });
+  });
+
+  group('逐帧读超时（lanFrameTimeout 注入短值）', () {
+    test('responder 帧循环：对端静默 → 超时断链清理（不占用会话槽位）', () async {
+      final responder = LanTransport(
+        handshakeService: LanHandshakeService(cloudRepository: cloud),
+        frameTimeout: const Duration(milliseconds: 150),
+      );
+      addTearDown(() => responder.closeAll());
+      final port = await startResponder(responder);
+
+      final init = LanTransport(
+        handshakeService: LanHandshakeService(cloudRepository: cloud),
+        frameTimeout: const Duration(milliseconds: 150),
+      );
+      addTearDown(() => init.closeAll());
+      await connectInitiator(init, port: port);
+      expect(responder.responderSessionCount, 1);
+
+      // initiator 握手后静默不发帧 → responder 逐帧读超时 → finally 清理
+      await _waitUntil(() async => responder.responderSessionCount == 0);
+    });
+
+    test('initiator fetchLatest 帧级读超时兜底：静默对端 → 超时后 drop（降级保留）', () async {
+      // 手工 responder（真实 TLS + 真实握手后静默）：不回 latestResponse，
+      // 验证 initiator 侧帧级读超时（lanFrameTimeout 注入短值）兜底 drop。
+      final context = await LanTls.createServerSecurityContext();
+      final server = await SecureServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+        context,
+      );
+      final port = server.port;
+      final serverSockets = <Socket>[];
+      final serverSub = server.listen((socket) async {
+        serverSockets.add(socket);
+        try {
+          final conn = LanFrameConnection(
+            socket,
+            timeout: const Duration(seconds: 5),
+          );
+          await LanHandshakeService(
+            cloudRepository: cloud,
+          ).performHandshake(
+            socket: socket,
+            existingConnection: conn,
+            isInitiator: false,
+            deviceId: 'device-b',
+            userId: 'user_test',
+            accountKey: accountKey,
+          );
+          // 静默：不再读/写任何帧（latestRequest 无响应）。
+        } catch (_) {
+          // 握手/测试清理错误忽略。
+        }
+      });
+      addTearDown(() async {
+        await serverSub.cancel();
+        for (final s in serverSockets) {
+          s.destroy();
+        }
+      });
+
+      final init = LanTransport(
+        handshakeService: LanHandshakeService(cloudRepository: cloud),
+        frameTimeout: const Duration(milliseconds: 200),
+      );
+      addTearDown(() => init.closeAll());
+      await init.connect(
+        peerDeviceId: 'device-b',
+        host: '127.0.0.1',
+        port: port,
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: accountKey,
+      );
+      expect(init.initiatorSessionCount, 1);
+
+      final row = await init.fetchLatest('device-b');
+      expect(row, isNull);
+      expect(init.initiatorSessionCount, 0);
     });
   });
 }

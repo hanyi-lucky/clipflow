@@ -337,14 +337,21 @@ class LanTransport {
     LanHandshakeService? handshakeService,
     LanDiagnostics? diagnostics,
     DateTime Function()? now,
+    @visibleForTesting Duration frameTimeout = LanConstants.lanFrameTimeout,
   })  : _handshake =
             handshakeService ?? LanHandshakeService(cloudRepository: CloudRepository(CloudBaseService()), diagnostics: diagnostics),
         _diagnostics = diagnostics,
-        _now = now ?? DateTime.now;
+        _now = now ?? DateTime.now,
+        _frameTimeout = frameTimeout;
 
   final LanHandshakeService _handshake;
   final LanDiagnostics? _diagnostics;
   final DateTime Function() _now;
+
+  /// 逐帧读超时（默认 5s）：responder 帧循环与 initiator fetchLatest 读帧
+  /// 的墙钟上限。健康慢响应 5s 内必到；半帧卡死/静默离线 5s 快速断链自愈
+  /// （避免占用会话槽位长达 5min 空闲超时）。
+  final Duration _frameTimeout;
   SecureServerSocket? _server;
   final Map<String, _LanSession> _initiatorSessions = {};
   final Map<String, _LanSession> _responderSessions = {};
@@ -490,7 +497,15 @@ class LanTransport {
       // 会话帧循环：latestRequest → 应答；push → 通知；fileStart/fileChunk
       // → 文件分块重组；未知帧 → 断链。文件帧违规 → 中止 + 断会话。
       while (true) {
-        final frame = await connection.read();
+        final Map<String, dynamic> frame;
+        try {
+          // 逐帧读有界超时（lanFrameTimeout=5s）：对端 5s 无完整帧（半帧
+          // 卡死/静默离线）→ 断会话快速自愈，避免占用槽位长达 5min。
+          frame = await connection.read().timeout(_frameTimeout);
+        } on TimeoutException {
+          debugPrint('[LAN-TRANSPORT] responder frame read timed out');
+          break;
+        }
         final type = frame['type'];
         if (type == 'latestRequest') {
           connection.write(<String, dynamic>{
@@ -637,8 +652,7 @@ class LanTransport {
       // 逐帧读有界超时（lanFrameTimeout=5s）：健康慢响应 5s 内必到；真死连接
       // 5s 兜底 drop（缓冲已污染，不能复用）——「manager 300ms 超时不 drop」
       // 后，离线 peer 的 localOnly 降级语义保留在帧级超时路径。
-      final response =
-          await session.connection.read().timeout(LanConstants.lanFrameTimeout);
+      final response = await session.connection.read().timeout(_frameTimeout);
       if (response['type'] != 'latestResponse') {
         _dropInitiatorSession(peerDeviceId, session);
         return null;

@@ -110,24 +110,51 @@ class LanFrameConnection {
   final Socket _socket;
   final _SocketFrameReader _reader;
 
+  /// 当前 read 是否处于「长度头已读、载荷未齐」的帧中阶段（EOF 分类用）。
+  /// 单订阅流 + reader slot 串行化保证同一时刻只有一个 read 在途。
+  bool _midFrame = false;
+
   void write(Map<String, dynamic> message) {
     writeFrame(_socket, message);
   }
 
+  /// 精确读 [length] 字节，EOF 按读取阶段分类：
+  /// - header 阶段（帧间，_midFrame=false）：对端正常关闭/空闲断开；
+  /// - payload 阶段（帧中，_midFrame=true）：半帧损坏。
+  Future<Uint8List> _readExact(int length) async {
+    try {
+      return await _reader.read(length);
+    } on LanProtocolException catch (e) {
+      if (e.message == 'socket closed before frame completed') {
+        throw LanProtocolException(
+          _midFrame
+              ? 'socket closed before frame completed'
+              : 'peer closed connection between frames',
+        );
+      }
+      rethrow;
+    }
+  }
+
   Future<Map<String, dynamic>> read() async {
     try {
-      final header = await _reader.read(4);
+      final header = await _readExact(4);
       final length = ByteData.sublistView(header).getUint32(0);
       if (length > LanConstants.lanMaxFrameBytes) {
         throw LanProtocolException(
           'frame declares $length bytes, exceeds max ${LanConstants.lanMaxFrameBytes}',
         );
       }
-      final payload = await _reader.read(length);
-      final bytes = Uint8List(4 + length);
-      bytes.setRange(0, 4, header);
-      bytes.setRange(4, bytes.length, payload);
-      return decodeFrameBytes(bytes);
+      _midFrame = true;
+      try {
+        final payload = await _readExact(length);
+        final bytes = Uint8List(4 + length);
+        bytes.setRange(0, 4, header);
+        bytes.setRange(4, bytes.length, payload);
+        return decodeFrameBytes(bytes);
+      } finally {
+        _midFrame = false;
+      }
     } on TimeoutException {
       throw LanProtocolException('frame read timed out');
     } on SocketException catch (e) {
@@ -148,6 +175,8 @@ class _SocketFrameReader {
   Future<Uint8List> read(int length) async {
     while (_buffer.length < length) {
       if (!await _iterator.moveNext()) {
+        // EOF（socket 流结束）统一抛此消息；帧间/帧中分类由
+        // LanFrameConnection 按读取阶段（header/payload）区分。
         throw LanProtocolException('socket closed before frame completed');
       }
       _buffer.addAll(_iterator.current);
