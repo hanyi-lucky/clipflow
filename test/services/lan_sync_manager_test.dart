@@ -290,6 +290,35 @@ SyncOperation _textOp({
   );
 }
 
+/// 全量并行负载下 TLS 建连偶发 Connection reset（环境性抖动），
+/// 重试兜底；逻辑错误（LanHandshakeException 等）不重试。
+Future<void> connectWithRetry(
+  LanTransport transport, {
+  required String peerDeviceId,
+  required String host,
+  required int port,
+  required String userId,
+  required String deviceId,
+  required Uint8List accountKey,
+}) async {
+  for (var attempt = 0;; attempt++) {
+    try {
+      await transport.connect(
+        peerDeviceId: peerDeviceId,
+        host: host,
+        port: port,
+        userId: userId,
+        deviceId: deviceId,
+        accountKey: accountKey,
+      );
+      return;
+    } on SocketException {
+      if (attempt >= 2) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+}
+
 void main() {
   // 组合测试用真实 LanTransport（TLS 资产经 rootBundle 加载）需要 binding。
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -1405,7 +1434,8 @@ void main() {
         userId: 'user_test',
         accountKey: accountKey,
       );
-      await manager.debugTransport.connect(
+      await connectWithRetry(
+        manager.debugTransport,
         peerDeviceId: 'device-b',
         host: '127.0.0.1',
         port: peerPort,
@@ -1511,7 +1541,8 @@ void main() {
         userId: 'user_test',
         accountKey: accountKey,
       );
-      await manager.debugTransport.connect(
+      await connectWithRetry(
+        manager.debugTransport,
         peerDeviceId: 'device-b',
         host: '127.0.0.1',
         port: peerPort,
