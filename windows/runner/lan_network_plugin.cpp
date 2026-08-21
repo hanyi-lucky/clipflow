@@ -88,7 +88,7 @@ std::wstring WideFromUtf8(const std::string& utf8) {
   return wide;
 }
 
-std::string DnsStatusMessage(DNS_STATUS status) {
+std::string DnsStatusMessage(DWORD status) {
   char buffer[64];
   std::snprintf(buffer, sizeof(buffer), "DNS status 0x%04lX",
                 static_cast<unsigned long>(status));
@@ -362,8 +362,8 @@ void LanNetworkPlugin::StartRegister() {
   }
 }
 
-void LanNetworkPlugin::OnRegisterComplete(DNS_STATUS status,
-                                          uint64_t operation_id) {
+void LanNetworkPlugin::OnRegisterComplete(DWORD status,
+                                        uint64_t operation_id) {
   if (operation_id != adv_operation_id_) {
     return;  // Stale callback from a superseded operation.
   }
@@ -459,7 +459,7 @@ void LanNetworkPlugin::AddTxt(AdvertiseOp* op, const std::wstring& key,
 }
 
 void CALLBACK LanNetworkPlugin::OnRegisterCallbackThunk(
-    DNS_STATUS status, PVOID context, PDNS_SERVICE_INSTANCE instance) {
+    DWORD status, PVOID context, PDNS_SERVICE_INSTANCE instance) {
   auto* ctx = static_cast<RegisterContext*>(context);
   LanNetworkPlugin* self = ctx->self;
   uint64_t operation_id = ctx->operation_id;
@@ -513,7 +513,7 @@ void LanNetworkPlugin::StopBrowse() {
 }
 
 void LanNetworkPlugin::OnBrowseResult(
-    DNS_STATUS status, uint64_t generation,
+    DWORD status, uint64_t generation,
     const std::vector<std::wstring>& found) {
   if (generation != browse_generation_.load(std::memory_order_acquire)) {
     return;  // Stale browse (superseded by stopAll / re-entrant browse).
@@ -562,8 +562,8 @@ void LanNetworkPlugin::StartResolve(const std::wstring& fqn,
   }
 }
 
-void LanNetworkPlugin::OnResolveComplete(DNS_STATUS status,
-                                         const ResolvedService& data) {
+void LanNetworkPlugin::OnResolveComplete(DWORD status,
+                                       const ResolvedService& data) {
   // The completion callback has fired, so the request/op can be freed.
   auto it = resolves_.find(data.resolve_id);
   if (it != resolves_.end()) {
@@ -642,9 +642,9 @@ void LanNetworkPlugin::ExtractResolved(PDNS_SERVICE_INSTANCE instance,
   }
 }
 
-void CALLBACK LanNetworkPlugin::OnBrowseCallbackThunk(DNS_STATUS status,
-                                                      PVOID context,
-                                                      PDNS_RECORD record) {
+void CALLBACK LanNetworkPlugin::OnBrowseCallbackThunk(DWORD status,
+                                                    PVOID context,
+                                                    PDNS_RECORD record) {
   auto* self = static_cast<LanNetworkPlugin*>(context);
   if (self->stopped_.load(std::memory_order_acquire)) {
     return;
@@ -675,7 +675,7 @@ void CALLBACK LanNetworkPlugin::OnBrowseCallbackThunk(DNS_STATUS status,
 }
 
 void CALLBACK LanNetworkPlugin::OnResolveCompleteThunk(
-    DNS_STATUS status, PVOID context, PDNS_SERVICE_INSTANCE instance) {
+    DWORD status, PVOID context, PDNS_SERVICE_INSTANCE instance) {
   auto* ctx = static_cast<ResolveContext*>(context);
   LanNetworkPlugin* self = ctx->self;
   ResolvedService data;

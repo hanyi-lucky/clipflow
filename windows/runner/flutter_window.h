@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "image_clipboard_plugin.h"
+#include "lan_network_plugin.h"
 #include "win32_window.h"
 
 // A window that does nothing but host a Flutter view.
@@ -32,6 +33,9 @@ class FlutterWindow : public Win32Window {
 
   // Native implementation of the "clipflow/clipboard" MethodChannel.
   std::unique_ptr<ImageClipboardPlugin> image_clipboard_plugin_;
+
+  // Native implementation of the "clipflow/lan_network" MethodChannel + EventChannel.
+  std::unique_ptr<LanNetworkPlugin> lan_network_plugin_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

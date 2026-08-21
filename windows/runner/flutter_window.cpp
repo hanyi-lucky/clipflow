@@ -28,6 +28,9 @@ bool FlutterWindow::OnCreate() {
   image_clipboard_plugin_ = std::make_unique<ImageClipboardPlugin>();
   image_clipboard_plugin_->RegisterWithMessenger(
       flutter_controller_->engine()->messenger());
+  lan_network_plugin_ = std::make_unique<LanNetworkPlugin>(GetHandle());
+  lan_network_plugin_->RegisterWithMessenger(
+      flutter_controller_->engine()->messenger());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -49,6 +52,10 @@ void FlutterWindow::OnDestroy() {
     image_clipboard_plugin_->Unregister();
     image_clipboard_plugin_.reset();
   }
+  if (lan_network_plugin_) {
+    lan_network_plugin_->Unregister();
+    lan_network_plugin_.reset();
+  }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -68,6 +75,13 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (result) {
       return *result;
     }
+  }
+
+  if (lan_network_plugin_ && message == lan_network_plugin_->MarshalMessage()) {
+    // DNS-SD callbacks marshal back to the platform thread through this
+    // registered window message; run one queued task per message.
+    lan_network_plugin_->DrainOne();
+    return 0;
   }
 
   switch (message) {

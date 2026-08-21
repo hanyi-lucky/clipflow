@@ -110,14 +110,14 @@ class LanNetworkPlugin {
   };
 
   void StartRegister();
-  void OnRegisterComplete(DNS_STATUS status, uint64_t operation_id);
+  void OnRegisterComplete(DWORD status, uint64_t operation_id);
   void CompletePendingRegistration();
   void StopAllInternal(bool complete_inflight);
   static void AddTxt(AdvertiseOp* op, const std::wstring& key,
                      const std::wstring& value);
-  static void CALLBACK OnRegisterCallbackThunk(DNS_STATUS status,
-                                               PVOID context,
-                                               PDNS_SERVICE_INSTANCE instance);
+  static void CALLBACK OnRegisterCallbackThunk(DWORD status,
+                                           PVOID context,
+                                           PDNS_SERVICE_INSTANCE instance);
 
   AdvertiseState adv_state_ = AdvertiseState::kIdle;
   std::unique_ptr<AdvertiseOp> adv_op_;
@@ -174,17 +174,17 @@ class LanNetworkPlugin {
   void StartBrowse(
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void StopBrowse();
-  void OnBrowseResult(DNS_STATUS status, uint64_t generation,
-                      const std::vector<std::wstring>& found);
+  void OnBrowseResult(DWORD status, uint64_t generation,
+                    const std::vector<std::wstring>& found);
   void StartResolve(const std::wstring& fqn, uint64_t generation);
-  void OnResolveComplete(DNS_STATUS status, const ResolvedService& data);
+  void OnResolveComplete(DWORD status, const ResolvedService& data);
   void EmitDiscoveryEvent(const ResolvedService& data);
   static void ExtractResolved(PDNS_SERVICE_INSTANCE instance,
                               ResolvedService* out);
-  static void CALLBACK OnBrowseCallbackThunk(DNS_STATUS status, PVOID context,
-                                             PDNS_RECORD record);
+  static void CALLBACK OnBrowseCallbackThunk(DWORD status, PVOID context,
+                                         PDNS_RECORD record);
   static void CALLBACK OnResolveCompleteThunk(
-      DNS_STATUS status, PVOID context, PDNS_SERVICE_INSTANCE instance);
+      DWORD status, PVOID context, PDNS_SERVICE_INSTANCE instance);
 
   BrowseState browse_state_ = BrowseState::kIdle;
   DNS_SERVICE_BROWSE_REQUEST browse_request_{};
