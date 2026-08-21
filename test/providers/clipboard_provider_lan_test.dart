@@ -700,14 +700,15 @@ void main() {
 
     test('重启恢复：LAN-only 图片本地历史恢复后重建缩略图字节（可渲染）', () async {
       final sourceImage = encodePng(120, 90);
-      mockImageChannel(readBackBytes: sourceImage, detectImage: true);
-
       final lanManager = _FakeLanSyncManager();
       final provider = await createProvider(lanManager);
       await settle();
       provider.stopSync();
 
       await provider.setLanOnlyMode(true);
+      // LAN-only 开启后再 mock 图片通道：ClipboardMonitor 自身 500ms 轮询
+      // 会消费检测，若在 lanOnly 开启前触发会走 Cloud 路径（测试假阳性）。
+      mockImageChannel(readBackBytes: sourceImage, detectImage: true);
       await provider.debugFileCheck();
 
       await waitFor(
@@ -729,6 +730,13 @@ void main() {
         provider,
         () => (storage.historyJson ?? '').contains(before.id),
         message: 'image history should be persisted before restart',
+      );
+      // 清理图片 mock：重启后 monitor 轮询若再检测到图片会走 Cloud 上传，
+      // 其条目经 stableHash 合并会让「重建缩略图」断言变成假阳性。
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(AppChannelNames.clipboard),
+        null,
       );
 
       provider.dispose();
