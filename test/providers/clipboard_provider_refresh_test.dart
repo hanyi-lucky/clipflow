@@ -15,6 +15,16 @@ import 'package:clipflow/services/encryption_service.dart';
 class SlowFakeRepo extends CloudRepository {
 
   @override
+  Future<Map<String, dynamic>> commitSyncOperation({
+    required String operationId,
+    required String kind,
+    required String entryId,
+    Map<String, dynamic>? payload,
+  }) async {
+    return {'seq': 1};
+  }
+
+  @override
   Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   SlowFakeRepo() : super(CloudBaseService());
 

@@ -27,6 +27,16 @@ import 'package:clipflow/services/lan_sync_manager.dart';
 class _LanFileCloudRepo extends CloudRepository {
 
   @override
+  Future<Map<String, dynamic>> commitSyncOperation({
+    required String operationId,
+    required String kind,
+    required String entryId,
+    Map<String, dynamic>? payload,
+  }) async {
+    return {'seq': 1};
+  }
+
+  @override
   Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   _LanFileCloudRepo() : super(CloudBaseService());
 

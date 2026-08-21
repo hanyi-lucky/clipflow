@@ -458,6 +458,8 @@ class ClipboardProvider extends ChangeNotifier
       devicePlatform: Platform.operatingSystem,
       key: encryptionKey,
     );
+    // 注入持久化 durable cursor（重启后从上次成功应用位置续拉 op log）
+    _syncService!.setLastAppliedCursor(storage.syncCursor);
     _syncCoordinator = SyncCoordinator.cloud(
       userId: userId ?? storage.userId ?? 'user_$deviceId',
       syncService: _syncService!,
@@ -556,7 +558,8 @@ class ClipboardProvider extends ChangeNotifier
         for (final entry in stillOnServer) {
           final eid = entry['id'] as String;
           try {
-            await _cloudRepo!.deleteHistoryEntry(eid);
+            // 重删也走 durable outbox：让离线设备也能收敛这次删除
+            await _syncCoordinator?.enqueueDelete(eid);
             failedIds.remove(eid);
           } catch (_) {
             // 删除失败保留 ID，下次 refresh 重试
@@ -1556,8 +1559,29 @@ class ClipboardProvider extends ChangeNotifier
           notifyListeners();
           break;
         case SyncOperationKind.delete:
+          // 服务端确认删除成功：从持久化集合移除（失败保留，下次刷新重试）。
+          // 本地历史条目已在 removeEntry 乐观移除，这里只清集合 + artifact。
+          final deletedEntryId = op.payload['entryId'] as String?;
+          if (deletedEntryId != null && _storage != null) {
+            final ids = _storage!.deletedEntryIds;
+            if (ids.remove(deletedEntryId)) {
+              await _storage!.setDeletedEntryIds(ids);
+            }
+            // 同步删除本地全图/文件缓存（失败仅日志，不阻断回执链）
+            try {
+              await _localImageStore.delete(deletedEntryId);
+              await _localFileStore.deleteEntry(deletedEntryId);
+            } catch (artifactError) {
+              debugPrint(
+                '[CLIP-PROVIDER] Delete artifact cleanup failed: $artifactError',
+              );
+            }
+          }
+          break;
         case SyncOperationKind.restore:
-          // Phase 3 补账（deletedEntryIds 移除、本地 artifact 清理、LAN push w/ response）
+          // 本机条目经 changes 游标 _handleRestoredEntries 重建（restore op 带
+          // 服务端权威 row）；LAN restore 推送用 response.row（Phase 4 接线），
+          // 这里不直接插入，避免与游标重放重复写。
           break;
       }
       // LAN 接力推送：补账之后、同 try/catch 内；异常只日志，绝不 rethrow
@@ -1774,6 +1798,14 @@ class ClipboardProvider extends ChangeNotifier
     }
     // 行被取代：游标推进后，被取代的旧毒行熔断状态清理（防 Map 膨胀）。
     _fileBreaker.pruneOlderThan(result.timestamp.millisecondsSinceEpoch);
+
+    // durable cursor：所有内容/删除/恢复应用成功后才推进并持久化
+    // （与 markAsReceived 同纪律；LAN 行 syncCursor 为 null，天然跳过）。
+    final cursor = result.syncCursor;
+    if (cursor != null) {
+      _syncService?.setLastAppliedCursor(cursor);
+      await _storage?.setSyncCursor(cursor);
+    }
   }
 
   /// 处理恢复同步条目：按 type 分流。
@@ -2385,6 +2417,12 @@ class ClipboardProvider extends ChangeNotifier
         if (result != null && result.hasRestorations) {
           await _handleRestoredEntries(result.restoredEntries);
         }
+        // durable cursor：应用成功后才推进并持久化
+        final refreshCursor = result?.syncCursor;
+        if (refreshCursor != null) {
+          _syncService?.setLastAppliedCursor(refreshCursor);
+          await _storage?.setSyncCursor(refreshCursor);
+        }
       }
       // 刷新完成是关键操作，立即落盘（绕过节流）
       _saveDebounceTimer?.cancel();
@@ -2494,30 +2532,25 @@ class ClipboardProvider extends ChangeNotifier
     }
     notifyListeners();
     try {
-      await _cloudRepo?.deleteHistoryEntry(id);
-      // 服务器确认删除后从持久化集合移除
-      if (_storage != null) {
-        final ids = _storage!.deletedEntryIds;
-        ids.remove(id);
-        await _storage!.setDeletedEntryIds(ids);
-      }
-      // 同步删除本地全图缓存
-      await _localImageStore.delete(id);
-      // 同步删除本地文件密文/明文缓存
-      await _localFileStore.deleteEntry(id);
+      // 删除走 durable outbox：稳定 opId = del:<id>，服务端幂等；成功后由
+      // _onOperationSucceeded(delete) 负责 deletedEntryIds 移除 + artifact 清理。
+      // 失败（4xx dead 立即移出 / 网络 retryable）时集合保留，下次 refresh
+      // 经 _loadHistoryFromServer 的 enqueueDelete 重试（防复活兜底）。
+      await _syncCoordinator?.enqueueDelete(id);
     } catch (e) {
       // 乐观更新，失败不回滚（集合保留，下次 refresh 会重试删除）
+      debugPrint('[CLIP-PROVIDER] enqueueDelete failed: $e');
     }
   }
 
   /// 恢复已删除的条目
   ///
-  /// 仅调用服务器 API，不触发全量加载。
-  /// 恢复的条目将通过 sync loop 的 restoredEntries 处理自动同步回来。
+  /// 走 durable outbox：稳定 opId = rest:<id>，服务端自包含（现行行或快照
+  /// 重建）返回权威 row；本机与 LAN peer 经 changes 游标 / op 帧收敛。
   Future<void> restoreEntry(String id) async {
     try {
-      await _cloudRepo?.restoreHistoryEntry(id);
-      // 不调用 _loadHistoryFromServer，让 sync loop 处理
+      await _syncCoordinator?.enqueueRestore(id);
+      // 不调用 _loadHistoryFromServer，让 sync loop 的 restoredEntries 处理
       notifyListeners();
     } catch (e) {
       _errorMessage = AppStrings.restoreFailed('$e');

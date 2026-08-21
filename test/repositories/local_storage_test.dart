@@ -69,4 +69,19 @@ void main() {
     await storage.setLanOnlyMode(false);
     expect(storage.lanOnlyMode, isFalse);
   });
+
+  test('syncCursor 默认 null，可持久化，clearAccountIdentity 清除', () async {
+    SharedPreferences.setMockInitialValues({});
+    final storage = LocalStorage(await SharedPreferences.getInstance());
+
+    expect(storage.syncCursor, isNull);
+    await storage.setSyncCursor(42);
+    expect(storage.syncCursor, 42);
+    await storage.setSyncCursor(null);
+    expect(storage.syncCursor, isNull);
+    await storage.setSyncCursor(7);
+
+    await storage.clearAccountIdentity();
+    expect(storage.syncCursor, isNull);
+  });
 }

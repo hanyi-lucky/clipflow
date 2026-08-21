@@ -5,19 +5,34 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:clipflow/providers/clipboard_provider.dart';
 import 'package:clipflow/repositories/cloud_repository.dart';
 import 'package:clipflow/repositories/local_image_store.dart';
+import 'package:clipflow/repositories/local_outbox_store.dart';
 import 'package:clipflow/repositories/local_storage.dart';
 import 'package:clipflow/services/cloudbase_service.dart';
 import 'package:clipflow/services/encryption_service.dart';
 
 class FakeDeletionRepo extends CloudRepository {
-
-  @override
-  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async => null;
   FakeDeletionRepo() : super(CloudBaseService());
 
   List<Map<String, dynamic>> history = [];
   Map<String, dynamic>? currentClipboard;
   List<String> deletedIds = [];
+  final List<Map<String, dynamic>> commitCalls = [];
+  Map<String, dynamic>? syncChangesPage;
+
+  @override
+  Future<Map<String, dynamic>?> getSyncChanges({required int after, int? limit}) async =>
+      syncChangesPage;
+
+  @override
+  Future<Map<String, dynamic>> commitSyncOperation({
+    required String operationId,
+    required String kind,
+    required String entryId,
+    Map<String, dynamic>? payload,
+  }) async {
+    commitCalls.add({'operationId': operationId, 'kind': kind, 'entryId': entryId});
+    return {'seq': commitCalls.length};
+  }
 
   @override
   Future<List<Map<String, dynamic>>> getHistoryEntries({int limit = 100}) async =>
@@ -102,7 +117,10 @@ void main() {
   }
 
   Future<ClipboardProvider> createProvider() async {
-    final provider = ClipboardProvider(imageStore: imageStore);
+    final provider = ClipboardProvider(
+      imageStore: imageStore,
+      outbox: LocalOutboxStore(directoryPath: tempDir.path),
+    );
     await provider.initialize(
       storage: storage,
       cloudRepo: repo,
@@ -167,9 +185,13 @@ void main() {
 
       await provider.removeEntry('del-2');
 
-      // After server confirms deletion, id should be removed from the set
-      // (FakeDeletionRepo.deleteHistoryEntry succeeds synchronously)
-      expect(storage.deletedEntryIds.contains('del-2'), isFalse);
+      // After server confirms deletion (via durable outbox success callback),
+      // id should be removed from the set
+      await waitFor(
+        provider,
+        () => storage.deletedEntryIds.contains('del-2') == false,
+        message: 'deletedEntryIds should be cleared after durable delete success',
+      );
 
       await settle();
       provider.dispose();
@@ -189,7 +211,7 @@ void main() {
         message: 'entry should load from server',
       );
 
-      // Remove the entry (server delete succeeds → id removed from set)
+      // Remove the entry (durable delete succeeds → id removed from set)
       await provider.removeEntry('del-3');
       expect(provider.history.any((e) => e.id == 'del-3'), isFalse);
 
@@ -198,22 +220,100 @@ void main() {
       await storage.setDeletedEntryIds({'del-3'});
       repo.history = [textRow('del-3', textEnc.toBase64())];
       repo.deletedIds.clear();
+      repo.commitCalls.clear();
 
       await provider.refresh();
       await waitFor(
         provider,
-        () => repo.deletedIds.contains('del-3'),
-        message: 'server should receive re-delete for del-3',
+        () => repo.commitCalls.any((c) => c['operationId'] == 'del:del-3'),
+        message: 'server should receive durable re-delete for del-3',
       );
 
       // Entry should NOT reappear in history
       expect(provider.history.any((e) => e.id == 'del-3'), isFalse);
-      // Server should have received the re-delete call
-      expect(repo.deletedIds.contains('del-3'), isTrue);
+      // Server should have received the durable re-delete via /api/sync/commit
+      expect(repo.commitCalls.any((c) => c['operationId'] == 'del:del-3'), isTrue);
       // After successful re-delete, id should be removed from the set
       expect(storage.deletedEntryIds.contains('del-3'), isFalse);
 
       await settle();
+      provider.dispose();
+    });
+  });
+
+  group('durable outbox routing', () {
+    test('removeEntry sends a durable delete commit', () async {
+      final textEnc = await encryption.encrypt('outbox delete', key);
+      repo.history = [textRow('del-outbox-1', textEnc.toBase64())];
+
+      final provider = await createProvider();
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.id == 'del-outbox-1'),
+        message: 'entry should load from server',
+      );
+
+      await provider.removeEntry('del-outbox-1');
+
+      await waitFor(
+        provider,
+        () => repo.commitCalls.any((c) => c['operationId'] == 'del:del-outbox-1'),
+        message: 'durable delete commit should be sent',
+      );
+      final call = repo.commitCalls.firstWhere(
+        (c) => c['operationId'] == 'del:del-outbox-1',
+      );
+      expect(call['kind'], 'delete');
+      expect(call['entryId'], 'del-outbox-1');
+      // 服务器确认后从持久化集合移除
+      expect(storage.deletedEntryIds.contains('del-outbox-1'), isFalse);
+
+      provider.dispose();
+    });
+
+    test('restoreEntry sends a durable restore commit', () async {
+      final provider = await createProvider();
+
+      await provider.restoreEntry('rest-outbox-1');
+
+      await waitFor(
+        provider,
+        () => repo.commitCalls.any((c) => c['operationId'] == 'rest:rest-outbox-1'),
+        message: 'durable restore commit should be sent',
+      );
+      final call = repo.commitCalls.firstWhere(
+        (c) => c['operationId'] == 'rest:rest-outbox-1',
+      );
+      expect(call['kind'], 'restore');
+      expect(call['entryId'], 'rest-outbox-1');
+
+      provider.dispose();
+    });
+  });
+
+  group('durable cursor persistence', () {
+    test('cursor is persisted after applying a download result with syncCursor',
+        () async {
+      repo.syncChangesPage = {
+        'cursor': 9,
+        'hasMore': false,
+        'changes': [
+          {
+            'seq': 1,
+            'operationId': 'del:zz',
+            'kind': 'delete',
+            'entryId': 'zz',
+          },
+        ],
+      };
+
+      final provider = await createProvider();
+
+      await waitFor(
+        provider,
+        () => storage.syncCursor == 9,
+        message: 'cursor should be persisted after applying download result',
+      );
       provider.dispose();
     });
   });

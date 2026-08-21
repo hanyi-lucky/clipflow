@@ -24,6 +24,7 @@ class LocalStorage {
   static const _keyMonitorLastFileSignatures = 'monitor_last_file_signatures';
   static const _keyLanAcceleration = 'lan_acceleration';
   static const _keyLanOnlyMode = 'lan_only_mode';
+  static const _keySyncCursor = 'sync_cursor';
 
   final SharedPreferences _prefs;
 
@@ -57,6 +58,7 @@ class LocalStorage {
     await _prefs.remove(_keyMonitorIgnoreHashes);
     await _prefs.remove(_keyMonitorIgnoreFileHashes);
     await _prefs.remove(_keyMonitorLastFileSignatures);
+    await _prefs.remove(_keySyncCursor);
   }
 
   // Sync state
@@ -169,6 +171,17 @@ class LocalStorage {
 
   Future<void> setNotificationSync(bool value) async {
     await _prefs.setBool(_keyNotificationSync, value);
+  }
+
+  // durable 同步游标（Phase 5.2）：仅在 _applyDownloadResult 成功后推进
+  int? get syncCursor => _prefs.getInt(_keySyncCursor);
+
+  Future<void> setSyncCursor(int? cursor) async {
+    if (cursor == null) {
+      await _prefs.remove(_keySyncCursor);
+    } else {
+      await _prefs.setInt(_keySyncCursor, cursor);
+    }
   }
 
   // Deleted entry IDs (persisted to prevent resurrection after restart)
