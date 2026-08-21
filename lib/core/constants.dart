@@ -91,6 +91,10 @@ class LanConstants {
   /// 旧 peer 忽略多余字段；版本仍 1，原生插件零改动。
   static const int lanCapabilityAcks = 1;
 
+  /// hello 能力协商：`ops: 1` 表示支持 delete/restore `op` 帧（Phase 5.2）。
+  /// 只对声明 ops 的 peer 发 op 帧（旧 peer 未知帧会断链自愈）。
+  static const int lanCapabilityOps = 1;
+
   /// text/image push 后等待 fileAck 的超时（对端帧到达即回 ack）。
   static const Duration lanAckTimeoutText = Duration(milliseconds: 500);
 

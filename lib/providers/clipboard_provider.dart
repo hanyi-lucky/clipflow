@@ -388,6 +388,17 @@ class ClipboardProvider extends ChangeNotifier
         if (_disposed) return;
         _performDownload();
       };
+      // Phase 5.2：LAN delete/restore op 帧 → 与 Cloud 应用同一套代码（幂等）。
+      manager.onDeleteOpReceived = (entryId) {
+        if (_disposed) return;
+        _historyService.removeEntry(entryId);
+        _saveHistory();
+        notifyListeners();
+      };
+      manager.onRestoreOpReceived = (row) {
+        if (_disposed) return;
+        unawaited(_handleRestoredEntries([row]));
+      };
     } catch (e) {
       debugPrint('[CLIP-PROVIDER] LAN start failed, disabled: $e');
       _lanManager = null;
@@ -1586,7 +1597,8 @@ class ClipboardProvider extends ChangeNotifier
       }
       // LAN 接力推送：补账之后、同 try/catch 内；异常只日志，绝不 rethrow
       // （防止已删 manifest 的成功操作被写回 outbox 重复上传）。
-      await _lanManager?.pushOperation(op);
+      // response 携带服务端 commit 响应（restore 的权威 row 来源）。
+      await _lanManager?.pushOperation(op, response: response);
     } catch (error) {
       // 回执异常只日志：绝不能向上传播进 coordinator 的失败分支，
       // 否则已删除 manifest 的已成功操作会被重写回 outbox 重复上传。

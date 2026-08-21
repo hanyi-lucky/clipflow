@@ -125,9 +125,26 @@ class _FakeTransport extends LanTransport {
   LanPushResult pushResult = LanPushResult.delivered;
   LanPushResult pushFileResult = LanPushResult.delivered;
   bool peerSupportsAcksResult = false;
+  bool peerSupportsOpsResult = true;
+  final List<String> pushedOpsTo = [];
+  final List<Map<String, dynamic>> pushedOpFrames = [];
 
   @override
   bool supportsAcks(String peerDeviceId) => peerSupportsAcksResult;
+
+  @override
+  bool supportsOps(String peerDeviceId) => peerSupportsOpsResult;
+
+  @override
+  Future<void> pushOp(String peerDeviceId, Map<String, dynamic> opFrame) async {
+    pushedOpsTo.add(peerDeviceId);
+    // 与真实 LanTransport.pushOp 一致：外层 `op` 帧包裹（红线：不含敏感字段）。
+    pushedOpFrames.add(<String, dynamic>{
+      'v': LanConstants.lanProtoVersion,
+      'type': 'op',
+      'op': opFrame,
+    });
+  }
 
   @override
   Future<LanPushResult> push(String peerDeviceId, Map<String, dynamic> row) async {
@@ -1379,5 +1396,156 @@ void main() {
       await manager.stop();
     });
   });
+  group('LAN op 帧（Phase 5.2：delete/restore 分发）', () {
+    SyncOperation _deleteOp(String entryId) => SyncOperation(
+          operationId: 'del:$entryId',
+          userId: 'user_test',
+          kind: SyncOperationKind.delete,
+          state: SyncOperationState.sending,
+          dedupeKey: 'del:$entryId',
+          createdAtMs: 1,
+          updatedAtMs: 1,
+          attemptCount: 0,
+          nextAttemptAtMs: 1,
+          payload: <String, dynamic>{
+            'entryId': entryId,
+            'sourceDevice': 'device-a',
+            'sourceDeviceName': 'Mac A',
+            'sourcePlatform': 'macos',
+            'timestamp': 1,
+          },
+        );
+
+    SyncOperation _restoreOp(String entryId, {String sourceDevice = 'device-a'}) =>
+        SyncOperation(
+          operationId: 'rest:$entryId',
+          userId: 'user_test',
+          kind: SyncOperationKind.restore,
+          state: SyncOperationState.sending,
+          dedupeKey: 'rest:$entryId',
+          createdAtMs: 1,
+          updatedAtMs: 1,
+          attemptCount: 0,
+          nextAttemptAtMs: 1,
+          payload: <String, dynamic>{
+            'entryId': entryId,
+            'sourceDevice': sourceDevice,
+            'sourceDeviceName': 'Mac A',
+            'sourcePlatform': 'macos',
+            'timestamp': 1,
+          },
+        );
+
+    test('delete op 只推给 supportsOps 的 peer，帧为 op 帧且无 row', () async {
+      discovery.candidatesResult = [_peer('peer-b'), _peer('peer-c')];
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      transport.peerSupportsOpsResult = false;
+
+      await manager.pushOperation(_deleteOp('entry-1'));
+
+      expect(transport.pushedOpsTo, isEmpty);
+      expect(transport.pushedTo, isEmpty, reason: 'delete 不走内容 push');
+
+      // 支持 ops 的 peer 收到 op 帧
+      transport.peerSupportsOpsResult = true;
+      await manager.pushOperation(_deleteOp('entry-2'));
+      expect(transport.pushedOpsTo, hasLength(2));
+      final frame = transport.pushedOpFrames.first;
+      expect(frame['type'], 'op');
+      expect(frame['op']['kind'], 'delete');
+      expect(frame['op']['operationId'], 'del:entry-2');
+      expect(frame['op']['entryId'], 'entry-2');
+      expect(frame['op'].containsKey('row'), isFalse);
+      // 红线：op 帧不含 userId/敏感字段
+      expect(frame['op'].containsKey('userId'), isFalse);
+    });
+
+    test('restore op 携带服务端 commit 响应 row（server-shape）', () async {
+      discovery.candidatesResult = [_peer('peer-b')];
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final row = <String, dynamic>{
+        'id': 'entry-3',
+        'content': 'cipher',
+        'type': 'text',
+      };
+
+      await manager.pushOperation(
+        _restoreOp('entry-3'),
+        response: {'seq': 5, 'row': row},
+      );
+
+      expect(transport.pushedOpsTo, ['peer-b']);
+      final op = transport.pushedOpFrames.single['op'] as Map<String, dynamic>;
+      expect(op['kind'], 'restore');
+      expect(op['operationId'], 'rest:entry-3');
+      expect(op['row'], row);
+    });
+
+    test('不回推来源设备（payload.sourceDevice == peerId 跳过）', () async {
+      discovery.candidatesResult = [_peer('device-a'), _peer('device-c')];
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      await manager.pushOperation(_deleteOp('entry-4'));
+
+      // sourceDevice=device-a：peer(device-a) 被跳过，只推 device-c
+      expect(transport.pushedOpsTo, ['device-c']);
+    });
+
+    test('_handleOpReceived 经 _knownOpIds 去重，delete/restore 各触发一次回调', () async {
+      final manager = createManager();
+      await manager.start(
+        userId: 'user_test',
+        deviceId: 'device-a',
+        accountKey: Uint8List(32),
+      );
+      final deleted = <String>[];
+      final restored = <Map<String, dynamic>>[];
+      manager.onDeleteOpReceived = (entryId) => deleted.add(entryId);
+      manager.onRestoreOpReceived = (row) => restored.add(row);
+
+      final deleteFrame = <String, dynamic>{
+        'v': 1,
+        'type': 'op',
+        'op': {
+          'kind': 'delete',
+          'operationId': 'del:rx-1',
+          'entryId': 'rx-1',
+        },
+      };
+      transport.onOpReceived?.call(deleteFrame);
+      transport.onOpReceived?.call(deleteFrame); // 重复 → 去重
+
+      final restoreFrame = <String, dynamic>{
+        'v': 1,
+        'type': 'op',
+        'op': {
+          'kind': 'restore',
+          'operationId': 'rest:rx-2',
+          'entryId': 'rx-2',
+          'row': {'id': 'rx-2', 'type': 'text'},
+        },
+      };
+      transport.onOpReceived?.call(restoreFrame);
+
+      expect(deleted, ['rx-1']);
+      expect(restored, hasLength(1));
+      expect(restored.single['id'], 'rx-2');
+    });
+  });
+
 }
 

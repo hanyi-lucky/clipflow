@@ -91,6 +91,7 @@ class _LanSession {
     required this.connection,
     required this.isInitiator,
     required this.peerSupportsAcks,
+    this.peerSupportsOps = false,
   });
 
   final String peerDeviceId;
@@ -102,6 +103,10 @@ class _LanSession {
   /// 对端 hello 是否携带 `acks:1`（Phase 2.3）。旧 peer → false →
   /// 本端不回 ack、不等待 ack（Phase 2.2 写后即返回语义）。
   final bool peerSupportsAcks;
+
+  /// 对端 hello 是否携带 `ops:1`（Phase 5.2）。旧 peer → false →
+  /// 本端绝不发 op 帧（旧 peer 未知帧会断链自愈）。
+  final bool peerSupportsOps;
 
   /// 读串行化：fetchLatest 与 ack-wait 互斥（单订阅流硬约束）。
   final LanReaderSlot readerSlot = LanReaderSlot();
@@ -361,6 +366,10 @@ class LanTransport {
   /// 会话被丢弃（帧错误/超时）时回调（预留诊断）。
   void Function(String peerDeviceId)? onSessionDropped;
 
+  /// responder 收到 peer 的 `op` 帧（delete/restore）时回调（Phase 5.2）。
+  /// op 帧无 ack、不进 LAN outbox（fire-once；对端离线由 Cloud 游标兜底）。
+  void Function(Map<String, dynamic> frame)? onOpReceived;
+
   /// 启动 responder 服务，返回绑定的临时端口（供 mDNS 广告）。
   Future<int> startServer({
     required String deviceId,
@@ -446,6 +455,7 @@ class LanTransport {
         connection: connection,
         isInitiator: false,
         peerSupportsAcks: peerSupportsAcks,
+        peerSupportsOps: session.peerSupportsOps,
       );
       fileReceiver = LanFileReceiver(
         sink: fileSink,
@@ -496,6 +506,10 @@ class LanTransport {
           if (!fileReceiver.handleFileStart(frame)) break;
         } else if (type == 'fileChunk') {
           if (!fileReceiver.handleFileChunk(frame)) break;
+        } else if (type == 'op') {
+          // Phase 5.2：delete/restore op 帧（只对声明 ops 的 peer 发，旧 peer
+          // 未知帧会断链自愈）。无 ack；应用由 manager/Provider 幂等去重。
+          onOpReceived?.call(frame);
         } else {
           break;
         }
@@ -562,6 +576,7 @@ class LanTransport {
         connection: connection,
         isInitiator: true,
         peerSupportsAcks: session.peerSupportsAcks,
+        peerSupportsOps: session.peerSupportsOps,
       );
     } catch (e) {
       socket.destroy();
@@ -615,6 +630,29 @@ class LanTransport {
   /// 旧 peer / 无会话 → false（Phase 2.2 写后即返回语义）。
   bool supportsAcks(String peerDeviceId) =>
       _initiatorSessions[peerDeviceId]?.peerSupportsAcks ?? false;
+
+  /// 该 peer 的 initiator 会话是否支持 ops（hello 携带 `ops:1`）。
+  /// 旧 peer / 无会话 → false（Phase 5.2：只对声明 ops 的 peer 发 op 帧）。
+  bool supportsOps(String peerDeviceId) =>
+      _initiatorSessions[peerDeviceId]?.peerSupportsOps ?? false;
+
+  /// 向 [peerDeviceId] 推送 delete/restore `op` 帧（fire-once，无 ack、不落
+  /// outbox；对端离线由 Cloud 500ms 游标兜底）。无会话 → 静默跳过。
+  Future<void> pushOp(String peerDeviceId, Map<String, dynamic> opFrame) async {
+    final session = _initiatorSessions[peerDeviceId];
+    if (session == null) return;
+    try {
+      session.connection.write({
+        'v': LanConstants.lanProtoVersion,
+        'type': 'op',
+        'op': opFrame,
+      });
+    } on LanProtocolException {
+      _dropInitiatorSession(peerDeviceId);
+    } on SocketException {
+      _dropInitiatorSession(peerDeviceId);
+    }
+  }
 
   /// 向 [peerDeviceId] 推送一行。
   ///

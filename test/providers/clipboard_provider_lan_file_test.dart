@@ -115,7 +115,10 @@ class _FakeLanFileManager extends LanSyncManager {
   bool get hasVerifiedPeers => hasVerifiedPeersValue;
 
   @override
-  Future<void> pushOperation(SyncOperation op) async {
+  Future<void> pushOperation(
+    SyncOperation op, {
+    Map<String, dynamic>? response,
+  }) async {
     pushed.add(op);
   }
 

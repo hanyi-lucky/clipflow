@@ -154,7 +154,10 @@ class _FakeLanSyncManager extends LanSyncManager {
   }
 
   @override
-  Future<void> pushOperation(SyncOperation op) async {
+  Future<void> pushOperation(
+    SyncOperation op, {
+    Map<String, dynamic>? response,
+  }) async {
     pushed.add(op);
   }
 
@@ -777,4 +780,65 @@ void main() {
       restarted.dispose();
     });
   });
+  group('LAN delete/restore op 回调应用（Phase 5.2）', () {
+    test('onDeleteOpReceived 移除本地历史并落盘', () async {
+      final lanManager = _FakeLanSyncManager();
+      final provider = await createProvider(lanManager);
+      // 预置一条本地历史
+      provider.historyService.addEntry(
+        ClipboardEntry(
+          id: 'lan-del-1',
+          content: 'to delete via LAN',
+          sourceDeviceId: 'local',
+          sourceDeviceName: 'Local',
+          sourcePlatform: 'macos',
+          timestamp: DateTime.fromMillisecondsSinceEpoch(1700000000000),
+          type: ContentType.text,
+        ),
+      );
+      await waitFor(
+        provider,
+        () => lanManager.onDeleteOpReceived != null,
+        message: 'LAN delete callback should be wired',
+      );
+
+      lanManager.onDeleteOpReceived!.call('lan-del-1');
+
+      await waitFor(
+        provider,
+        () => !provider.history.any((e) => e.id == 'lan-del-1'),
+        message: 'LAN delete op should remove the local entry',
+      );
+      provider.dispose();
+    });
+
+    test('onRestoreOpReceived 经 _handleRestoredEntries 重建条目', () async {
+      final lanManager = _FakeLanSyncManager();
+      final provider = await createProvider(lanManager);
+      await waitFor(
+        provider,
+        () => lanManager.onRestoreOpReceived != null,
+        message: 'LAN restore callback should be wired',
+      );
+      final textEnc = await encryption.encrypt('restored via LAN', key);
+
+      lanManager.onRestoreOpReceived!.call({
+        'id': 'lan-rest-1',
+        'content': textEnc.toBase64(),
+        'type': 'text',
+        'source_device': 'peer-x',
+        'source_device_name': 'Peer X',
+        'source_platform': 'android',
+        'timestamp': 1700000001000,
+      });
+
+      await waitFor(
+        provider,
+        () => provider.history.any((e) => e.id == 'lan-rest-1'),
+        message: 'LAN restore op should rebuild the entry',
+      );
+      provider.dispose();
+    });
+  });
+
 }

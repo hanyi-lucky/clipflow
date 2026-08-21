@@ -76,6 +76,7 @@ class LanSyncManager {
       );
     };
     _transport.onFilePushReceived = _handleFilePushReceived;
+    _transport.onOpReceived = _handleOpReceived;
   }
 
   late final LanDiscoveryService _discovery;
@@ -104,6 +105,16 @@ class LanSyncManager {
   /// historyId 去重（≤200，防 push/fetch 重复缓存）。
   final Set<String> _knownHistoryIds = {};
   static const int _maxKnownHistoryIds = 200;
+
+  /// operationId 去重（≤200，镜像 `_knownHistoryIds`）：op 帧幂等应用。
+  final Set<String> _knownOpIds = {};
+  static const int _maxKnownOpIds = 200;
+
+  /// Provider 注册：收到 delete op 帧（服务端已 durable 提交）→ 本地移除条目。
+  void Function(String entryId)? onDeleteOpReceived;
+
+  /// Provider 注册：收到 restore op 帧（带服务端权威 row）→ 重建条目。
+  void Function(Map<String, dynamic> row)? onRestoreOpReceived;
 
   int _roundRobinIndex = 0;
 
@@ -488,15 +499,19 @@ class LanSyncManager {
   /// file 分支守卫：明文 ≤15MiB 且 artifact（`.enc`）存在才走 LAN，否则
   /// Cloud-only（Cloud 已 durable 提交，LAN 本 best-effort）。密文从
   /// artifact 流式读取分块，绝不整文件进内存。
-  Future<void> pushOperation(SyncOperation op) async {
+  Future<void> pushOperation(
+    SyncOperation op, {
+    Map<String, dynamic>? response,
+  }) async {
     if (!_enabled || _disposed || _userId == null) return;
     try {
-      if (op.kind == SyncOperationKind.file) {
-        await _pushFileOperation(op);
+      if (op.kind == SyncOperationKind.delete ||
+          op.kind == SyncOperationKind.restore) {
+        await _pushOpOperation(op, response: response);
         return;
       }
-      if (op.kind != SyncOperationKind.text &&
-          op.kind != SyncOperationKind.image) {
+      if (op.kind == SyncOperationKind.file) {
+        await _pushFileOperation(op);
         return;
       }
       await _ensureConnectedPeers();
@@ -614,6 +629,83 @@ class LanSyncManager {
         _registerPending(entry);
       }
     }
+  }
+
+  /// delete/restore op 帧推送（best-effort，Cloud 500ms 是可靠性层）。
+  ///
+  /// - 帧：`{v, type:'op', op:{kind, operationId, entryId, row?}}`；
+  ///   row 仅 restore 携带（服务端 commit 响应行，server-shape；file 行
+  ///   content=''，无明文文件名——LAN 红线保持）；
+  /// - 只对 supportsOps 的 peer 发（旧 peer 未知帧会断链自愈）；
+  /// - 不进 LAN outbox、不等 ack（fire-once；对端离线由 Cloud 游标兜底）；
+  /// - 不回推来源设备（payload.sourceDevice == peerId 跳过）。
+  Future<void> _pushOpOperation(
+    SyncOperation op, {
+    Map<String, dynamic>? response,
+  }) async {
+    final entryId = op.payload['entryId'] as String?;
+    if (entryId == null || entryId.isEmpty) return;
+    await _ensureConnectedPeers();
+    final kind = op.kind == SyncOperationKind.delete ? 'delete' : 'restore';
+    final opFrame = <String, dynamic>{
+      'kind': kind,
+      'operationId': op.operationId,
+      'entryId': entryId,
+    };
+    if (op.kind == SyncOperationKind.restore) {
+      final row = response?['row'];
+      if (row is Map<String, dynamic>) {
+        opFrame['row'] = row;
+      }
+    }
+    if (_registerOpId(op.operationId)) return; // 已推过，去重
+    final sourceDevice = op.payload['sourceDevice'] as String? ?? '';
+    for (final peerId in _transport.verifiedPeerIds) {
+      if (peerId == sourceDevice) continue; // 不回推来源设备
+      if (!_transport.supportsOps(peerId)) continue; // 旧 peer 不发 op 帧
+      try {
+        await _transport.pushOp(peerId, opFrame);
+        _diagnostics.pushSent++;
+      } catch (e) {
+        debugPrint('[LAN] pushOp to $peerId failed: $e');
+      }
+    }
+  }
+
+  /// 收到 peer `op` 帧：去重（_knownOpIds ≤200）→ Provider 回调应用。
+  /// 语义与 Cloud 统一（同一 opId/entryId 幂等应用）；异常只日志，绝不 rethrow。
+  void _handleOpReceived(Map<String, dynamic> frame) {
+    if (!_enabled || _disposed) return;
+    try {
+      final op = frame['op'];
+      if (op is! Map<String, dynamic>) return;
+      final kind = op['kind'];
+      final operationId = op['operationId'];
+      final entryId = op['entryId'];
+      if (operationId is! String || entryId is! String) return;
+      if (_registerOpId(operationId)) return; // 重复 op 帧不重复应用
+      if (kind == 'delete') {
+        onDeleteOpReceived?.call(entryId);
+      } else if (kind == 'restore') {
+        final row = op['row'];
+        if (row is Map<String, dynamic>) {
+          onRestoreOpReceived?.call(Map<String, dynamic>.from(row));
+        }
+      }
+    } catch (e) {
+      debugPrint('[LAN] op frame apply failed: $e');
+    }
+  }
+
+  /// 返回 true 表示该 operationId 已见过（重复）；新 id 会被登记（≤200）。
+  bool _registerOpId(String operationId) {
+    if (operationId.isEmpty) return true;
+    if (_knownOpIds.contains(operationId)) return true;
+    _knownOpIds.add(operationId);
+    while (_knownOpIds.length > _maxKnownOpIds) {
+      _knownOpIds.remove(_knownOpIds.first);
+    }
+    return false;
   }
 
   /// 收到 peer push 帧：去重 → 更新缓存 → 通知 Provider 立即下载。

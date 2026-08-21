@@ -49,6 +49,7 @@ class LanSession {
     required this.peerDeviceId,
     required this.expiresAtMs,
     required this.peerSupportsAcks,
+    this.peerSupportsOps = false,
   });
 
   final String peerDeviceId;
@@ -57,6 +58,10 @@ class LanSession {
   /// 对端 hello 是否携带 `acks:1`（Phase 2.3 fileAck 能力协商）。
   /// 旧 peer（无该字段）→ false → 本端不回 ack、不等待 ack，维持 Phase 2.2 语义。
   final bool peerSupportsAcks;
+
+  /// 对端 hello 是否携带 `ops:1`（Phase 5.2 delete/restore op 帧能力协商）。
+  /// 旧 peer（无该字段）→ false → 本端绝不发 op 帧（旧 peer 未知帧会断链）。
+  final bool peerSupportsOps;
 }
 
 /// 测试 seam：自定义 hello 帧（模拟旧 peer 缺 acks 字段等）。
@@ -237,12 +242,15 @@ class LanHandshakeService {
         'nonce': myNonce,
         // 可忽略字段：旧 peer 忽略多余字段（Phase 2.3 fileAck 能力协商）。
         'acks': LanConstants.lanCapabilityAcks,
+        // Phase 5.2 delete/restore op 帧能力协商；旧 peer 忽略多余字段。
+        'ops': LanConstants.lanCapabilityOps,
       };
     }
 
     String peerNonce;
     String peerDeviceId;
     bool peerSupportsAcks = false;
+    bool peerSupportsOps = false;
     try {
       if (isInitiator) {
         connection.write(helloMessage());
@@ -250,11 +258,13 @@ class LanHandshakeService {
         peerNonce = _stringField(peerHello, 'nonce');
         peerDeviceId = _stringField(peerHello, 'deviceId');
         peerSupportsAcks = peerHello['acks'] == LanConstants.lanCapabilityAcks;
+        peerSupportsOps = peerHello['ops'] == LanConstants.lanCapabilityOps;
       } else {
         final peerHello = await connection.read();
         peerNonce = _stringField(peerHello, 'nonce');
         peerDeviceId = _stringField(peerHello, 'deviceId');
         peerSupportsAcks = peerHello['acks'] == LanConstants.lanCapabilityAcks;
+        peerSupportsOps = peerHello['ops'] == LanConstants.lanCapabilityOps;
         connection.write(helloMessage());
       }
     } on LanProtocolException catch (e) {
@@ -320,6 +330,7 @@ class LanHandshakeService {
       peerDeviceId: peerVerified.deviceId,
       expiresAtMs: peerVerified.expiresAtMs,
       peerSupportsAcks: peerSupportsAcks,
+      peerSupportsOps: peerSupportsOps,
     );
   }
 
