@@ -902,8 +902,94 @@ function rebuildFromSnapshot(userId, entryId, snap) {
     );
 }
 
+// 解析 operationId：`del:<id>` / `rest:<id>`，容忍周期后缀 `#<n>`
+// （删除→恢复→再删除等周期事件生成唯一 opId，绕开 UNIQUE(user_id, operation_id)）。
+// entryId 为 UUID，`#` 不会出现在其中，取 `#` 前部分即为真实 entryId。
+// 返回 { kind, entryId }；格式非法返回 null。
+function parseSyncOperationId(operationId) {
+  if (typeof operationId !== 'string') return null;
+  let kind = null;
+  let offset = 0;
+  if (operationId.startsWith('del:')) { kind = 'delete'; offset = 4; }
+  else if (operationId.startsWith('rest:')) { kind = 'restore'; offset = 5; }
+  else return null;
+  let rest = operationId.slice(offset);
+  const hashIdx = rest.indexOf('#');
+  if (hashIdx >= 0) rest = rest.slice(0, hashIdx);
+  if (rest.length === 0) return null;
+  return { kind, entryId: rest };
+}
+
+// 生成下一个周期 opId：`<base>#<maxN+1>`（base = `del:<id>` / `rest:<id>`）。
+// 扫描已存在的 `base#<n>` 后缀取最大值 +1，客户端与服务端各自生成的周期 opId 共存不冲突。
+function nextCycleOperationId(userId, baseOperationId) {
+  const prefix = baseOperationId + '#';
+  const rows = db.prepare('SELECT operation_id FROM sync_operations WHERE user_id = ? AND operation_id LIKE ?')
+    .all(userId, prefix + '%');
+  let maxN = 0;
+  for (const r of rows) {
+    const n = Number.parseInt(r.operation_id.slice(prefix.length), 10);
+    if (Number.isFinite(n) && n > maxN) maxN = n;
+  }
+  return prefix + (maxN + 1);
+}
+
+// 删除事件：服务端自建全列快照 + 置 deleted_at + 写 op log。
+// 返回新 seq；未知条目/无 tombstone 返回 null（调用方按 ignored 处理）。
+function commitDeleteEvent(userId, operationId, entryId, payload, now) {
+  const row = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+    .get(entryId, userId);
+  if (!row) return null;
+  return db.transaction(() => {
+    const info = db.prepare(`INSERT INTO sync_operations (operation_id, user_id, kind, entry_id, payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(operationId, userId, 'delete', entryId,
+        payload ? JSON.stringify(payload) : null, now);
+    const opSeq = Number(info.lastInsertRowid);
+    db.prepare(`INSERT OR REPLACE INTO sync_tombstones (user_id, entry_id, entry_type, deleted_at, restored_at, seq, snapshot)
+      VALUES (?, ?, ?, ?, NULL, ?, ?)`)
+      .run(userId, entryId, row.type || 'text', now, opSeq, JSON.stringify(row));
+    db.prepare('UPDATE history SET deleted_at = ? WHERE id = ? AND user_id = ?')
+      .run(now, entryId, userId);
+    return opSeq;
+  })();
+}
+
+// 恢复事件：现行行恢复 or 快照重建 + 标记 tombstone restored_at + 写 op log。
+// 返回新 seq；未知条目/无快照返回 null（调用方按 ignored 处理）。
+function commitRestoreEvent(userId, operationId, entryId, payload, now) {
+  const current = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+    .get(entryId, userId);
+  const tomb = db.prepare('SELECT * FROM sync_tombstones WHERE user_id = ? AND entry_id = ?')
+    .get(userId, entryId);
+  if (!current && !(tomb && tomb.snapshot)) return null;
+  return db.transaction(() => {
+    if (current) {
+      db.prepare('UPDATE history SET deleted_at = NULL, restored_at = ? WHERE id = ? AND user_id = ?')
+        .run(now, entryId, userId);
+    } else {
+      let snap = null;
+      try { snap = JSON.parse(tomb.snapshot); } catch (err) { snap = null; }
+      if (snap) rebuildFromSnapshot(userId, entryId, snap);
+    }
+    const info = db.prepare(`INSERT INTO sync_operations (operation_id, user_id, kind, entry_id, payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(operationId, userId, 'restore', entryId,
+        payload ? JSON.stringify(payload) : null, now);
+    const opSeq = Number(info.lastInsertRowid);
+    // 标记 tombstone 已恢复（保留快照供 24h 内再次物理删除后恢复）
+    if (tomb) {
+      db.prepare('UPDATE sync_tombstones SET restored_at = ? WHERE user_id = ? AND entry_id = ?')
+        .run(now, userId, entryId);
+    }
+    return opSeq;
+  })();
+}
+
 // 提交删除/恢复操作：幂等（duplicate）、冲突拒绝（409）、未知条目忽略（ignored）。
-// 删除分支服务端自建全列快照（客户端不上传行数据，LAN 红线无忧）。
+// 周期检测：同 opId 再次提交时按「当前状态与 op 意图是否匹配」判定——
+// delete 时条目当前活跃（已被恢复）→ 视为新删除事件（周期后缀 opId 绕开 UNIQUE）；
+// restore 时条目当前已删（被再次删除）→ 视为新恢复事件。兼容无周期计数的旧客户端。
 app.post('/api/sync/commit', authenticate, (req, res) => {
   const { operationId, kind, entryId, payload } = req.body || {};
 
@@ -912,23 +998,48 @@ app.post('/api/sync/commit', authenticate, (req, res) => {
     return res.json({ code: 'ERROR', message: 'operationId, kind, entryId are required' });
   }
 
-  let expectedKind = null;
-  let derivedId = null;
-  if (operationId.startsWith('del:')) { expectedKind = 'delete'; derivedId = operationId.slice(4); }
-  else if (operationId.startsWith('rest:')) { expectedKind = 'restore'; derivedId = operationId.slice(5); }
-  else {
+  const parsed = parseSyncOperationId(operationId);
+  if (!parsed) {
     return res.json({ code: 'ERROR', message: 'operationId must be del:<id> or rest:<id>' });
   }
-  if (kind !== expectedKind) {
+  if (kind !== parsed.kind) {
     return res.json({ code: 'ERROR', message: 'kind does not match operationId prefix' });
   }
 
-  // 幂等：同 (user, operationId) 已存在 → duplicate（restore 额外带 row 供重放）；kind/entryId 不一致 → 409
+  // 幂等：同 (user, operationId) 已存在 → duplicate（restore 额外带 row 供重放）；
+  // kind/entryId 不一致 → 409（优先于 entryId 语法校验，保持旧语义）。
   const existing = db.prepare('SELECT * FROM sync_operations WHERE user_id = ? AND operation_id = ?')
     .get(req.userId, operationId);
   if (existing) {
     if (existing.kind !== kind || existing.entry_id !== entryId) {
       return res.status(409).json({ code: 'CONFLICT', message: 'operationId already used with different kind/entryId' });
+    }
+    const now = Date.now();
+    if (kind === 'delete') {
+      const cur = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+        .get(entryId, req.userId);
+      if (cur && cur.deleted_at === null) {
+        // 当前活跃（已被 restore 过）→ 新删除事件
+        const cycleOpId = nextCycleOperationId(req.userId, 'del:' + entryId);
+        const seq = commitDeleteEvent(req.userId, cycleOpId, entryId, payload, now);
+        if (seq === null) {
+          return res.json({ code: 'SUCCESS', data: { ignored: true, seq: null } });
+        }
+        return res.json({ code: 'SUCCESS', data: { seq } });
+      }
+    } else if (kind === 'restore') {
+      const cur = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+        .get(entryId, req.userId);
+      if (cur && cur.deleted_at !== null) {
+        // 当前已删（被再次删除过）→ 新恢复事件
+        const cycleOpId = nextCycleOperationId(req.userId, 'rest:' + entryId);
+        const seq = commitRestoreEvent(req.userId, cycleOpId, entryId, payload, now);
+        if (seq === null) {
+          return res.json({ code: 'SUCCESS', data: { ignored: true, seq: null, row: null } });
+        }
+        const row = resolveRestoreRow(req.userId, entryId);
+        return res.json({ code: 'SUCCESS', data: { seq, row } });
+      }
     }
     const row = kind === 'restore' ? resolveRestoreRow(req.userId, entryId) : null;
     const data = { duplicate: true, seq: existing.seq };
@@ -936,68 +1047,27 @@ app.post('/api/sync/commit', authenticate, (req, res) => {
     return res.json({ code: 'SUCCESS', data });
   }
 
-  if (entryId !== derivedId) {
+  if (entryId !== parsed.entryId) {
     return res.json({ code: 'ERROR', message: 'entryId does not match operationId' });
   }
 
   const now = Date.now();
 
   if (kind === 'delete') {
-    const row = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
-      .get(entryId, req.userId);
-    if (!row) {
+    const seq = commitDeleteEvent(req.userId, operationId, entryId, payload, now);
+    if (seq === null) {
       // 未知条目/无 tombstone：SUCCESS + ignored，不写 log、不产生噪音
       return res.json({ code: 'SUCCESS', data: { ignored: true, seq: null } });
     }
-    const seq = db.transaction(() => {
-      const info = db.prepare(`INSERT INTO sync_operations (operation_id, user_id, kind, entry_id, payload, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(operationId, req.userId, 'delete', entryId,
-          payload ? JSON.stringify(payload) : null, now);
-      const opSeq = Number(info.lastInsertRowid);
-      db.prepare(`INSERT OR REPLACE INTO sync_tombstones (user_id, entry_id, entry_type, deleted_at, restored_at, seq, snapshot)
-        VALUES (?, ?, ?, ?, NULL, ?, ?)`)
-        .run(req.userId, entryId, row.type || 'text', now, opSeq, JSON.stringify(row));
-      db.prepare('UPDATE history SET deleted_at = ? WHERE id = ? AND user_id = ?')
-        .run(now, entryId, req.userId);
-      return opSeq;
-    })();
     return res.json({ code: 'SUCCESS', data: { seq } });
   }
 
   // restore 分支
-  const current = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
-    .get(entryId, req.userId);
-  const tomb = db.prepare('SELECT * FROM sync_tombstones WHERE user_id = ? AND entry_id = ?')
-    .get(req.userId, entryId);
-
-  if (!current && !(tomb && tomb.snapshot)) {
+  const seq = commitRestoreEvent(req.userId, operationId, entryId, payload, now);
+  if (seq === null) {
     // 未知条目/无快照：SUCCESS + ignored + row:null
     return res.json({ code: 'SUCCESS', data: { ignored: true, seq: null, row: null } });
   }
-
-  const seq = db.transaction(() => {
-    if (current) {
-      db.prepare('UPDATE history SET deleted_at = NULL, restored_at = ? WHERE id = ? AND user_id = ?')
-        .run(now, entryId, req.userId);
-    } else {
-      let snap = null;
-      try { snap = JSON.parse(tomb.snapshot); } catch (err) { snap = null; }
-      if (snap) rebuildFromSnapshot(req.userId, entryId, snap);
-    }
-    const info = db.prepare(`INSERT INTO sync_operations (operation_id, user_id, kind, entry_id, payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(operationId, req.userId, 'restore', entryId,
-        payload ? JSON.stringify(payload) : null, now);
-    const opSeq = Number(info.lastInsertRowid);
-    // 标记 tombstone 已恢复（保留快照供 24h 内再次物理删除后恢复）
-    if (tomb) {
-      db.prepare('UPDATE sync_tombstones SET restored_at = ? WHERE user_id = ? AND entry_id = ?')
-        .run(now, req.userId, entryId);
-    }
-    return opSeq;
-  })();
-
   const row = resolveRestoreRow(req.userId, entryId);
   return res.json({ code: 'SUCCESS', data: { seq, row } });
 });

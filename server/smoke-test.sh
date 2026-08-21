@@ -1021,5 +1021,117 @@ if (t !== 0) { console.error("FAIL: old tombstone not pruned, count=" + t); proc
 console.log("    ok (old op + tombstone pruned on startup)");
 db.close();
 ' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_GC_ID}"
+echo "==> 34. 删除→恢复→再删除周期：第二次删除/恢复必须产生新 op（新 seq）并置位 deleted_at，changes 下发；重复提交幂等保持"
+SYNC_CYCLE_ID="smoke-sync-cycle-1"
+curl -fsS -X POST "${BASE}/clipboard" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"content\":\"SYNC_CYCLE_CIPHER\",\"hash\":\"HASH_SYNC_CYCLE_1\",\"type\":\"text\",\"historyId\":\"${SYNC_CYCLE_ID}\",\"sourceDevice\":\"smoke-device\",\"sourceDeviceName\":\"Smoke Mac\",\"sourcePlatform\":\"macos\",\"timestamp\":1700000014000}" \
+  >/dev/null
+commit_op() {
+  # $1 = operationId, $2 = kind, $3 = entryId；输出 JSON data（含 seq/duplicate）
+  curl -fsS -X POST "${BASE}/sync/commit" -H "$AUTH" -H 'Content-Type: application/json' \
+    -d "{\"operationId\":\"$1\",\"kind\":\"$2\",\"entryId\":\"$3\"}"
+}
+# 第一轮：delete → restore
+CYCLE_DEL1=$(commit_op "del:${SYNC_CYCLE_ID}" "delete" "${SYNC_CYCLE_ID}" | node -e 'let s="";process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"||typeof j.data.seq!=="number"){console.error("FAIL cycle del1: "+s);process.exit(1)}process.stdout.write(String(j.data.seq))})')
+CYCLE_REST1=$(commit_op "rest:${SYNC_CYCLE_ID}" "restore" "${SYNC_CYCLE_ID}" | node -e 'let s="";process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"||typeof j.data.seq!=="number"){console.error("FAIL cycle rest1: "+s);process.exit(1)}process.stdout.write(String(j.data.seq))})')
+# 第二次删除：必须产生新 op（新 seq），不得 duplicate
+CYCLE_DEL2=$(commit_op "del:${SYNC_CYCLE_ID}" "delete" "${SYNC_CYCLE_ID}" | node -e 'let s="";process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"){console.error("FAIL cycle del2: "+s);process.exit(1)}if(j.data.duplicate===true){console.error("FAIL: second delete swallowed as duplicate: "+s);process.exit(1)}if(typeof j.data.seq!=="number"||j.data.seq<=Number(process.argv[1])){console.error("FAIL: second delete seq not new: "+s);process.exit(1)}process.stdout.write(String(j.data.seq))})' "${CYCLE_REST1}")
+echo "    ok (del1=${CYCLE_DEL1} rest1=${CYCLE_REST1} del2=${CYCLE_DEL2}: new event, not duplicate)"
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const id = process.argv[3];
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(id);
+if (!h || typeof h.deleted_at !== "number") { console.error("FAIL: deleted_at not set after second delete"); process.exit(1); }
+const ops = db.prepare("SELECT operation_id, kind FROM sync_operations WHERE entry_id = ? ORDER BY seq").all(id);
+const ids = ops.map(o => o.operation_id);
+if (!ids.includes("del:" + id) || !ids.includes("rest:" + id) || !ids.includes("del:" + id + "#1")) {
+  console.error("FAIL: op log missing cycle ops: " + JSON.stringify(ids)); process.exit(1);
+}
+if (ops.length !== 3) { console.error("FAIL: op log count = " + ops.length + ", expected 3"); process.exit(1); }
+const t = db.prepare("SELECT * FROM sync_tombstones WHERE entry_id = ?").get(id);
+if (!t || t.restored_at !== null) { console.error("FAIL: tombstone restored_at not reset to NULL after second delete"); process.exit(1); }
+console.log("    ok (deleted_at set, op log = " + ids.join(",") + ", tombstone restored_at NULL)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_CYCLE_ID}"
+curl -fsS "${BASE}/sync/changes?after=0" -H "$AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const id=process.argv[1];
+  const ch=(j.data.changes||[]).find(c=>c.operationId==="del:"+id+"#1");
+  if(!ch){console.error("FAIL: second delete op missing in changes: "+s);process.exit(1)}
+  if(ch.kind!=="delete"||ch.entryId!==id){console.error("FAIL: cycle delete change fields: "+JSON.stringify(ch));process.exit(1)}
+  console.log("    ok (changes has del:"+id+"#1)");
+})' "${SYNC_CYCLE_ID}"
+# 幂等重放保持：重复提交 del:<id>#1（网络重试）→ duplicate:true，不产生新 op
+commit_op "del:${SYNC_CYCLE_ID}#1" "delete" "${SYNC_CYCLE_ID}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.data.duplicate!==true){console.error("FAIL: retry of del:#1 should be duplicate: "+s);process.exit(1)}
+  console.log("    ok (retry del:"+process.argv[1]+"#1 -> duplicate:true, idempotent)");
+})' "${SYNC_CYCLE_ID}"
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const n = db.prepare("SELECT COUNT(*) AS n FROM sync_operations WHERE entry_id = ?").get(process.argv[3]).n;
+if (n !== 3) { console.error("FAIL: retry added op row, count=" + n); process.exit(1); }
+console.log("    ok (op log still 3 rows after retry)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_CYCLE_ID}"
+# 再恢复：必须产生新 op（新 seq），不得 duplicate；deleted_at 归 NULL
+CYCLE_REST2=$(commit_op "rest:${SYNC_CYCLE_ID}" "restore" "${SYNC_CYCLE_ID}" | node -e 'let s="";process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"){console.error("FAIL cycle rest2: "+s);process.exit(1)}if(j.data.duplicate===true){console.error("FAIL: second restore swallowed as duplicate: "+s);process.exit(1)}if(typeof j.data.seq!=="number"||j.data.seq<=Number(process.argv[1])){console.error("FAIL: second restore seq not new: "+s);process.exit(1)}if(!j.data.row||j.data.row.deleted_at!==null){console.error("FAIL: second restore row deleted_at: "+s);process.exit(1)}process.stdout.write(String(j.data.seq))})' "${CYCLE_DEL2}")
+echo "    ok (rest2=${CYCLE_REST2}: new event, not duplicate, row active)"
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const id = process.argv[3];
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(id);
+if (!h || h.deleted_at !== null) { console.error("FAIL: deleted_at not NULL after second restore"); process.exit(1); }
+const ids = db.prepare("SELECT operation_id FROM sync_operations WHERE entry_id = ?").all(id).map(r=>r.operation_id);
+if (!ids.includes("rest:" + id + "#1")) { console.error("FAIL: rest:#1 op missing: " + JSON.stringify(ids)); process.exit(1); }
+if (ids.length !== 4) { console.error("FAIL: op log count = " + ids.length + ", expected 4"); process.exit(1); }
+console.log("    ok (deleted_at NULL after second restore, op log = " + ids.join(",") + ")");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_CYCLE_ID}"
+# 多轮：第三次 delete（同 base opId）→ 继续生成新周期后缀 del:<id>#2
+CYCLE_DEL3=$(commit_op "del:${SYNC_CYCLE_ID}" "delete" "${SYNC_CYCLE_ID}" | node -e 'let s="";process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"||j.data.duplicate===true||typeof j.data.seq!=="number"){console.error("FAIL cycle del3: "+s);process.exit(1)}process.stdout.write(String(j.data.seq))})')
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const id = process.argv[3];
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(id);
+if (!h || typeof h.deleted_at !== "number") { console.error("FAIL: deleted_at not set after third delete"); process.exit(1); }
+const ids = db.prepare("SELECT operation_id FROM sync_operations WHERE entry_id = ?").all(id).map(r=>r.operation_id);
+if (!ids.includes("del:" + id + "#2")) { console.error("FAIL: del:#2 op missing: " + JSON.stringify(ids)); process.exit(1); }
+if (ids.length !== 5) { console.error("FAIL: op log count = " + ids.length + ", expected 5"); process.exit(1); }
+console.log("    ok (del3=" + process.argv[4] + ": del:" + id + "#2 generated, deleted_at set, op log=" + ids.join(",") + ")");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_CYCLE_ID}" "${CYCLE_DEL3}"
+# 第二轮恢复（rest base opId）→ 新事件 rest:<id>#2；deleted_at 归 NULL，闭环多轮收敛
+CYCLE_REST3=$(commit_op "rest:${SYNC_CYCLE_ID}" "restore" "${SYNC_CYCLE_ID}" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.data.duplicate===true||typeof j.data.seq!=="number"){console.error("FAIL cycle rest3: "+s);process.exit(1)}
+  if(!j.data.row||j.data.row.deleted_at!==null){console.error("FAIL cycle rest3 row: "+s);process.exit(1)}
+  process.stdout.write(String(j.data.seq));
+})')
+node -e '
+const Database = require(process.argv[1]);
+const db = new Database(process.argv[2]);
+const id = process.argv[3];
+const h = db.prepare("SELECT * FROM history WHERE id = ?").get(id);
+if (!h || h.deleted_at !== null) { console.error("FAIL: deleted_at not NULL after rest3"); process.exit(1); }
+const ids = db.prepare("SELECT operation_id FROM sync_operations WHERE entry_id = ?").all(id).map(r=>r.operation_id);
+if (!ids.includes("rest:" + id + "#2")) { console.error("FAIL: rest:#2 op missing: " + JSON.stringify(ids)); process.exit(1); }
+if (ids.length !== 6) { console.error("FAIL: op log count = " + ids.length + ", expected 6"); process.exit(1); }
+console.log("    ok (rest3=" + process.argv[4] + ": rest:" + id + "#2 generated, deleted_at NULL, multi-round converged, op log=" + ids.join(",") + ")");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_CYCLE_ID}" "${CYCLE_REST3}"
 
 echo "SMOKE TEST PASSED"
