@@ -27,9 +27,14 @@ RATE_HEADERS="${SCRIPT_DIR}/.smoke-rate-headers.txt"
 
 cleanup() {
   stop_server
+  if [ -n "${OSS_STUB_PID:-}" ] && kill -0 "${OSS_STUB_PID}" 2>/dev/null; then
+    kill "${OSS_STUB_PID}" 2>/dev/null || true
+    wait "${OSS_STUB_PID}" 2>/dev/null || true
+  fi
   rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
   rm -f "${BIG_PAYLOAD}" "${FILE1}" "${FILE1_DL}" "${FILE_REAL}" "${FILE_REAL_DL}" "${BIG1}" \
     "${MISMATCH1}" "${MISMATCH_BODY}" "${RATE_BODY}" "${RATE_HEADERS}" "${SCRIPT_DIR}/.smoke-sync-seq.txt"
+  rm -f "${SCRIPT_DIR}"/.oss-* "${SCRIPT_DIR}"/.oss-stub.log
   rm -rf "${FILE_DIR}"
 }
 trap cleanup EXIT
@@ -1133,5 +1138,606 @@ if (ids.length !== 6) { console.error("FAIL: op log count = " + ids.length + ", 
 console.log("    ok (rest3=" + process.argv[4] + ": rest:" + id + "#2 generated, deleted_at NULL, multi-round converged, op log=" + ids.join(",") + ")");
 db.close();
 ' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${SYNC_CYCLE_ID}" "${CYCLE_REST3}"
+
+
+# ==================== Phase 5.3 OSS 直传（本地 stub OSS，端到端）====================
+echo "==> 35. 启动本地 stub OSS（内存字节存储，127.0.0.1）"
+OSS_STUB_PORT="${OSS_STUB_PORT:-3299}"
+OSS_STUB_PID=""
+OSS_STUB_LOG="${SCRIPT_DIR}/.oss-stub.log"
+STUB_PORT="${OSS_STUB_PORT}" node "${SCRIPT_DIR}/oss_stub.js" > "${OSS_STUB_LOG}" 2>&1 &
+OSS_STUB_PID=$!
+stub_ready=0
+for _ in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" >/dev/null 2>&1; then
+    stub_ready=1
+    break
+  fi
+  sleep 0.2
+done
+if [ "$stub_ready" != "1" ]; then
+  echo "FAIL: oss stub did not start" >&2
+  exit 1
+fi
+echo "    ok (stub on 127.0.0.1:${OSS_STUB_PORT})"
+
+echo "==> 36. 以 OSS 模式重启被测服务器（endpoint → 本地 stub）"
+stop_server
+PORT="${TEST_PORT}" FILE_DIR="${FILE_DIR}" MAX_FILE_BYTES="${MAX_FILE_BYTES}" \
+  USER_FILE_QUOTA_BYTES="${USER_FILE_QUOTA_BYTES}" GLOBAL_FILE_QUOTA_BYTES="${GLOBAL_FILE_QUOTA_BYTES}" \
+  OSS_ACCESS_KEY_ID="smokeAK" OSS_ACCESS_KEY_SECRET="smokeSK" \
+  OSS_BUCKET="clipflow-files" OSS_REGION="oss-cn-hangzhou" \
+  OSS_ENDPOINT="http://127.0.0.1:${OSS_STUB_PORT}" OSS_PRESIGN_TTL_MS=900000 OSS_ORPHAN_GRACE_MS=60000 \
+  AUTH_MAX_USER_REQUESTS=100 AUTH_MAX_IP_REQUESTS=100 \
+  node "${SCRIPT_DIR}/index.js" > "${SCRIPT_DIR}/.oss-server.log" 2>&1 &
+SERVER_PID=$!
+ready=0
+for _ in $(seq 1 30); do
+  if curl -fsS "${BASE}/ping" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.3
+done
+if [ "$ready" != "1" ]; then
+  echo "FAIL: OSS-mode server did not start" >&2
+  exit 1
+fi
+OSS_TOKEN=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
+  -d '{"userId":"user_smoke_oss"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+OSS_AUTH="Authorization: Bearer ${OSS_TOKEN}"
+
+# OSS 模式服务器重启助手（保持 OSS env + 宽松限流）
+start_oss_server() {
+  PORT="${TEST_PORT}" FILE_DIR="${FILE_DIR}" MAX_FILE_BYTES="${MAX_FILE_BYTES}" \
+    USER_FILE_QUOTA_BYTES="${USER_FILE_QUOTA_BYTES}" GLOBAL_FILE_QUOTA_BYTES="${GLOBAL_FILE_QUOTA_BYTES}" \
+    OSS_ACCESS_KEY_ID="smokeAK" OSS_ACCESS_KEY_SECRET="smokeSK" \
+    OSS_BUCKET="clipflow-files" OSS_REGION="oss-cn-hangzhou" \
+    OSS_ENDPOINT="http://127.0.0.1:${OSS_STUB_PORT}" OSS_PRESIGN_TTL_MS=900000 OSS_ORPHAN_GRACE_MS=60000 \
+    AUTH_MAX_USER_REQUESTS=100 AUTH_MAX_IP_REQUESTS=100 \
+    node "${SCRIPT_DIR}/index.js" > "${SCRIPT_DIR}/.oss-server.log" 2>&1 &
+  SERVER_PID=$!
+  ready=0
+  for _ in $(seq 1 30); do
+    if curl -fsS "${BASE}/ping" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 0.3
+  done
+  if [ "$ready" != "1" ]; then
+    echo "FAIL: OSS-mode server did not start" >&2
+    exit 1
+  fi
+}
+
+# stub 对象断言助手：$1=期望存在的 key（缺省则断言列表为空）
+stub_expect_keys() {
+  curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key).sort();
+  const expected=process.argv.slice(1).filter(Boolean).sort();
+  const missing=expected.filter(k=>!keys.includes(k));
+  const extra=keys.filter(k=>!expected.includes(k));
+  if(missing.length){console.error("FAIL stub missing objects: "+missing.join(","));process.exit(1)}
+  if(extra.length){console.error("FAIL stub unexpected objects: "+extra.join(","));process.exit(1)}
+  console.log("    ok (stub objects: "+keys.join(",")+")");
+})' "$@"
+}
+stub_expect_none() {
+  curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.keys.length!==0){console.error("FAIL stub not empty: "+j.keys.map(k=>k.key).join(","));process.exit(1)}
+  console.log("    ok (stub empty)");
+})'
+}
+# stub 包含断言：$1=期望存在的 key（允许有其他对象）
+stub_has_key() {
+  curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  if(!keys.includes(process.argv[1])){console.error("FAIL stub object missing: "+process.argv[1]);process.exit(1)}
+  console.log("    ok (stub has "+process.argv[1]+")");
+})' "$1"
+}
+# OSS 元数据 headers（presign 与 confirm 共用；$1=historyId $2=hash $3=fileSize $4=timestamp）。
+# 写入全局数组 OSS_META_ARGS，调用方以 "${OSS_META_ARGS[@]}" 展开（避免空格分词）。
+oss_meta_headers() {
+  OSS_META_ARGS=(
+    -H "x-clipflow-history-id: $1"
+    -H "x-clipflow-hash: $2"
+    -H "x-clipflow-file-name: ${B64_NAME}"
+    -H "x-clipflow-file-size: $3"
+    -H "x-clipflow-mime-type: ${B64_MIME}"
+    -H "x-clipflow-source-device: ${B64_DEVICE}"
+    -H "x-clipflow-source-device-name: ${B64_DEVICE_NAME}"
+    -H "x-clipflow-source-platform: ${B64_PLATFORM}"
+    -H "x-clipflow-timestamp: $4"
+    -H "x-clipflow-marker: ${B64_MARKER}"
+  )
+}
+# presign → 设置 OSS_FILE_KEY / OSS_UPLOAD_URL / OSS_OBJECT_KEY；$1=historyId $2=hash $3=fileSize $4=timestamp
+oss_presign() {
+  local resp
+  oss_meta_headers "$1" "$2" "$3" "$4"
+  resp=$(curl -fsS -X POST "${BASE}/file/presign-upload" -H "$OSS_AUTH" \
+    -H 'Content-Type: application/octet-stream' "${OSS_META_ARGS[@]}")
+  OSS_FILE_KEY=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);if(j.code!=="SUCCESS"){console.error("FAIL presign: "+s);process.exit(1)}process.stdout.write(j.data.fileKey)})')
+  OSS_UPLOAD_URL=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).data.uploadUrl))')
+  OSS_OBJECT_KEY=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).data.objectKey))')
+}
+# confirm；$1=historyId $2=hash $3=fileSize $4=timestamp（可额外 -s 不 -f 拿错误码由调用方处理）
+oss_confirm() {
+  oss_meta_headers "$1" "$2" "$3" "$4"
+  curl -fsS -X POST "${BASE}/file/presign-upload/confirm" -H "$OSS_AUTH" \
+    -H 'Content-Type: application/json' "${OSS_META_ARGS[@]}" \
+    -d "{\"historyId\":\"$1\",\"fileKey\":\"${OSS_FILE_KEY}\"}"
+}
+# 直传 stub（PUT presign URL）
+oss_put() {
+  curl -fsS -X PUT "${OSS_UPLOAD_URL}" -H 'Content-Type: application/octet-stream' --data-binary "@$1" >/dev/null
+}
+
+echo "==> 37. OSS 用例 1：presign-upload 成功（fileKey 前缀 oss:、URL 带签名、TTL≈15min）"
+OSS_ID_1="smoke-oss-file-1"
+OSS_FILE1="${SCRIPT_DIR}/.oss-file-1.bin"
+OSS_FILE1_DL="${SCRIPT_DIR}/.oss-file-1.download"
+OSS_FILE1_RELAY="${SCRIPT_DIR}/.oss-file-1.relay"
+node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(200 * 1024))' "${OSS_FILE1}"
+OSS_FILE1_SIZE=$(wc -c < "${OSS_FILE1}" | tr -d ' ')
+oss_presign "${OSS_ID_1}" "HASH_OSS_FILE_1" "${OSS_FILE1_SIZE}" "1700000010000"
+if ! printf '%s' "${OSS_FILE_KEY}" | grep -q '^oss:'; then
+  echo "FAIL: fileKey not oss-prefixed: ${OSS_FILE_KEY}" >&2
+  exit 1
+fi
+if ! printf '%s' "${OSS_UPLOAD_URL}" | grep -q 'x-oss-signature'; then
+  echo "FAIL: uploadUrl missing signature: ${OSS_UPLOAD_URL}" >&2
+  exit 1
+fi
+echo "    ok (fileKey=${OSS_FILE_KEY}, ttl=15min)"
+
+echo "==> 38. OSS 用例 2：presign-upload 缺 header → 400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/file/presign-upload" -H "$OSS_AUTH" \
+  -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: smoke-oss-missing-header" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: 100" \
+  -H "x-clipflow-marker: ${B64_MARKER}" || true)
+if [ "$CODE" != "400" ]; then
+  echo "FAIL: expect 400 got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok"
+
+echo "==> 39. OSS 用例 3：presign-upload 超限 → 507（先直传 1.6MB 占满用户配额）"
+OSS_BIG_ID="smoke-oss-big-1"
+OSS_BIG="${SCRIPT_DIR}/.oss-big-1.bin"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(1600000, 7))' "${OSS_BIG}"
+OSS_BIG_SIZE=$(wc -c < "${OSS_BIG}" | tr -d ' ')
+oss_presign "${OSS_BIG_ID}" "HASH_OSS_BIG_1" "${OSS_BIG_SIZE}" "1700000011000"
+OSS_BIG_KEY="${OSS_OBJECT_KEY}"
+oss_put "${OSS_BIG}"
+oss_confirm "${OSS_BIG_ID}" "HASH_OSS_BIG_1" "${OSS_BIG_SIZE}" "1700000011000" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL big confirm: "+s);process.exit(1)}
+  console.log("    big upload ok");
+})'
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/file/presign-upload" -H "$OSS_AUTH" \
+  -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: smoke-oss-big-2" \
+  -H "x-clipflow-hash: HASH_OSS_BIG_2" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: ${OSS_BIG_SIZE}" \
+  -H "x-clipflow-mime-type: ${B64_MIME}" \
+  -H "x-clipflow-marker: ${B64_MARKER}" || true)
+if [ "$CODE" != "507" ]; then
+  echo "FAIL: expect 507 got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok (quota rejected)"
+
+echo "==> 40. OSS 用例 4：直传 stub + confirm 尺寸匹配 → history/clipboard file_key=oss:*、file_size 正确"
+# 重新 presign（避免使用上一用例残留的 uploadUrl）
+oss_presign "${OSS_ID_1}" "HASH_OSS_FILE_1" "${OSS_FILE1_SIZE}" "1700000010000"
+OSS_FILE1_KEY="${OSS_FILE_KEY}"
+oss_put "${OSS_FILE1}"
+oss_confirm "${OSS_ID_1}" "HASH_OSS_FILE_1" "${OSS_FILE1_SIZE}" "1700000010000" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL confirm file1: "+s);process.exit(1)}
+  console.log("    ok");
+})'
+curl -fsS "${BASE}/clipboard" -H "$OSS_AUTH" | OSS_FILE1_SIZE="${OSS_FILE1_SIZE}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const d=j.data;
+  if(j.code!=="SUCCESS"||!d){console.error("FAIL clipboard: "+s);process.exit(1)}
+  if(d.type!=="file"||!String(d.file_key||"").startsWith("oss:")){console.error("FAIL clipboard file_key: "+d.file_key);process.exit(1)}
+  if(d.file_size!==Number(process.env.OSS_FILE1_SIZE)){console.error("FAIL clipboard file_size: "+d.file_size);process.exit(1)}
+  console.log("    ok (history+clipboard oss rows)");
+})'
+
+echo "==> 41. OSS 用例 5：直传尺寸超差（声明 1B 传 2KB > 1+1024 容差）→ 400 FILE_SIZE_MISMATCH、不写元数据、对象留孤儿"
+OSS_MISMATCH_ID="smoke-oss-mismatch-1"
+OSS_MISMATCH="${SCRIPT_DIR}/.oss-mismatch-1.bin"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(2048, 3))' "${OSS_MISMATCH}"
+oss_presign "${OSS_MISMATCH_ID}" "HASH_OSS_MISMATCH" "1" "1700000012000"
+OSS_MISMATCH_KEY="${OSS_OBJECT_KEY}"
+curl -fsS -X PUT "${OSS_UPLOAD_URL}" -H 'Content-Type: application/octet-stream' --data-binary "@${OSS_MISMATCH}" >/dev/null
+oss_meta_headers "${OSS_MISMATCH_ID}" "HASH_OSS_MISMATCH" "1" "1700000012000"
+MISMATCH_CODE=$(curl -s -o "${SCRIPT_DIR}/.oss-mismatch-body.json" -w '%{http_code}' -X POST "${BASE}/file/presign-upload/confirm" -H "$OSS_AUTH" \
+  -H 'Content-Type: application/json' "${OSS_META_ARGS[@]}" \
+  -d "{\"historyId\":\"${OSS_MISMATCH_ID}\",\"fileKey\":\"${OSS_FILE_KEY}\"}" || true)
+if [ "$MISMATCH_CODE" != "400" ]; then
+  echo "FAIL: expect 400 got ${MISMATCH_CODE}" >&2
+  exit 1
+fi
+node -e '
+const fs=require("fs");
+const body=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+if(!String(body.message||"").includes("FILE_SIZE_MISMATCH")){console.error("FAIL mismatch message: "+fs.readFileSync(process.argv[1],"utf8"));process.exit(1)}
+console.log("    ok (400 "+body.message+")");
+' "${SCRIPT_DIR}/.oss-mismatch-body.json"
+curl -fsS "${BASE}/history?limit=100" -H "$OSS_AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.data.records.some(x=>x.id==="smoke-oss-mismatch-1")){console.error("FAIL mismatch row exists");process.exit(1)}
+  console.log("    ok (no history row)");
+})'
+stub_has_key "${OSS_MISMATCH_KEY}"
+
+echo "==> 42. OSS 用例 6：confirm 幂等重放 → 200 且仅 1 行 history"
+OSS_FILE_KEY="${OSS_FILE1_KEY}"
+oss_confirm "${OSS_ID_1}" "HASH_OSS_FILE_1" "${OSS_FILE1_SIZE}" "1700000010000" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL replay confirm: "+s);process.exit(1)}
+  console.log("    ok");
+})'
+node -e '
+const Database=require(process.argv[1]);
+const db=new Database(process.argv[2]);
+const n=db.prepare("SELECT COUNT(*) AS n FROM history WHERE id = ? AND user_id = ?").get(process.argv[3], "user_smoke_oss").n;
+if(n!==1){console.error("FAIL idempotent replay row count = "+n);process.exit(1)}
+console.log("    ok (rows="+n+")");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${OSS_ID_1}"
+
+echo "==> 43. OSS 用例 7：presign-download（oss 行）→ storage:oss + 直下字节与上传一致"
+DL_RESP=$(curl -fsS "${BASE}/file/${OSS_ID_1}/presign-download" -H "$OSS_AUTH")
+printf '%s' "$DL_RESP" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.data.storage!=="oss"||!j.data.downloadUrl){console.error("FAIL presign-download: "+s);process.exit(1)}
+  process.stdout.write(j.data.downloadUrl);
+})' > "${SCRIPT_DIR}/.oss-dl-url.txt"
+OSS_DL_URL=$(cat "${SCRIPT_DIR}/.oss-dl-url.txt")
+curl -fsS "${OSS_DL_URL}" -o "${OSS_FILE1_DL}"
+if ! cmp -s "${OSS_FILE1}" "${OSS_FILE1_DL}"; then
+  echo "FAIL: direct download differs" >&2
+  exit 1
+fi
+echo "    ok (direct download byte-exact, bytes=$(wc -c < "${OSS_FILE1_DL}" | tr -d ' '))"
+
+echo "==> 44. OSS 用例 8：presign-download（磁盘行）→ storage:disk 无 URL"
+OSS_DISK_ID="smoke-oss-disk-1"
+OSS_DISK="${SCRIPT_DIR}/.oss-disk-1.bin"
+node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(30 * 1024))' "${OSS_DISK}"
+OSS_DISK_SIZE=$(wc -c < "${OSS_DISK}" | tr -d ' ')
+oss_meta_headers "${OSS_DISK_ID}" "HASH_OSS_DISK_1" "${OSS_DISK_SIZE}" "1700000013000"
+curl -fsS -X POST "${BASE}/file" -H "$OSS_AUTH" -H 'Content-Type: application/octet-stream' \
+  "${OSS_META_ARGS[@]}" \
+  --data-binary "@${OSS_DISK}" >/dev/null
+OSS_DISK_KEY=$(curl -fsS "${BASE}/history?limit=100" -H "$OSS_AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const r=j.data.records.find(x=>x.id==="smoke-oss-disk-1");
+  if(!r||!r.file_key){console.error("FAIL disk row missing");process.exit(1)}
+  process.stdout.write(r.file_key);
+})')
+curl -fsS "${BASE}/file/${OSS_DISK_ID}/presign-download" -H "$OSS_AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"||j.data.storage!=="disk"||j.data.downloadUrl!==undefined){console.error("FAIL disk presign-download: "+s);process.exit(1)}
+  console.log("    ok (storage=disk)");
+})'
+
+echo "==> 45. OSS 用例 9：relay GET oss 行 → 流式回传字节一致（旧客户端兜底）"
+curl -fsS "${BASE}/file/${OSS_ID_1}/content" -H "$OSS_AUTH" -o "${OSS_FILE1_RELAY}"
+if ! cmp -s "${OSS_FILE1}" "${OSS_FILE1_RELAY}"; then
+  echo "FAIL: relay oss row differs" >&2
+  exit 1
+fi
+echo "    ok (relay byte-exact, bytes=$(wc -c < "${OSS_FILE1_RELAY}" | tr -d ' '))"
+
+echo "==> 46. OSS 用例 10：trash 倾倒删除 oss 对象（磁盘文件不受影响）"
+curl -fsS -X DELETE "${BASE}/history/${OSS_ID_1}" -H "$OSS_AUTH" >/dev/null
+curl -fsS -X DELETE "${BASE}/history/trash" -H "$OSS_AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  if(j.code!=="SUCCESS"){console.error("FAIL oss trash: "+s);process.exit(1)}
+  console.log("    ok (trash dumped)");
+})'
+# file1 的 oss 对象应被 trash 倾倒删除；big（仍被引用）与 disk 文件应保留
+curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | OSS_FILE1_KEY="${OSS_FILE1_KEY}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  const file1Obj="clipflow/user_smoke_oss/"+process.env.OSS_FILE1_KEY.slice(4);
+  if(keys.includes(file1Obj)){console.error("FAIL trashed oss object still exists: "+file1Obj);process.exit(1)}
+  if(!keys.includes(process.argv[1])){console.error("FAIL referenced big object missing: "+process.argv[1]);process.exit(1)}
+  console.log("    ok (trashed oss object deleted, referenced oss object kept)");
+})' "${OSS_BIG_KEY}"
+if [ ! -f "${FILE_DIR}/user_smoke_oss/${OSS_DISK_KEY}" ]; then
+  echo "FAIL: referenced disk file missing after trash dump" >&2
+  exit 1
+fi
+echo "    ok (disk files unaffected, disk key=${OSS_DISK_KEY})"
+
+echo "==> 47. OSS 用例 11：24h 清理删除 oss 对象（模拟软删过期 → 重启触发）"
+OSS_EXPIRE_ID="smoke-oss-expire-1"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(1000, 5))' "${SCRIPT_DIR}/.oss-expire-1.bin"
+EXPIRE_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-expire-1.bin" | tr -d ' ')
+oss_presign "${OSS_EXPIRE_ID}" "HASH_OSS_EXPIRE" "${EXPIRE_SIZE}" "1700000014000"
+oss_put "${SCRIPT_DIR}/.oss-expire-1.bin"
+oss_confirm "${OSS_EXPIRE_ID}" "HASH_OSS_EXPIRE" "${EXPIRE_SIZE}" "1700000014000" >/dev/null
+OSS_EXPIRE_KEY="${OSS_OBJECT_KEY}"
+curl -fsS -X DELETE "${BASE}/history/${OSS_EXPIRE_ID}" -H "$OSS_AUTH" >/dev/null
+node -e '
+const Database=require(process.argv[1]);
+const db=new Database(process.argv[2]);
+db.prepare("UPDATE history SET deleted_at = ? WHERE id = ? AND user_id = ?").run(Date.now()-25*60*60*1000, process.argv[3], "user_smoke_oss");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${OSS_EXPIRE_ID}"
+stop_server
+start_oss_server
+# 过期对象被删；仍被引用的对象保留（big 与 24h 未到的孤儿不受影响）
+curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | OSS_EXPIRE_KEY="${OSS_EXPIRE_KEY}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  if(keys.includes(process.env.OSS_EXPIRE_KEY)){console.error("FAIL expired oss object still exists: "+process.env.OSS_EXPIRE_KEY);process.exit(1)}
+  if(!keys.includes(process.argv[1])){console.error("FAIL referenced big object missing");process.exit(1)}
+  console.log("    ok (expired oss object deleted, referenced object kept)");
+})' "${OSS_BIG_KEY}"
+node -e '
+const Database=require(process.argv[1]);
+const db=new Database(process.argv[2]);
+const r=db.prepare("SELECT COUNT(*) AS n FROM history WHERE id = ? AND user_id = ?").get(process.argv[3], "user_smoke_oss").n;
+if(r!==0){console.error("FAIL expired row still exists");process.exit(1)}
+console.log("    ok (expired row purged)");
+db.close();
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" "${OSS_EXPIRE_ID}"
+
+echo "==> 48. OSS 用例 12：100 条裁剪删除 oss 对象（注入 100 行 + 对象 → 新上传触发裁剪）"
+# 注入 100 个 oss 历史行 + 对应 stub 对象（旧时间戳）；上传 1 个新文件 → 最旧注入行被裁
+node -e '
+const Database=require(process.argv[1]);
+const db=new Database(process.argv[2]);
+const {randomUUID}=require("crypto");
+// 固定极旧时间戳（早于 big/disk/new 行），保证 100 条注入行全部排在裁剪区
+const base=1000000000000;
+const rows=[];
+for(let i=0;i<100;i++){
+  const uuid=randomUUID();
+  rows.push({id:"smoke-oss-trim-"+i, uuid, ts:base+i});
+  db.prepare("INSERT OR REPLACE INTO history (id, user_id, content, source_device, source_device_name, source_platform, timestamp, type, pinned, file_key, file_size, file_name, mime_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+    rows[i].id, "user_smoke_oss", "TRIM", "d", "D", "macos", rows[i].ts, "file", 0, "oss:"+rows[i].uuid, 1, "t.bin", "application/octet-stream");
+}
+db.close();
+process.stdout.write(JSON.stringify(rows));
+' "${SCRIPT_DIR}/node_modules/better-sqlite3" "${DB}" > "${SCRIPT_DIR}/.oss-trim-rows.json"
+# 向 stub 写入 100 个对象（直接 PUT，key=clipflow/user_smoke_oss/<uuid>）
+node -e '
+const fs=require("fs");
+const rows=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const buf=Buffer.from([9]);
+for(const r of rows){fs.writeFileSync(process.argv[2]+"/"+r.uuid, buf);}
+process.stdout.write(rows[0].uuid);
+' "${SCRIPT_DIR}/.oss-trim-rows.json" "${FILE_DIR}/user_smoke_oss" > "${SCRIPT_DIR}/.oss-trim-oldest.txt"
+# 用 node http 向 stub PUT 100 个对象（避免 curl 循环慢）
+node -e '
+const http=require("http");
+const fs=require("fs");
+const rows=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const port=process.argv[2];
+const body=Buffer.from([9]);
+let done=0;
+function put(i){
+  if(i>=rows.length){return;}
+  const key="clipflow/user_smoke_oss/"+rows[i].uuid;
+  const req=http.request({host:"127.0.0.1",port,path:"/"+key,method:"PUT"},(res)=>{res.resume();res.on("end",()=>{done++;if(done===rows.length){console.log("put "+done+" objects");}put(i+1);});});
+  req.end(body);
+}
+put(0);
+' "${SCRIPT_DIR}/.oss-trim-rows.json" "${OSS_STUB_PORT}" > "${SCRIPT_DIR}/.oss-trim-put.log"
+cat "${SCRIPT_DIR}/.oss-trim-put.log"
+OSS_TRIM_OLDEST=$(cat "${SCRIPT_DIR}/.oss-trim-oldest.txt")
+OSS_TRIM_NEW_ID="smoke-oss-trim-new-1"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(500, 6))' "${SCRIPT_DIR}/.oss-trim-new.bin"
+TRIM_NEW_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-trim-new.bin" | tr -d ' ')
+oss_presign "${OSS_TRIM_NEW_ID}" "HASH_OSS_TRIM_NEW" "${TRIM_NEW_SIZE}" "1700000015000"
+OSS_TRIM_NEW_KEY="${OSS_OBJECT_KEY}"
+oss_put "${SCRIPT_DIR}/.oss-trim-new.bin"
+oss_confirm "${OSS_TRIM_NEW_ID}" "HASH_OSS_TRIM_NEW" "${TRIM_NEW_SIZE}" "1700000015000" >/dev/null
+# 最旧注入对象应已被删除；新对象保留
+curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | OSS_TRIM_OLDEST="${OSS_TRIM_OLDEST}" OSS_TRIM_NEW_KEY="${OSS_TRIM_NEW_KEY}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  if(keys.includes("clipflow/user_smoke_oss/"+process.env.OSS_TRIM_OLDEST)){console.error("FAIL trimmed object still exists");process.exit(1)}
+  if(!keys.includes(process.env.OSS_TRIM_NEW_KEY)){console.error("FAIL new object missing: "+process.env.OSS_TRIM_NEW_KEY);process.exit(1)}
+  console.log("    ok (oldest trimmed object deleted, new object kept)");
+})'
+
+echo "==> 49. OSS 用例 13：同 historyId 重传覆盖（oss→oss 旧对象删、disk→oss 旧磁盘文件删）"
+OSS_OW_ID="smoke-oss-overwrite-1"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(800, 1))' "${SCRIPT_DIR}/.oss-ow-a.bin"
+OW_A_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-ow-a.bin" | tr -d ' ')
+oss_presign "${OSS_OW_ID}" "HASH_OSS_OW_1" "${OW_A_SIZE}" "1700000016000"
+OSS_OW_A_KEY="${OSS_OBJECT_KEY}"
+oss_put "${SCRIPT_DIR}/.oss-ow-a.bin"
+oss_confirm "${OSS_OW_ID}" "HASH_OSS_OW_1" "${OW_A_SIZE}" "1700000016000" >/dev/null
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(900, 2))' "${SCRIPT_DIR}/.oss-ow-b.bin"
+OW_B_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-ow-b.bin" | tr -d ' ')
+oss_presign "${OSS_OW_ID}" "HASH_OSS_OW_2" "${OW_B_SIZE}" "1700000017000"
+oss_put "${SCRIPT_DIR}/.oss-ow-b.bin"
+oss_confirm "${OSS_OW_ID}" "HASH_OSS_OW_2" "${OW_B_SIZE}" "1700000017000" >/dev/null
+curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  if(keys.includes(process.argv[1])){console.error("FAIL old oss object not deleted");process.exit(1)}
+  console.log("    ok (oss→oss old object deleted)");
+})' "${OSS_OW_A_KEY}"
+# disk→oss：先 relay 上传磁盘文件，再 presign+confirm 覆盖同一 historyId
+OSS_OW_DISK_ID="smoke-oss-overwrite-2"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(700, 3))' "${SCRIPT_DIR}/.oss-ow-disk.bin"
+OW_DISK_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-ow-disk.bin" | tr -d ' ')
+oss_meta_headers "${OSS_OW_DISK_ID}" "HASH_OSS_OW_DISK" "${OW_DISK_SIZE}" "1700000018000"
+curl -fsS -X POST "${BASE}/file" -H "$OSS_AUTH" -H 'Content-Type: application/octet-stream' \
+  "${OSS_META_ARGS[@]}" \
+  --data-binary "@${SCRIPT_DIR}/.oss-ow-disk.bin" >/dev/null
+OSS_OW_DISK_KEY=$(curl -fsS "${BASE}/history?limit=100" -H "$OSS_AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const r=j.data.records.find(x=>x.id==="smoke-oss-overwrite-2");
+  if(!r||!r.file_key){console.error("FAIL ow disk row");process.exit(1)}
+  process.stdout.write(r.file_key);
+})')
+oss_presign "${OSS_OW_DISK_ID}" "HASH_OSS_OW_DISK2" "${OW_DISK_SIZE}" "1700000019000"
+oss_put "${SCRIPT_DIR}/.oss-ow-disk.bin"
+oss_confirm "${OSS_OW_DISK_ID}" "HASH_OSS_OW_DISK2" "${OW_DISK_SIZE}" "1700000019000" >/dev/null
+if [ -f "${FILE_DIR}/user_smoke_oss/${OSS_OW_DISK_KEY}" ]; then
+  echo "FAIL: old disk file not deleted: ${OSS_OW_DISK_KEY}" >&2
+  exit 1
+fi
+curl -fsS "${BASE}/history?limit=100" -H "$OSS_AUTH" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const r=j.data.records.find(x=>x.id==="smoke-oss-overwrite-2");
+  if(!r||!String(r.file_key).startsWith("oss:")){console.error("FAIL ow2 not oss: "+s);process.exit(1)}
+  console.log("    ok (disk→oss old disk file deleted, new oss row)");
+})'
+
+echo "==> 50. OSS 用例 14：孤儿扫描（未 confirm 对象拨旧 → 重启 pruneOssOrphans 删除；被引用对象保留）"
+OSS_ORPHAN_ID="smoke-oss-orphan-1"
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(600, 4))' "${SCRIPT_DIR}/.oss-orphan-1.bin"
+ORPHAN_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-orphan-1.bin" | tr -d ' ')
+oss_presign "${OSS_ORPHAN_ID}" "HASH_OSS_ORPHAN" "${ORPHAN_SIZE}" "1700000020000"
+OSS_ORPHAN_KEY="${OSS_OBJECT_KEY}"
+oss_put "${SCRIPT_DIR}/.oss-orphan-1.bin"
+curl -fsS -X POST "http://127.0.0.1:${OSS_STUB_PORT}/__age?key=${OSS_ORPHAN_KEY}&ms=7200000" >/dev/null
+curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | OSS_ORPHAN_KEY="${OSS_ORPHAN_KEY}" OSS_TRIM_NEW_KEY="${OSS_TRIM_NEW_KEY}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  if(!keys.includes(process.env.OSS_ORPHAN_KEY)){console.error("FAIL orphan object missing before prune");process.exit(1)}
+  if(!keys.includes(process.env.OSS_TRIM_NEW_KEY)){console.error("FAIL referenced object missing before prune");process.exit(1)}
+  console.log("    ok (orphan + referenced present before prune)");
+})'
+stop_server
+start_oss_server
+curl -fsS "http://127.0.0.1:${OSS_STUB_PORT}/__objects" | OSS_ORPHAN_KEY="${OSS_ORPHAN_KEY}" OSS_TRIM_NEW_KEY="${OSS_TRIM_NEW_KEY}" node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const keys=j.keys.map(k=>k.key);
+  if(keys.includes(process.env.OSS_ORPHAN_KEY)){console.error("FAIL orphan object not pruned");process.exit(1)}
+  if(!keys.includes(process.env.OSS_TRIM_NEW_KEY)){console.error("FAIL referenced object pruned");process.exit(1)}
+  console.log("    ok (orphan pruned, referenced object kept)");
+})'
+
+echo "==> 51. OSS 用例 15：兼容模式（无 OSS env）→ presign 503、relay 全功能"
+stop_server
+start_server
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/file/presign-upload" -H "$AUTH" \
+  -H 'Content-Type: application/octet-stream' \
+  -H "x-clipflow-history-id: smoke-compat-presign" \
+  -H "x-clipflow-hash: HASH_COMPAT" \
+  -H "x-clipflow-file-name: ${B64_NAME}" \
+  -H "x-clipflow-file-size: 100" \
+  -H "x-clipflow-marker: ${B64_MARKER}" || true)
+if [ "$CODE" != "503" ]; then
+  echo "FAIL: compat presign expect 503 got ${CODE}" >&2
+  exit 1
+fi
+echo "    ok (presign 503)"
+COMPAT_ID="smoke-compat-file-1"
+node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(40 * 1024))' "${SCRIPT_DIR}/.oss-compat-up.bin"
+COMPAT_SIZE=$(wc -c < "${SCRIPT_DIR}/.oss-compat-up.bin" | tr -d ' ')
+oss_meta_headers "${COMPAT_ID}" "HASH_COMPAT_1" "${COMPAT_SIZE}" "1700000021000"
+curl -fsS -X POST "${BASE}/file" -H "$OSS_AUTH" -H 'Content-Type: application/octet-stream' \
+  "${OSS_META_ARGS[@]}" \
+  --data-binary "@${SCRIPT_DIR}/.oss-compat-up.bin" >/dev/null
+curl -fsS "${BASE}/file/${COMPAT_ID}/content" -H "$OSS_AUTH" -o "${SCRIPT_DIR}/.oss-compat-dl.bin"
+if ! cmp -s "${SCRIPT_DIR}/.oss-compat-up.bin" "${SCRIPT_DIR}/.oss-compat-dl.bin"; then
+  echo "FAIL: compat relay differs" >&2
+  exit 1
+fi
+echo "    ok (relay upload/download byte-exact)"
+
+echo "==> 52. OSS 用例 16：fail-fast（缺一个 OSS env → 启动退出 + 明确错误日志）"
+stop_server
+FF_CODE=0
+PORT="${TEST_PORT}" OSS_ACCESS_KEY_ID="onlyAK" node "${SCRIPT_DIR}/index.js" > "${SCRIPT_DIR}/.oss-ff.log" 2>&1 || FF_CODE=$?
+if [ "$FF_CODE" != "1" ]; then
+  echo "FAIL: expect exit 1 got ${FF_CODE}" >&2
+  exit 1
+fi
+if ! grep -q "FATAL" "${SCRIPT_DIR}/.oss-ff.log"; then
+  echo "FAIL: FATAL not logged" >&2
+  cat "${SCRIPT_DIR}/.oss-ff.log" >&2
+  exit 1
+fi
+echo "    ok (exit 1 + FATAL logged)"
+# 恢复服务器（兼容模式）供脚本尾部继续
+start_server
+
+echo "==> 53. OSS 直传全部用例通过"
 
 echo "SMOKE TEST PASSED"

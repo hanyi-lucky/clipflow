@@ -517,8 +517,12 @@ function getOssClient() {
 // requireOctetStream=false 时跳过 Content-Type 校验（confirm 走 JSON body，但 metadata 仍走 header）。
 function parseFileMetadata(req, options) {
   const opts = options || {};
-  if (opts.requireOctetStream !== false && !req.is('application/octet-stream')) {
-    return { error: { status: 400, message: 'Content-Type must be application/octet-stream' } };
+  if (opts.requireOctetStream !== false) {
+    const ct = String(req.headers['content-type'] || '');
+    const normalized = ct.split(';')[0].trim().toLowerCase();
+    if (normalized !== 'application/octet-stream') {
+      return { error: { status: 400, message: 'Content-Type must be application/octet-stream' } };
+    }
   }
 
   const historyId = req.headers['x-clipflow-history-id'];
@@ -620,6 +624,22 @@ function writeFileMetadataTransaction(userId, historyId, fileKey, m) {
 // 生命周期删除统一分派器：按 file_key 后端路由（oss → SDK delete；disk → 现状磁盘删除）。
 // OSS 对象不存在（NoSuchKey/404）视为已删除（幂等）；磁盘删除自身对 ENOENT 幂等。
 
+// 物理清理软删超过 24h 的 file 行（trash 倾倒之外的定时兜底）：
+// 先收集 file_key，删除 history 行后按后端分派删除（磁盘文件 / OSS 对象）。
+// 启动 + 小时任务各调用一次（与 pruneSyncState「重启即生效」同构）。
+function purgeExpiredFiles(now) {
+  const ts = now || Date.now();
+  const expiredFileRows = db.prepare(
+    'SELECT user_id, file_key FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ? AND file_key IS NOT NULL'
+  ).all(ts - 24 * 60 * 60 * 1000);
+  db.prepare("DELETE FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?").run(ts - 24 * 60 * 60 * 1000);
+  for (const row of expiredFileRows) {
+    deleteFileByBackend(row.user_id, row.file_key).catch((err) => {
+      console.error('Expired file cleanup failed:', err);
+    });
+  }
+}
+
 // OSS 孤儿对象回收：OSS list（clipflow/ 前缀）→ 与 history 有效集（oss: 行）比对 →
 // LastModified 宽限 [OSS_ORPHAN_GRACE_MS] 内（在途上传/未 confirm）保留，超龄未引用对象删除。
 // 与磁盘 pruneUnreferencedFiles 语义同构；兼容模式跳过（返回 { skipped: true }）。
@@ -637,10 +657,10 @@ async function pruneOssOrphans(now) {
   let removed = 0;
   let marker = null;
   let pages = 0;
+  let result = null;
   do {
     const query = { prefix: OSS_OBJECT_PREFIX, 'max-keys': 1000 };
     if (marker) query.marker = marker;
-    let result;
     try {
       result = await client.list(query);
     } catch (err) {
@@ -1695,6 +1715,9 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   // 启动时清理一次过期同步状态（op 7d / tombstone 24h），重启即生效
   pruneSyncState(Date.now());
 
+  // 启动时物理清理软删超过 24h 的 file 行（与小时任务同构）
+  purgeExpiredFiles(Date.now());
+
   // 启动时清理一次 OSS 孤儿对象（兼容模式跳过）
   pruneOssOrphans(Date.now()).then((r) => {
     if (!r.skipped) console.log(`Startup OSS orphan prune removed ${r.removed} object(s)`);
@@ -1719,16 +1742,7 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     db.prepare("DELETE FROM tokens WHERE created_at < datetime('now', '-1 day')").run();
     db.prepare('DELETE FROM crash_reports WHERE reported_at < ?').run(Date.now() - CRASH_RETENTION_MS);
 
-    // 软删超过 24h 的 file 行先收集 file_key，物理删除后同步清理磁盘文件
-    const expiredFileRows = db.prepare(
-      'SELECT user_id, file_key FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ? AND file_key IS NOT NULL'
-    ).all(Date.now() - 24 * 60 * 60 * 1000);
-    db.prepare("DELETE FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?").run(Date.now() - 24 * 60 * 60 * 1000);
-    for (const row of expiredFileRows) {
-      deleteFileByBackend(row.user_id, row.file_key).catch((err) => {
-        console.error('Expired file cleanup failed:', err);
-      });
-    }
+    purgeExpiredFiles(Date.now());
     try {
       fileStore.pruneUnreferencedFiles(collectValidFileKeys());
     } catch (err) {
