@@ -41,7 +41,7 @@ target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "windowscodecs.lib" "ole32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib")
-target_link_libraries(${BINARY_NAME} PRIVATE "dnsapi.lib" "ws2_32.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "dnsapi.lib" "iphlpapi.lib" "ws2_32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

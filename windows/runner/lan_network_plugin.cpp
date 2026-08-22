@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <windns.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 #include "lan_network_plugin.h"
 
@@ -93,6 +94,60 @@ std::string DnsStatusMessage(DWORD status) {
   std::snprintf(buffer, sizeof(buffer), "DNS status 0x%04lX",
                 static_cast<unsigned long>(status));
   return std::string(buffer);
+}
+
+// Machine host name for DnsServiceRegister (probe-verified requirement:
+// pszHostName must be non-null or registration fails). Falls back from the
+// DNS FQDN to the NetBIOS name.
+std::wstring GetMachineHostName() {
+  wchar_t buffer[256] = L"";
+  DWORD size = 256;
+  if (::GetComputerNameExW(ComputerNameDnsFullyQualified, buffer, &size) &&
+      buffer[0] != L'\0') {
+    return std::wstring(buffer);
+  }
+  size = 256;
+  if (::GetComputerNameExW(ComputerNamePhysicalNetBIOS, buffer, &size) &&
+      buffer[0] != L'\0') {
+    return std::wstring(buffer);
+  }
+  return std::wstring();
+}
+
+// Primary operational IPv4 (skips loopback/tunnel). Stored network-order in
+// the DNS_SERVICE_INSTANCE.ip4Address field (IP4_ADDRESS is a DWORD).
+bool GetPrimaryIpv4(IP4_ADDRESS* out) {
+  ULONG size = 0;
+  ::GetAdaptersAddresses(AF_INET, 0, nullptr, nullptr, &size);
+  if (size == 0) {
+    return false;
+  }
+  std::vector<BYTE> buffer(size);
+  auto* adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+  if (::GetAdaptersAddresses(AF_INET, 0, nullptr, adapters, &size) !=
+      NO_ERROR) {
+    return false;
+  }
+  for (auto* adapter = adapters; adapter != nullptr; adapter = adapter->Next) {
+    if (adapter->OperStatus != IfOperStatusUp) {
+      continue;
+    }
+    if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+        adapter->IfType == IF_TYPE_TUNNEL) {
+      continue;
+    }
+    for (auto* unicast = adapter->FirstUnicastAddress; unicast != nullptr;
+         unicast = unicast->Next) {
+      if (unicast->Address.lpSockaddr->sa_family != AF_INET) {
+        continue;
+      }
+      const auto* sin =
+          reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+      *out = sin->sin_addr.s_addr;
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -322,8 +377,10 @@ void LanNetworkPlugin::StartRegister() {
   std::wstring instance_name = adv_device_id_ + L"._clipflow._tcp.local";
   op->instance_name = WStringBuffer(instance_name);
   op->instance.pszInstanceName = op->instance_name.data();
-  op->instance.pszHostName = nullptr;
-  op->instance.ip4Address = nullptr;
+  op->host_name = WStringBuffer(GetMachineHostName());
+  op->instance.pszHostName = op->host_name.empty() ? nullptr
+                                                    : op->host_name.data();
+  op->instance.ip4Address = GetPrimaryIpv4(&op->ip4) ? &op->ip4 : nullptr;
   op->instance.ip6Address = nullptr;
   op->instance.wPort = static_cast<WORD>(adv_port_);
   op->instance.wPriority = 0;

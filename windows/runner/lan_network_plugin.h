@@ -94,6 +94,11 @@ class LanNetworkPlugin {
   struct AdvertiseOp {
     std::unique_ptr<RegisterContext> context;
     std::vector<wchar_t> instance_name;
+    // Host name + IPv4 used to make DnsServiceRegister succeed and to publish
+    // an A record peers can resolve (probe-verified: pszHostName must be set,
+    // otherwise DnsServiceRegister fails with status 14 / 87).
+    std::vector<wchar_t> host_name;
+    IP4_ADDRESS ip4{};
     std::vector<std::vector<wchar_t>> keys;
     std::vector<std::vector<wchar_t>> values;
     std::vector<PWSTR> key_ptrs;
