@@ -169,6 +169,13 @@
 - 验证（Windows 11 真机 + Mac）：`flutter build windows --debug/release` ✅；Windows 广播被 Mac dns-sd 可见；TLS 监听 `0.0.0.0:<port>`；TXT 白名单仅 proto/device/caps/port（`dns-sd -L` 实证零敏感字段）；Windows 诊断「发现设备=1、握手成功=1」（双向挑战握手）；Mac→Windows 内容交付成功。本地 `flutter test` 523/523、analyze 0 error；红线零触碰。
 - 决策：`docs/decisions/009-windows-lan-plugin-win32-dnssd.md`（见下）。
 
+### 5.3 OSS 直传（大文件不经服务器中转）— ✅ 实现完成（2026-08-22，RFC 已定稿；M7 生产灰度待部署）
+- RFC：预签名 URL（非 STS）`ali-oss` 签发；object key=`clipflow/<userId>/<uuid>`；`file_key=oss:<uuid>` 零 schema 变更；confirm HEAD 防配额绕过；4 处删除点统一分派 + 孤儿回收（宽限 1h）；双读切单写灰度（新文件单写 OSS、旧文件留磁盘、客户端 OSS 优先读 + relay 兜底、回滚=去 env 重启）。
+- 成本模型：生产量级（7 行/39.2MB）月成本 ¥0.06~27.4；当前非省钱，价值在释放 ECS 6GB 免费额度与磁盘/带宽解耦；启用阈值：月非 LAN 文件流量逼近 6GB / 磁盘 >30GB。
+- 验证：smoke 34+16 全绿（本地 stub OSS 端到端 presign→直传→confirm→直下→生命周期→孤儿→兼容/fail-fast）；`flutter test` 531；`flutter analyze` 0 error；reviewer 高置信通过；红线零触碰。
+- 待办：M7 生产部署（配置 OSS env 后灰度观察 5 项退出条件）+ 真机 Mac/Android 回归。
+- 决策：`docs/decisions/010-oss-direct-phase53.md`。
+
 ## 重要约束
 
 - 不删除或重构现有 CloudBaseService/CloudRepository/服务端 API（只能 additive）。
