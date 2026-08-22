@@ -163,6 +163,12 @@
 - 验证：`flutter test` 523/523（含新建 `lan_transport_test.dart` 会话级集成 8 用例，explorer 6 项测试缺口全部闭合）；`flutter analyze` 0 error；LAN 聚焦 90/90 三轮全绿；协议帧/v/能力位/原生插件零改动。
 - 后续：Windows LAN 支持（roadmap 附加待办剩余项）。
 
+### 附加待办 · Windows LAN 支持 — ✅ 已完成（2026-08-22）
+- 实现：新增 `windows/runner/lan_network_plugin.h/.cpp`（Win32 DNS-SD：`windns.h`/`dnsapi.lib` 的 `DnsServiceRegister/Browse/Resolve/DeRegister/Cancel`），实现 `clipflow/lan_network` 四方法 + `clipflow/lan_network_events` 事件流，手动注册（仿 image_clipboard_plugin）；Dart `lan_*` 零改动；否决 WinRT Dnssd（端口绑定与 Dart 预绑定 TLS 端口冲突触红线）。
+- 真机 Bug + 修复：`DnsServiceRegister` 需 `pszHostName`+`ip4Address` 否则 status 14/87 注册失败 → 静默 Cloud-only（无广播/无监听/诊断全 0）；补机器主机名（GetComputerNameExW FQDN→NetBIOS）+ 首选 IPv4（GetAdaptersAddresses），CMake 链接 `iphlpapi.lib`。
+- 验证（Windows 11 真机 + Mac）：`flutter build windows --debug/release` ✅；Windows 广播被 Mac dns-sd 可见；TLS 监听 `0.0.0.0:<port>`；TXT 白名单仅 proto/device/caps/port（`dns-sd -L` 实证零敏感字段）；Windows 诊断「发现设备=1、握手成功=1」（双向挑战握手）；Mac→Windows 内容交付成功。本地 `flutter test` 523/523、analyze 0 error；红线零触碰。
+- 决策：`docs/decisions/009-windows-lan-plugin-win32-dnssd.md`（见下）。
+
 ## 重要约束
 
 - 不删除或重构现有 CloudBaseService/CloudRepository/服务端 API（只能 additive）。
