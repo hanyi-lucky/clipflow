@@ -1,12 +1,16 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../core/constants.dart';
 import '../models/device.dart';
 import '../services/cloudbase_service.dart';
+import '../services/oss_direct_client.dart';
 
 class CloudRepository {
   final CloudBaseService _cloud;
+  final OssDirectClient _oss;
 
-  CloudRepository(this._cloud);
+  CloudRepository(this._cloud, {OssDirectClient? ossDirectClient})
+      : _oss = ossDirectClient ?? OssDirectClient();
 
   // --- 设备管理 ---
 
@@ -143,6 +147,10 @@ class CloudRepository {
   // --- 文件同步 ---
 
   /// 流式上传文件密文，元数据走 `x-clipflow-*` headers（base64url）。
+  ///
+  /// 优先 OSS 直传（Phase 5.3）：presign → 直传 PUT → confirm；任一步失败
+  /// （presign 503 / OSS 不可达 / PUT 失败 / confirm HEAD 失败）回退服务器中转 relay。
+  /// 对外签名不变，调用方（SyncCoordinator/outbox/LAN/fake 测试）零改动。
   Future<void> uploadFile({
     required String encryptedPath,
     required String historyId,
@@ -171,6 +179,41 @@ class CloudRepository {
       'x-clipflow-timestamp': '$timestamp',
       'x-clipflow-marker': base64UrlEncode(utf8.encode(marker)),
     };
+
+    // OSS 直传（forceFileRelay 调试开关强制走 relay）
+    if (!AppConstants.forceFileRelay) {
+      try {
+        final presign = await _cloud.presignUpload(headers: headers);
+        final presignData = presign['data'] as Map<String, dynamic>? ?? const {};
+        final uploadUrl = presignData['uploadUrl'] as String?;
+        final fileKey = presignData['fileKey'] as String?;
+        if (uploadUrl == null || fileKey == null) {
+          throw Exception('Invalid presign upload response');
+        }
+        final direct = await _oss.putStream(
+          Uri.parse(uploadUrl),
+          encryptedPath,
+          timeout: AppConstants.ossDirectTimeout,
+        );
+        if (direct.statusCode < 200 || direct.statusCode >= 300) {
+          await direct.stream.drain<void>();
+          throw Exception('OSS direct upload failed: ${direct.statusCode}');
+        }
+        await direct.stream.drain<void>();
+        // confirm 需要 JSON body（fileKey/historyId），去掉 octet-stream Content-Type
+        final metadataHeaders = Map<String, String>.from(headers)
+          ..remove('Content-Type');
+        await _cloud.confirmPresignUpload(
+          historyId: historyId,
+          fileKey: fileKey,
+          headers: metadataHeaders,
+        );
+        return; // 直传成功，全程不经 ECS 中转
+      } catch (_) {
+        // 任何异常回退 relay（保正确性优先：relay 自带流式计数校验）
+      }
+    }
+
     final response = await _cloud.uploadFileStream(
       encryptedPath,
       headers: headers,
@@ -182,7 +225,30 @@ class CloudRepository {
     await response.stream.drain<void>();
   }
 
-  Future<http.StreamedResponse> downloadFile(String entryId) {
+  /// 下载文件密文：OSS 直下优先、relay 兜底（对外签名不变，返回 StreamedResponse）。
+  Future<http.StreamedResponse> downloadFile(String entryId) async {
+    if (!AppConstants.forceFileRelay) {
+      try {
+        final info = await _cloud.presignDownload(entryId);
+        final data = info['data'] as Map<String, dynamic>? ?? const {};
+        if (data['storage'] == 'oss') {
+          final downloadUrl = data['downloadUrl'] as String?;
+          if (downloadUrl != null) {
+            final direct = await _oss.getStream(
+              Uri.parse(downloadUrl),
+              timeout: AppConstants.ossDirectTimeout,
+            );
+            if (direct.statusCode == 200) {
+              return direct; // 直下成功
+            }
+            await direct.stream.drain<void>();
+          }
+        }
+        // storage=='disk' 或直下失败 → 走 relay
+      } catch (_) {
+        // 直下异常（presign 失败/网络错误）→ 回退 relay
+      }
+    }
     return _cloud.downloadFileStream('/file/$entryId/content');
   }
 }
