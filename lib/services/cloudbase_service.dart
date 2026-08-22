@@ -109,22 +109,25 @@ class CloudBaseService {
   }
 
   /// 调用 API（token 失效时自动重新登录并重试）
+  /// [headers] 可覆盖默认 Content-Type 与携带 x-clipflow-* 元数据（OSS presign 用）。
   Future<Map<String, dynamic>> _callApi(
     String method,
     String path, {
     Map<String, dynamic>? body,
     Duration timeout = const Duration(seconds: 10),
+    Map<String, String>? headers,
   }) async {
     final uri = Uri.parse('$_baseUrl$path');
-    final headers = {
+    final mergedHeaders = {
       'Content-Type': 'application/json',
       if (_token != null) 'Authorization': 'Bearer $_token',
+      ...?headers,
     };
 
     var response = await _sendRequest(
       method,
       uri,
-      headers: headers,
+      headers: mergedHeaders,
       body: body != null ? jsonEncode(body) : null,
       timeout: timeout,
     );
@@ -132,11 +135,11 @@ class CloudBaseService {
     // token 失效 → 自动重新登录并重试一次
     if (response.statusCode == 401 && _userId != null) {
       await signInAnonymously(userId: _userId, deviceId: _deviceId);
-      headers['Authorization'] = 'Bearer $_token';
+      mergedHeaders['Authorization'] = 'Bearer $_token';
       response = await _sendRequest(
         method,
         uri,
-        headers: headers,
+        headers: mergedHeaders,
         body: body != null ? jsonEncode(body) : null,
         timeout: timeout,
       );
@@ -279,6 +282,42 @@ class CloudBaseService {
       throw Exception('HTTP ${response.statusCode}: $body');
     }
     return response;
+  }
+
+  // --- OSS 直传（Phase 5.3，仅 additive；复用 _callApi 的 401 自动重登 + 429 解析）---
+
+  /// 签发 OSS 直传 PUT 预签名 URL（元数据 headers 与上传一致，含 octet-stream）。
+  Future<Map<String, dynamic>> presignUpload({
+    required Map<String, String> headers,
+    Duration timeout = const Duration(seconds: 10),
+  }) {
+    return _callApi(
+      'POST',
+      '/file/presign-upload',
+      headers: {...headers, 'Content-Type': 'application/octet-stream'},
+      timeout: timeout,
+    );
+  }
+
+  /// 直传成功后确认：重放元数据 headers + body { historyId, fileKey }（HEAD 校验 + 写元数据）。
+  Future<Map<String, dynamic>> confirmPresignUpload({
+    required String historyId,
+    required String fileKey,
+    Map<String, String>? headers,
+    Duration timeout = const Duration(seconds: 10),
+  }) {
+    return _callApi(
+      'POST',
+      '/file/presign-upload/confirm',
+      headers: headers,
+      body: {'historyId': historyId, 'fileKey': fileKey},
+      timeout: timeout,
+    );
+  }
+
+  /// 签发 OSS 直下 GET 预签名 URL（oss 行）；磁盘行返回 storage:'disk'。
+  Future<Map<String, dynamic>> presignDownload(String entryId) {
+    return _callApi('GET', '/file/$entryId/presign-download');
   }
 
   // --- LAN 握手票据（Phase 2.1，仅 additive；复用 _callApi 的 401 自动重登 + 429 解析）---

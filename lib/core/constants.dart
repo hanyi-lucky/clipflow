@@ -23,6 +23,13 @@ class AppConstants {
   // 只拦「永久毒行」的跨 tick 自动重下，瞬态网络失败不受影响。
   static const int fileBreakerMaxFailures = 3;
   static const Duration fileBreakerCooldown = Duration(seconds: 60);
+
+  // OSS 直传（Phase 5.3）：直传/直下超时（与 relay 一致，大文件流式传输需要长超时）。
+  static const Duration ossDirectTimeout = Duration(seconds: 300);
+
+  /// debug 开关：强制文件走服务器 relay 中转（跳过 OSS 直传/直下）。
+  /// 仅测试/故障注入用，默认 false，非 UI 功能。
+  static const bool forceFileRelay = false;
 }
 
 /// 图片文件扩展名，与 macOS/Windows 原生通道保持一致。
