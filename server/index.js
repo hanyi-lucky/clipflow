@@ -619,6 +619,53 @@ function writeFileMetadataTransaction(userId, historyId, fileKey, m) {
 
 // 生命周期删除统一分派器：按 file_key 后端路由（oss → SDK delete；disk → 现状磁盘删除）。
 // OSS 对象不存在（NoSuchKey/404）视为已删除（幂等）；磁盘删除自身对 ENOENT 幂等。
+
+// OSS 孤儿对象回收：OSS list（clipflow/ 前缀）→ 与 history 有效集（oss: 行）比对 →
+// LastModified 宽限 [OSS_ORPHAN_GRACE_MS] 内（在途上传/未 confirm）保留，超龄未引用对象删除。
+// 与磁盘 pruneUnreferencedFiles 语义同构；兼容模式跳过（返回 { skipped: true }）。
+async function pruneOssOrphans(now) {
+  const client = getOssClient();
+  if (!client) return { removed: 0, skipped: true };
+  const ts = now || Date.now();
+
+  const validKeys = new Set(
+    db.prepare(
+      "SELECT user_id, file_key FROM history WHERE file_key IS NOT NULL AND file_key LIKE 'oss:%'"
+    ).all().map((r) => objectKeyFor(r.user_id, r.file_key))
+  );
+
+  let removed = 0;
+  let marker = null;
+  let pages = 0;
+  do {
+    const query = { prefix: OSS_OBJECT_PREFIX, 'max-keys': 1000 };
+    if (marker) query.marker = marker;
+    let result;
+    try {
+      result = await client.list(query);
+    } catch (err) {
+      console.error('OSS orphan list failed:', err.message || err);
+      break;
+    }
+    for (const obj of result.objects || []) {
+      const lastModified = new Date(obj.lastModified).getTime();
+      if (validKeys.has(obj.name)) continue; // 被 history 引用，保留
+      if (ts - lastModified < OSS_ORPHAN_GRACE_MS) continue; // 宽限期内，保留
+      try {
+        await client.delete(obj.name);
+        removed += 1;
+      } catch (err) {
+        console.error('OSS orphan delete failed:', obj.name, err.message || err);
+      }
+    }
+    marker = result.nextMarker || null;
+    pages += 1;
+    if (pages > 100) break; // 防御：极端对象量时限制扫描页数
+  } while (result.isTruncated && marker);
+
+  return { removed, skipped: false };
+}
+
 async function deleteFileByBackend(userId, fileKey) {
   if (isOssKey(fileKey)) {
     const client = getOssClient();
@@ -1648,6 +1695,13 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   // 启动时清理一次过期同步状态（op 7d / tombstone 24h），重启即生效
   pruneSyncState(Date.now());
 
+  // 启动时清理一次 OSS 孤儿对象（兼容模式跳过）
+  pruneOssOrphans(Date.now()).then((r) => {
+    if (!r.skipped) console.log(`Startup OSS orphan prune removed ${r.removed} object(s)`);
+  }).catch((err) => {
+    console.error('Startup OSS orphan prune failed:', err);
+  });
+
   // 登录限流桶与崩溃限流桶定时清理（防内存膨胀；重启清零=更宽松，接受）
   setInterval(() => {
     pruneAuthBuckets(Date.now());
@@ -1680,5 +1734,9 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     } catch (err) {
       console.error('Hourly file prune failed:', err);
     }
+    // 小时级 OSS 孤儿对象回收（兼容模式跳过）
+    pruneOssOrphans(Date.now()).catch((err) => {
+      console.error('Hourly OSS orphan prune failed:', err);
+    });
   }, 60 * 60 * 1000);
 });
