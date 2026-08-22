@@ -35,6 +35,41 @@ const GLOBAL_FILE_QUOTA_BYTES = envInt('GLOBAL_FILE_QUOTA_BYTES', 4 * 1024 * 102
 // 1024 字节余量同时作为防配额绕过的大小校验窗口
 const FILE_CIPHERTEXT_OVERHEAD_BYTES = 1024;
 
+// ==================== OSS 直传配置（Phase 5.3）====================
+// 四件套（AK/SECRET/BUCKET/REGION）均未设置 → 兼容模式：OSS 直传禁用
+// （presign 端点 503，既有 relay 全功能，已部署服务器零改动可先上线）；
+// 部分设置 → 启动 fail-fast（防静默半配置）。
+const OSS_ACCESS_KEY_ID = process.env.OSS_ACCESS_KEY_ID || '';
+const OSS_ACCESS_KEY_SECRET = process.env.OSS_ACCESS_KEY_SECRET || '';
+const OSS_BUCKET = process.env.OSS_BUCKET || 'clipflow-files';
+const OSS_REGION = process.env.OSS_REGION || 'oss-cn-hangzhou';
+const OSS_ENDPOINT = process.env.OSS_ENDPOINT || ''; // 可选：覆盖端点（测试指向本地 stub；生产默认按 region 推导）
+const OSS_PRESIGN_TTL_MS = envInt('OSS_PRESIGN_TTL_MS', 15 * 60 * 1000);
+const OSS_ORPHAN_GRACE_MS = envInt('OSS_ORPHAN_GRACE_MS', 60 * 60 * 1000);
+
+function ossEnvSet(name) {
+  const v = process.env[name];
+  return v !== undefined && v !== '';
+}
+const OSS_ENV_PROVIDED_COUNT = [
+  'OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_REGION',
+].filter(ossEnvSet).length;
+const OSS_DISABLED = OSS_ENV_PROVIDED_COUNT === 0;
+const OSS_CONFIGURED = OSS_ENV_PROVIDED_COUNT === 4;
+if (!OSS_DISABLED && !OSS_CONFIGURED) {
+  console.error(
+    'FATAL: OSS 部分配置——OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET/OSS_BUCKET/OSS_REGION ' +
+    '必须四件套全设或全不设（全不设 = 兼容模式，OSS 直传禁用）'
+  );
+  process.exit(1);
+}
+if (OSS_CONFIGURED) {
+  console.log('OSS direct upload enabled (region=' + OSS_REGION + ', bucket=' + OSS_BUCKET +
+    (OSS_ENDPOINT ? ', endpoint=' + OSS_ENDPOINT : '') + ')');
+} else {
+  console.log('OSS direct upload disabled (compat mode, presign endpoints return 503)');
+}
+
 // 登录限流（POST /api/auth）：内存双滑动窗口（IP 桶 + userId 桶），全部 env 可调。
 // 重启清零=限制更宽松（无安全回退、无一致性要求，明确接受）；单实例（deploy.sh 强制 127.0.0.1）无共享需求。
 const AUTH_MAX_IP_REQUESTS = envInt('AUTH_MAX_IP_REQUESTS', 60);
@@ -442,6 +477,164 @@ function decodeBase64UrlHeader(value) {
   }
 }
 
+
+// ==================== OSS 直传助手（Phase 5.3）====================
+
+// file_key 列存储格式：OSS 行 = 'oss:<uuid>'；磁盘行 = '<uuid>'（现状不变）。
+// 对象 key 由服务端派生 clipflow/<userId>/<uuid>，客户端零选择权；
+// 既有磁盘路径 getFilePath() 校验 UUID 正则 → oss:* 永远无法命中磁盘路径（天然隔离）。
+const OSS_KEY_PREFIX = 'oss:';
+const OSS_OBJECT_PREFIX = 'clipflow/';
+const OSS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isOssKey(fileKey) {
+  return typeof fileKey === 'string' && fileKey.startsWith(OSS_KEY_PREFIX);
+}
+
+function objectKeyFor(userId, fileKey) {
+  return OSS_OBJECT_PREFIX + userId + '/' + fileKey.slice(OSS_KEY_PREFIX.length);
+}
+
+// 懒加载 OSS 客户端；兼容模式返回 null。
+let ossClient = null;
+function getOssClient() {
+  if (!OSS_CONFIGURED) return null;
+  if (!ossClient) {
+    const OSS = require('ali-oss');
+    const options = {
+      region: OSS_REGION,
+      accessKeyId: OSS_ACCESS_KEY_ID,
+      accessKeySecret: OSS_ACCESS_KEY_SECRET,
+      bucket: OSS_BUCKET,
+    };
+    if (OSS_ENDPOINT) options.endpoint = OSS_ENDPOINT;
+    ossClient = new OSS(options);
+  }
+  return ossClient;
+}
+
+// 解析文件上传元数据（与既有 POST /api/file 共用，重构复用非复制）。
+// requireOctetStream=false 时跳过 Content-Type 校验（confirm 走 JSON body，但 metadata 仍走 header）。
+function parseFileMetadata(req, options) {
+  const opts = options || {};
+  if (opts.requireOctetStream !== false && !req.is('application/octet-stream')) {
+    return { error: { status: 400, message: 'Content-Type must be application/octet-stream' } };
+  }
+
+  const historyId = req.headers['x-clipflow-history-id'];
+  const hash = req.headers['x-clipflow-hash'];
+  const fileSizeRaw = req.headers['x-clipflow-file-size'];
+  const fileName = decodeBase64UrlHeader(req.headers['x-clipflow-file-name']);
+  const marker = decodeBase64UrlHeader(req.headers['x-clipflow-marker']);
+
+  if (!historyId || !hash || fileSizeRaw == null || !fileName || !marker) {
+    return { error: { status: 400, message: 'Missing required file metadata headers' } };
+  }
+
+  const fileSize = Number.parseInt(fileSizeRaw, 10);
+  if (!Number.isInteger(fileSize) || fileSize < 0) {
+    return { error: { status: 400, message: 'Invalid x-clipflow-file-size' } };
+  }
+  if (fileSize > MAX_FILE_BYTES) {
+    return { error: { status: 413, message: `File too large: ${fileSize} exceeds ${MAX_FILE_BYTES}` } };
+  }
+
+  return {
+    metadata: {
+      historyId,
+      hash,
+      fileSize,
+      fileName,
+      marker,
+      mimeType: decodeBase64UrlHeader(req.headers['x-clipflow-mime-type']) || 'application/octet-stream',
+      sourceDevice: decodeBase64UrlHeader(req.headers['x-clipflow-source-device']) || 'unknown',
+      sourceDeviceName: decodeBase64UrlHeader(req.headers['x-clipflow-source-device-name']) || 'Unknown',
+      sourcePlatform: decodeBase64UrlHeader(req.headers['x-clipflow-source-platform']) || 'unknown',
+      timestamp: Number.parseInt(req.headers['x-clipflow-timestamp'], 10) || Date.now(),
+    },
+  };
+}
+
+// 配额检查（与现状口径一致：history 表 SUM(file_size)，明文大小，与存储后端解耦）。
+// 返回 { status, message } 或 null。
+function checkFileQuota(userId, fileSize) {
+  const userFileBytes = db.prepare(
+    'SELECT COALESCE(SUM(file_size), 0) AS total FROM history WHERE user_id = ?'
+  ).get(userId).total;
+  if (userFileBytes + fileSize > USER_FILE_QUOTA_BYTES) {
+    return {
+      status: 507,
+      message: `User file quota exceeded (${userFileBytes} + ${fileSize} > ${USER_FILE_QUOTA_BYTES})`,
+    };
+  }
+
+  const globalFileBytes = db.prepare(
+    'SELECT COALESCE(SUM(file_size), 0) AS total FROM history'
+  ).get().total;
+  if (globalFileBytes + fileSize > GLOBAL_FILE_QUOTA_BYTES) {
+    return {
+      status: 507,
+      message: `Global file quota exceeded (${globalFileBytes} + ${fileSize} > ${GLOBAL_FILE_QUOTA_BYTES})`,
+    };
+  }
+  return null;
+}
+
+// 文件元数据事务（POST /api/file 与 presign-upload/confirm 完全同构）：
+// 同 historyId 重传覆盖读取旧 file_key → DELETE clipboard + INSERT clipboard →
+// INSERT OR REPLACE history → 收集 100 条裁剪 file_key → 裁剪。返回 { oldFileKey, trimmedFileKeys }，
+// 调用方在事务提交后按后端分派删除（磁盘文件 / OSS 对象）。
+function writeFileMetadataTransaction(userId, historyId, fileKey, m) {
+  let oldFileKey = null;
+  let trimmedFileKeys = [];
+  db.transaction(() => {
+    const existing = db.prepare('SELECT file_key FROM history WHERE id = ? AND user_id = ?')
+      .get(historyId, userId);
+    oldFileKey = existing && existing.file_key ? existing.file_key : null;
+
+    db.prepare('DELETE FROM clipboard WHERE user_id = ?').run(userId);
+    db.prepare(`INSERT INTO clipboard (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type, thumb, width, height, format, history_id, file_name, file_size, mime_type, file_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      uuidv4(), userId, m.marker, m.hash, m.sourceDevice, m.sourceDeviceName, m.sourcePlatform,
+      m.timestamp, 'file', null, null, null, null, historyId, m.fileName, m.fileSize, m.mimeType, fileKey
+    );
+
+    db.prepare(`INSERT OR REPLACE INTO history (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type, pinned, deleted_at, restored_at, thumb, width, height, format, file_name, file_size, mime_type, file_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      historyId, userId, m.marker, m.hash, m.sourceDevice, m.sourceDeviceName, m.sourcePlatform,
+      m.timestamp, 'file', 0, null, null, null, null, null, null, m.fileName, m.fileSize, m.mimeType, fileKey
+    );
+
+    trimmedFileKeys = db.prepare(`SELECT file_key FROM history
+      WHERE user_id = ? AND file_key IS NOT NULL AND id NOT IN (
+        SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
+      )`).all(userId, userId).map(r => r.file_key);
+
+    db.prepare(`DELETE FROM history WHERE user_id = ? AND id NOT IN (
+      SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
+    )`).run(userId, userId);
+  })();
+  return { oldFileKey, trimmedFileKeys };
+}
+
+// 生命周期删除统一分派器：按 file_key 后端路由（oss → SDK delete；disk → 现状磁盘删除）。
+// OSS 对象不存在（NoSuchKey/404）视为已删除（幂等）；磁盘删除自身对 ENOENT 幂等。
+async function deleteFileByBackend(userId, fileKey) {
+  if (isOssKey(fileKey)) {
+    const client = getOssClient();
+    if (!client) return;
+    try {
+      await client.delete(objectKeyFor(userId, fileKey));
+    } catch (err) {
+      const code = (err && (err.code || err.name)) || '';
+      if (code === 'NoSuchKey' || err.status === 404 || String(code).includes('NoSuchKey')) return;
+      throw err;
+    }
+    return;
+  }
+  fileStore.deleteFile(userId, fileKey);
+}
+
 function collectValidFileKeys() {
   return db.prepare('SELECT file_key FROM history WHERE file_key IS NOT NULL')
     .all().map(r => r.file_key);
@@ -613,49 +806,16 @@ app.post('/api/clipboard', authenticate, (req, res) => {
 
 // 上传文件密文（raw octet-stream，元数据全部走 header）
 app.post('/api/file', authenticate, async (req, res) => {
-  if (!req.is('application/octet-stream')) {
-    return sendFileError(req, res, 400, 'Content-Type must be application/octet-stream');
+  const parsed = parseFileMetadata(req);
+  if (parsed.error) {
+    return sendFileError(req, res, parsed.error.status, parsed.error.message);
   }
-
-  const historyId = req.headers['x-clipflow-history-id'];
-  const hash = req.headers['x-clipflow-hash'];
-  const fileSizeRaw = req.headers['x-clipflow-file-size'];
-  const fileName = decodeBase64UrlHeader(req.headers['x-clipflow-file-name']);
-  const marker = decodeBase64UrlHeader(req.headers['x-clipflow-marker']);
-
-  if (!historyId || !hash || fileSizeRaw == null || !fileName || !marker) {
-    return sendFileError(req, res, 400, 'Missing required file metadata headers');
-  }
-
-  const fileSize = Number.parseInt(fileSizeRaw, 10);
-  if (!Number.isInteger(fileSize) || fileSize < 0) {
-    return sendFileError(req, res, 400, 'Invalid x-clipflow-file-size');
-  }
-  if (fileSize > MAX_FILE_BYTES) {
-    return sendFileError(req, res, 413, `File too large: ${fileSize} exceeds ${MAX_FILE_BYTES}`);
-  }
-
-  const mimeType = decodeBase64UrlHeader(req.headers['x-clipflow-mime-type']) || 'application/octet-stream';
-  const sourceDevice = decodeBase64UrlHeader(req.headers['x-clipflow-source-device']) || 'unknown';
-  const sourceDeviceName = decodeBase64UrlHeader(req.headers['x-clipflow-source-device-name']) || 'Unknown';
-  const sourcePlatform = decodeBase64UrlHeader(req.headers['x-clipflow-source-platform']) || 'unknown';
-  const timestamp = Number.parseInt(req.headers['x-clipflow-timestamp'], 10) || Date.now();
+  const m = parsed.metadata;
 
   try {
-    const userFileBytes = db.prepare(
-      'SELECT COALESCE(SUM(file_size), 0) AS total FROM history WHERE user_id = ?'
-    ).get(req.userId).total;
-    if (userFileBytes + fileSize > USER_FILE_QUOTA_BYTES) {
-      return sendFileError(req, res, 507,
-        `User file quota exceeded (${userFileBytes} + ${fileSize} > ${USER_FILE_QUOTA_BYTES})`);
-    }
-
-    const globalFileBytes = db.prepare(
-      'SELECT COALESCE(SUM(file_size), 0) AS total FROM history'
-    ).get().total;
-    if (globalFileBytes + fileSize > GLOBAL_FILE_QUOTA_BYTES) {
-      return sendFileError(req, res, 507,
-        `Global file quota exceeded (${globalFileBytes} + ${fileSize} > ${GLOBAL_FILE_QUOTA_BYTES})`);
+    const quotaError = checkFileQuota(req.userId, m.fileSize);
+    if (quotaError) {
+      return sendFileError(req, res, quotaError.status, quotaError.message);
     }
   } catch (err) {
     console.error('File quota check failed:', err);
@@ -666,19 +826,19 @@ app.post('/api/file', authenticate, async (req, res) => {
   try {
     // body 上限 = 明文上限 + 密文开销余量
     const received = await fileStore.writeUploadStream(
-      req, req.userId, fileKey, fileSize,
+      req, req.userId, fileKey, m.fileSize,
       MAX_FILE_BYTES + FILE_CIPHERTEXT_OVERHEAD_BYTES,
     );
     // 真实客户端 header 声明的是明文大小，请求体是密文（明文+约30字节）。
     // 拒绝小于明文或超出明文+余量的请求，防声明小、实际大绕过配额。
-    if (received < fileSize ||
-        received > fileSize + FILE_CIPHERTEXT_OVERHEAD_BYTES) {
-      console.error('File size mismatch: declared', fileSize, 'received', received);
+    if (received < m.fileSize ||
+        received > m.fileSize + FILE_CIPHERTEXT_OVERHEAD_BYTES) {
+      console.error('File size mismatch: declared', m.fileSize, 'received', received);
       try { fileStore.deleteFile(req.userId, fileKey); } catch (cleanupErr) {
         console.error('File cleanup failed:', cleanupErr);
       }
       return sendFileError(req, res, 400,
-        `FILE_SIZE_MISMATCH: declared ${fileSize}, received ${received}`);
+        `FILE_SIZE_MISMATCH: declared ${m.fileSize}, received ${received}`);
     }
   } catch (err) {
     console.error('File upload stream failed:', err);
@@ -691,43 +851,16 @@ app.post('/api/file', authenticate, async (req, res) => {
     return sendFileError(req, res, 500, 'Internal server error');
   }
 
-  let oldFileKey = null;
-  let trimmedFileKeys = [];
   try {
-    db.transaction(() => {
-      const existing = db.prepare('SELECT file_key FROM history WHERE id = ? AND user_id = ?')
-        .get(historyId, req.userId);
-      oldFileKey = existing && existing.file_key ? existing.file_key : null;
-
-      db.prepare('DELETE FROM clipboard WHERE user_id = ?').run(req.userId);
-      db.prepare(`INSERT INTO clipboard (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type, thumb, width, height, format, history_id, file_name, file_size, mime_type, file_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        uuidv4(), req.userId, marker, hash, sourceDevice, sourceDeviceName, sourcePlatform,
-        timestamp, 'file', null, null, null, null, historyId, fileName, fileSize, mimeType, fileKey
-      );
-
-      db.prepare(`INSERT OR REPLACE INTO history (id, user_id, content, hash, source_device, source_device_name, source_platform, timestamp, type, pinned, deleted_at, restored_at, thumb, width, height, format, file_name, file_size, mime_type, file_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        historyId, req.userId, marker, hash, sourceDevice, sourceDeviceName, sourcePlatform,
-        timestamp, 'file', 0, null, null, null, null, null, null, fileName, fileSize, mimeType, fileKey
-      );
-
-      trimmedFileKeys = db.prepare(`SELECT file_key FROM history
-        WHERE user_id = ? AND file_key IS NOT NULL AND id NOT IN (
-          SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
-        )`).all(req.userId, req.userId).map(r => r.file_key);
-
-      db.prepare(`DELETE FROM history WHERE user_id = ? AND id NOT IN (
-        SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
-      )`).run(req.userId, req.userId);
-    })();
-
-    // 磁盘删除放到事务之后：先收集 file_key，再删记录，最后删文件
+    const { oldFileKey, trimmedFileKeys } = writeFileMetadataTransaction(
+      req.userId, m.historyId, fileKey, m,
+    );
+    // 文件删除放到事务之后：先收集 file_key，再删记录，最后按后端分派删除
     if (oldFileKey && oldFileKey !== fileKey) {
-      fileStore.deleteFile(req.userId, oldFileKey);
+      await deleteFileByBackend(req.userId, oldFileKey);
     }
     for (const key of trimmedFileKeys) {
-      fileStore.deleteFile(req.userId, key);
+      await deleteFileByBackend(req.userId, key);
     }
   } catch (err) {
     console.error('File metadata insert failed:', err);
@@ -737,16 +870,176 @@ app.post('/api/file', authenticate, async (req, res) => {
     return sendFileError(req, res, 500, 'Internal server error');
   }
 
-  res.json({ code: 'SUCCESS', id: historyId });
+  res.json({ code: 'SUCCESS', id: m.historyId });
 });
 
-// 下载文件密文（按 user_id 作用域校验）
-app.get('/api/file/:id/content', authenticate, (req, res) => {
+// 签发 OSS 直传 PUT 预签名 URL（元数据 headers 与 POST /api/file 完全一致）。
+// 兼容模式（未配置 OSS）→ 503，客户端回退服务器中转 relay。
+app.post('/api/file/presign-upload', authenticate, async (req, res) => {
+  const client = getOssClient();
+  if (!client) {
+    return sendFileError(req, res, 503, 'OSS direct upload not configured');
+  }
+  const parsed = parseFileMetadata(req);
+  if (parsed.error) {
+    return sendFileError(req, res, parsed.error.status, parsed.error.message);
+  }
+  const m = parsed.metadata;
+
+  try {
+    const quotaError = checkFileQuota(req.userId, m.fileSize);
+    if (quotaError) {
+      return sendFileError(req, res, quotaError.status, quotaError.message);
+    }
+  } catch (err) {
+    console.error('File quota check failed:', err);
+    return sendFileError(req, res, 500, 'Internal server error');
+  }
+
+  // 对象 key 由服务端签发（含 userId 前缀），客户端不可自选路径
+  const fileKey = OSS_KEY_PREFIX + uuidv4();
+  const objectKey = objectKeyFor(req.userId, fileKey);
+  try {
+    const expiresSec = Math.ceil(OSS_PRESIGN_TTL_MS / 1000);
+    const uploadUrl = await client.signatureUrlV4('PUT', expiresSec, undefined, objectKey);
+    res.json({
+      code: 'SUCCESS',
+      data: { fileKey, uploadUrl, objectKey, expiresAt: Date.now() + OSS_PRESIGN_TTL_MS },
+    });
+  } catch (err) {
+    console.error('OSS presign upload failed:', err);
+    return sendFileError(req, res, 500, 'Internal server error');
+  }
+});
+
+// 客户端直传成功后确认：重放元数据 headers（body 携带 historyId/fileKey），
+// HEAD 校验对象尺寸（防配额绕过，替代原流式计数）→ 写 clipboard/history 元数据。
+app.post('/api/file/presign-upload/confirm', authenticate, async (req, res) => {
+  const client = getOssClient();
+  if (!client) {
+    return sendFileError(req, res, 503, 'OSS direct upload not configured');
+  }
+  const parsed = parseFileMetadata(req, { requireOctetStream: false });
+  if (parsed.error) {
+    return sendFileError(req, res, parsed.error.status, parsed.error.message);
+  }
+  const m = parsed.metadata;
+  const body = req.body || {};
+  const fileKey = body.fileKey;
+  if (!fileKey || !isOssKey(fileKey)) {
+    return res.status(400).json({ code: 'ERROR', message: 'Invalid fileKey' });
+  }
+  const uuid = fileKey.slice(OSS_KEY_PREFIX.length);
+  if (!OSS_UUID_RE.test(uuid)) {
+    return res.status(400).json({ code: 'ERROR', message: 'Invalid fileKey' });
+  }
+
+  // 幂等守卫：同 historyId 已存在且 fileKey 一致 → 直接成功（outbox 重试零副作用）
+  const existing = db.prepare('SELECT file_key FROM history WHERE id = ? AND user_id = ?')
+    .get(m.historyId, req.userId);
+  if (existing && existing.file_key === fileKey) {
+    return res.json({ code: 'SUCCESS', id: m.historyId });
+  }
+
+  const objectKey = objectKeyFor(req.userId, fileKey);
+  try {
+    // HEAD 校验（防配额绕过）：实际密文大小须 ∈ [声明明文, 声明明文 + 1024]
+    const meta = await client.getObjectMeta(objectKey);
+    const actualSize = Number(meta.res.headers['content-length'] || 0);
+    if (actualSize < m.fileSize ||
+        actualSize > m.fileSize + FILE_CIPHERTEXT_OVERHEAD_BYTES) {
+      console.error('OSS size mismatch: declared', m.fileSize, 'actual', actualSize);
+      return sendFileError(req, res, 400,
+        `FILE_SIZE_MISMATCH: declared ${m.fileSize}, actual ${actualSize}`);
+    }
+  } catch (err) {
+    console.error('OSS confirm head failed:', err);
+    const code = (err && (err.code || err.name)) || '';
+    if (code === 'NoSuchKey' || err.status === 404 || String(code).includes('NoSuchKey')) {
+      return sendFileError(req, res, 400, 'FILE_SIZE_MISMATCH: object not found');
+    }
+    return sendFileError(req, res, 500, 'Internal server error');
+  }
+
+  try {
+    const { oldFileKey, trimmedFileKeys } = writeFileMetadataTransaction(
+      req.userId, m.historyId, fileKey, m,
+    );
+    if (oldFileKey && oldFileKey !== fileKey) {
+      await deleteFileByBackend(req.userId, oldFileKey);
+    }
+    for (const key of trimmedFileKeys) {
+      await deleteFileByBackend(req.userId, key);
+    }
+  } catch (err) {
+    console.error('File metadata insert failed:', err);
+    return sendFileError(req, res, 500, 'Internal server error');
+  }
+
+  res.json({ code: 'SUCCESS', id: m.historyId });
+});
+
+// 签发 OSS 直传 GET 预签名 URL（oss 行）；磁盘行返回 storage:'disk'（客户端走既有 relay）。
+app.get('/api/file/:id/presign-download', authenticate, async (req, res) => {
   const row = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.userId);
 
   if (!row || row.type !== 'file' || !row.file_key) {
     return res.status(404).json({ code: 'NOT_FOUND' });
+  }
+
+  if (isOssKey(row.file_key)) {
+    const client = getOssClient();
+    if (!client) {
+      return res.status(404).json({ code: 'NOT_FOUND' });
+    }
+    try {
+      const objectKey = objectKeyFor(req.userId, row.file_key);
+      const expiresSec = Math.ceil(OSS_PRESIGN_TTL_MS / 1000);
+      const downloadUrl = await client.signatureUrlV4('GET', expiresSec, undefined, objectKey);
+      return res.json({
+        code: 'SUCCESS',
+        data: { storage: 'oss', downloadUrl, expiresAt: Date.now() + OSS_PRESIGN_TTL_MS },
+      });
+    } catch (err) {
+      console.error('OSS presign download failed:', err);
+      return res.status(500).json({ code: 'ERROR', message: 'Internal server error' });
+    }
+  }
+
+  return res.json({ code: 'SUCCESS', data: { storage: 'disk' } });
+});
+
+// 下载文件密文（按 user_id 作用域校验；oss 行经 SDK 流式兜底，旧客户端零改动可读）
+app.get('/api/file/:id/content', authenticate, async (req, res) => {
+  const row = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.userId);
+
+  if (!row || row.type !== 'file' || !row.file_key) {
+    return res.status(404).json({ code: 'NOT_FOUND' });
+  }
+
+  if (isOssKey(row.file_key)) {
+    const client = getOssClient();
+    if (!client) {
+      return res.status(404).json({ code: 'NOT_FOUND' });
+    }
+    try {
+      const { stream, res: ossRes } = await client.getStream(objectKeyFor(req.userId, row.file_key));
+      const length = Number(ossRes.headers['content-length'] || 0);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      if (length > 0) res.setHeader('Content-Length', length);
+      stream.on('error', () => res.destroy());
+      stream.pipe(res);
+    } catch (err) {
+      console.error('OSS relay download failed:', err);
+      const code = (err && (err.code || err.name)) || '';
+      if (code === 'NoSuchKey' || err.status === 404 || String(code).includes('NoSuchKey')) {
+        return res.status(404).json({ code: 'NOT_FOUND' });
+      }
+      return res.status(500).json({ code: 'ERROR', message: 'Internal server error' });
+    }
+    return;
   }
 
   const stream = fileStore.readFileStream(req.userId, row.file_key);
@@ -792,8 +1085,8 @@ app.patch('/api/history/:id', authenticate, (req, res) => {
   res.json({ code: 'SUCCESS' });
 });
 
-// 倾倒垃圾桶：物理删除当前用户所有软删条目，并同步清理磁盘文件
-app.delete('/api/history/trash', authenticate, (req, res) => {
+// 倾倒垃圾桶：物理删除当前用户所有软删条目，并同步清理磁盘文件/OSS 对象
+app.delete('/api/history/trash', authenticate, async (req, res) => {
   const fileRows = db.prepare(
     'SELECT file_key FROM history WHERE user_id = ? AND deleted_at IS NOT NULL AND file_key IS NOT NULL'
   ).all(req.userId);
@@ -802,7 +1095,7 @@ app.delete('/api/history/trash', authenticate, (req, res) => {
   ).run(req.userId);
   for (const row of fileRows) {
     try {
-      fileStore.deleteFile(req.userId, row.file_key);
+      await deleteFileByBackend(req.userId, row.file_key);
     } catch (err) {
       console.error('Trash file cleanup failed:', err);
     }
@@ -1378,11 +1671,9 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     ).all(Date.now() - 24 * 60 * 60 * 1000);
     db.prepare("DELETE FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?").run(Date.now() - 24 * 60 * 60 * 1000);
     for (const row of expiredFileRows) {
-      try {
-        fileStore.deleteFile(row.user_id, row.file_key);
-      } catch (err) {
+      deleteFileByBackend(row.user_id, row.file_key).catch((err) => {
         console.error('Expired file cleanup failed:', err);
-      }
+      });
     }
     try {
       fileStore.pruneUnreferencedFiles(collectValidFileKeys());
