@@ -190,13 +190,20 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        surfaceTintColor: Colors.transparent,
         title: const Text(AppStrings.renameDeviceTitle),
         content: TextField(
           controller: controller,
           autofocus: true,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: AppStrings.deviceNameLabel,
             hintText: AppStrings.deviceNameHint,
+            filled: true,
+            fillColor: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: Theme.of(context).colorScheme.outline.withOpacity(0.3)),
+            ),
           ),
         ),
         actions: [
@@ -249,6 +256,7 @@ class _DeviceManagementSectionState extends State<DeviceManagementSection> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        surfaceTintColor: Colors.transparent,
         title: const Text(AppStrings.removeDeviceTitle),
         content: Text(
           isCurrentDevice

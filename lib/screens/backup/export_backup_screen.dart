@@ -115,6 +115,7 @@ class _ExportBackupScreenState extends State<ExportBackupScreen> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
+          surfaceTintColor: Colors.transparent,
           title: const Text(AppStrings.largeBackupWarningTitle),
           content: Text(
             AppStrings.largeBackupWarningBody(mb),

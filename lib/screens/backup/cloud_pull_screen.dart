@@ -262,8 +262,11 @@ class _CloudPullScreenState extends State<CloudPullScreen> {
               decoration: InputDecoration(
                 labelText: AppStrings.oldPasswordLabel,
                 prefixIcon: const Icon(Icons.lock_outline_rounded),
+                filled: true,
+                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Theme.of(context).colorScheme.outline.withOpacity(0.3)),
                 ),
               ),
               onSubmitted: (_) => _startPull(),

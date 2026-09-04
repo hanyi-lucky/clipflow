@@ -307,6 +307,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   showDialog(
                                     context: context,
                                     builder: (ctx) => AlertDialog(
+                                      surfaceTintColor: Colors.transparent,
                                       title: const Text(AppStrings.commonDelete),
                                       content: const Text(AppStrings.deleteEntryConfirmBody),
                                       actions: [

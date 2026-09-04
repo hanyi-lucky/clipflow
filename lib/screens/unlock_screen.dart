@@ -187,6 +187,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
+          surfaceTintColor: Colors.transparent,
           title: const Text(AppStrings.switchAccountAction),
           content: const Text(AppStrings.switchAccountConfirmBody),
           actions: [

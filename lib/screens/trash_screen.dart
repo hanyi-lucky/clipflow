@@ -335,6 +335,7 @@ class _TrashScreenState extends State<TrashScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        surfaceTintColor: Colors.transparent,
         title: const Text(AppStrings.emptyTrashTitle),
         content: const Text(AppStrings.emptyTrashConfirmBody),
         actions: [
@@ -381,6 +382,7 @@ class _TrashScreenState extends State<TrashScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        surfaceTintColor: Colors.transparent,
         title: const Text(AppStrings.restoreEntryTitle),
         content: const Text(AppStrings.restoreEntryConfirmBody),
         actions: [
