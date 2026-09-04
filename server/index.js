@@ -610,13 +610,19 @@ function writeFileMetadataTransaction(userId, historyId, fileKey, m) {
     );
 
     trimmedFileKeys = db.prepare(`SELECT file_key FROM history
-      WHERE user_id = ? AND file_key IS NOT NULL AND id NOT IN (
-        SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
+      WHERE user_id = ? AND file_key IS NOT NULL AND deleted_at IS NULL AND pinned = 0
+      AND id NOT IN (
+        SELECT id FROM history WHERE user_id = ? AND deleted_at IS NULL AND pinned = 0
+        ORDER BY timestamp DESC LIMIT 100
       )`).all(userId, userId).map(r => r.file_key);
 
-    db.prepare(`DELETE FROM history WHERE user_id = ? AND id NOT IN (
-      SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
-    )`).run(userId, userId);
+    db.prepare(`DELETE FROM history
+      WHERE user_id = ? AND deleted_at IS NULL AND pinned = 0
+      AND id NOT IN (
+        SELECT id FROM history
+        WHERE user_id = ? AND deleted_at IS NULL AND pinned = 0
+        ORDER BY timestamp DESC LIMIT 100
+      )`).run(userId, userId);
   })();
   return { oldFileKey, trimmedFileKeys };
 }
@@ -861,10 +867,14 @@ app.post('/api/clipboard', authenticate, (req, res) => {
     type || 'text', thumb || null, width || null, height || null, format || null
   );
 
-  // 清理旧历史记录（保留最近100条）
-  db.prepare(`DELETE FROM history WHERE user_id = ? AND id NOT IN (
-    SELECT id FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 100
-  )`).run(req.userId, req.userId);
+  // 清理旧历史记录（保留最近100条非置顶活跃 + 全部置顶活跃）
+  db.prepare(`DELETE FROM history
+    WHERE user_id = ? AND deleted_at IS NULL AND pinned = 0
+    AND id NOT IN (
+      SELECT id FROM history
+      WHERE user_id = ? AND deleted_at IS NULL AND pinned = 0
+      ORDER BY timestamp DESC LIMIT 100
+    )`).run(req.userId, req.userId);
 
   res.json({ code: 'SUCCESS', id });
 });
@@ -1538,7 +1548,7 @@ app.delete('/api/device/:id', authenticate, (req, res) => {
     .run(Date.now(), req.params.id, req.userId);
 
   // 删除该设备绑定的 token
-  db.prepare('DELETE FROM tokens WHERE device_id = ?').run(req.params.id);
+  db.prepare('DELETE FROM tokens WHERE device_id = ? AND user_id = ?').run(req.params.id, req.userId);
 
   // 同时删除发起删除请求的当前 token（兼容未绑定 device_id 的旧会话）
   if (req.token) {
@@ -1708,7 +1718,7 @@ process.on('unhandledRejection', (err) => {
 });
 
 // 启动服务器
-app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
+app.listen(PORT, process.env.HOST || '127.0.0.1', () => {
   console.log(`ClipFlow server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/ping`);
 

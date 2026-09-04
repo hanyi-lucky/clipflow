@@ -37,7 +37,7 @@ ExecStart=/usr/bin/node index.js
 Restart=always
 RestartSec=10
 Environment=PORT=3000
-# 只监听回环，禁止公网直连 3000（配合 Cloudflare Tunnel；index.js 默认 0.0.0.0，勿删此行）
+# 只监听回环，禁止公网直连 3000（配合 Cloudflare Tunnel；显式声明以防 index.js 默认值变动）
 Environment=HOST=127.0.0.1
 Environment=FILE_DIR=/opt/clipflow/data/files
 

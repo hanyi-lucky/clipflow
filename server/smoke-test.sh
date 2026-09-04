@@ -1740,4 +1740,154 @@ start_server
 
 echo "==> 53. OSS 直传全部用例通过"
 
+# ────────────────────────────────────────────────────────────
+# 54-56: 回归用例 — history 裁剪保留置顶/软删、删设备 token 带 user_id
+# ────────────────────────────────────────────────────────────
+
+echo "==> 54. 裁剪保留 pinned：注入 105 非置顶 + 5 pinned（极旧），上传 1 条触发裁剪，断言 pinned 全保留、非置顶=100"
+stop_server
+# 用独立 DB 避免污染前序测试数据
+rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
+start_server
+# 登录
+T54=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
+  -d '{"userId":"user_smoke_trim_pinned"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+A54="Authorization: Bearer ${T54}"
+# 用 better-sqlite3 批量注入 105 条非置顶 + 5 条 pinned（绕过 rate limit）
+node -e "
+const Database = require('better-sqlite3');
+const db = new Database(process.argv[1]);
+const uid = 'user_smoke_trim_pinned';
+const ins = db.prepare('INSERT INTO history (id,user_id,content,hash,source_device,source_device_name,source_platform,timestamp,type,pinned) VALUES (?,?,?,?,?,?,?,?,?,?)');
+const tx = db.transaction(() => {
+  for (let i = 1000; i <= 1104; i++) {
+    ins.run('trim-np-'+i, uid, 'trim-nonpinned-'+i, 'H_TRIM_'+i, 'd1', 'Mac', 'macos', i, 'text', 0);
+  }
+  for (let i = 100; i <= 104; i++) {
+    ins.run('trim-pin-'+i, uid, 'trim-pinned-'+i, 'H_PIN_'+i, 'd1', 'Mac', 'macos', i, 'text', 1);
+  }
+});
+tx();
+db.close();
+" "${DB}"
+# 上传 1 条新内容触发裁剪（同时验证该条目入库）
+curl -fsS -X POST "${BASE}/clipboard" -H "$A54" -H 'Content-Type: application/json' \
+  -d '{"content":"trim-trigger-new","hash":"H_TRIGGER","historyId":"trim-trigger-1","sourceDevice":"d1","sourceDeviceName":"Mac","sourcePlatform":"macos","timestamp":9999}' \
+  >/dev/null
+# 断言：pinned 5 条全保留、非置顶 <= 100
+curl -fsS "${BASE}/history?limit=200" -H "$A54" | node -e '
+let s="";
+process.stdin.on("data",d=>s+=d);
+process.stdin.on("end",()=>{
+  const j=JSON.parse(s);
+  const rows=j.data.records;
+  const pinned=rows.filter(r=>r.pinned===1);
+  const unpinned=rows.filter(r=>r.pinned!==1);
+  if(pinned.length!==5){console.error("FAIL pinned count: "+pinned.length+" expected 5");process.exit(1)}
+  if(unpinned.length>100){console.error("FAIL unpinned count: "+unpinned.length+" expected <=100");process.exit(1)}
+  console.log("    ok (pinned="+pinned.length+" unpinned="+unpinned.length+")");
+})'
+
+echo "==> 55. 裁剪不删 deleted_at 条目：注入 90 活跃 + 20 软删（极旧），上传 1 条触发，断言 90 活跃全保留、20 软删仍在"
+stop_server
+rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
+start_server
+T55=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
+  -d '{"userId":"user_smoke_trim_deleted"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+A55="Authorization: Bearer ${T55}"
+# 用 better-sqlite3 批量注入 90 条活跃 + 20 条软删（绕过 rate limit）
+node -e "
+const Database = require('better-sqlite3');
+const db = new Database(process.argv[1]);
+const uid = 'user_smoke_trim_deleted';
+const now = Date.now();
+const ins = db.prepare('INSERT INTO history (id,user_id,content,hash,source_device,source_device_name,source_platform,timestamp,type,pinned,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+const tx = db.transaction(() => {
+  for (let i = 2000; i <= 2089; i++) {
+    ins.run('trim-del-'+i, uid, 'trim-active-'+i, 'H_DEL_'+i, 'd1', 'Mac', 'macos', i, 'text', 0, null);
+  }
+  for (let i = 2100; i <= 2119; i++) {
+    ins.run('trim-soft-'+i, uid, 'trim-deleted-'+i, 'H_SOFT_'+i, 'd1', 'Mac', 'macos', i, 'text', 0, now);
+  }
+});
+tx();
+db.close();
+" "${DB}"
+# 上传 1 条新内容触发裁剪
+curl -fsS -X POST "${BASE}/clipboard" -H "$A55" -H 'Content-Type: application/json' \
+  -d '{"content":"trim-del-trigger-new","hash":"H_DEL_TRIGGER","historyId":"trim-del-trigger-1","sourceDevice":"d1","sourceDeviceName":"Mac","sourcePlatform":"macos","timestamp":9999}' \
+  >/dev/null
+# 断言：90 条活跃全保留、20 条软删仍在（直查 DB，因为 /api/history 过滤 deleted_at）
+node -e "
+const Database = require('better-sqlite3');
+const db = new Database(process.argv[1]);
+const uid = 'user_smoke_trim_deleted';
+const active = db.prepare('SELECT count(*) as cnt FROM history WHERE user_id = ? AND deleted_at IS NULL').get(uid);
+const deleted = db.prepare('SELECT count(*) as cnt FROM history WHERE user_id = ? AND deleted_at IS NOT NULL').get(uid);
+db.close();
+if(active.cnt < 90){console.error('FAIL active count: '+active.cnt+' expected >=90');process.exit(1)}
+if(deleted.cnt !== 20){console.error('FAIL deleted count: '+deleted.cnt+' expected 20');process.exit(1)}
+console.log('    ok (active='+active.cnt+' deleted='+deleted.cnt+')');
+" "${DB}"
+
+echo "==> 56. 删设备 token 带 user_id：两用户场景，删 A 的设备不动 B 的 token"
+stop_server
+rm -f "${DB}" "${DB}-journal" "${DB}-wal" "${DB}-shm"
+start_server
+# 用户 A
+TA=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
+  -d '{"userId":"user_smoke_deldev_a"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+AA="Authorization: Bearer ${TA}"
+# 用户 B
+TB=$(curl -fsS -X POST "${BASE}/auth" -H 'Content-Type: application/json' \
+  -d '{"userId":"user_smoke_deldev_b"}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).data.token)})')
+AB="Authorization: Bearer ${TB}"
+# A 注册设备
+DEV_A="dev-smoke-a"
+curl -fsS -X POST "${BASE}/device" -H "$AA" -H 'Content-Type: application/json' \
+  -d "{\"id\":\"${DEV_A}\",\"name\":\"Mac A\",\"platform\":\"macos\"}" >/dev/null
+echo "    dev_a=${DEV_A}"
+# B 注册设备
+DEV_B="dev-smoke-b"
+curl -fsS -X POST "${BASE}/device" -H "$AB" -H 'Content-Type: application/json' \
+  -d "{\"id\":\"${DEV_B}\",\"name\":\"Android B\",\"platform\":\"android\"}" >/dev/null
+echo "    dev_b=${DEV_B}"
+# B 上传一条内容确保 token 绑定 device_id
+curl -fsS -X POST "${BASE}/clipboard" -H "$AB" -H 'Content-Type: application/json' \
+  -d '{"content":"keep-me","hash":"H_KEE","historyId":"keep-1","sourceDevice":"dev-smoke-b","sourceDeviceName":"Android B","sourcePlatform":"android","timestamp":1}' \
+  >/dev/null
+# 记录删除前 B 的 token 数
+BEFORE=$(node -e "
+const Database = require('better-sqlite3');
+const db = new Database(process.argv[1]);
+const cnt = db.prepare('SELECT count(*) as c FROM tokens WHERE user_id = ?').get('user_smoke_deldev_b');
+console.log(cnt.c);
+db.close();
+" "${DB}")
+# A 删除自己的设备
+curl -fsS -X DELETE "${BASE}/device/${DEV_A}" -H "$AA" >/dev/null
+# 验证：B 的 token 仍有效
+CODE_B=$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/clipboard" -H "$AB")
+if [ "$CODE_B" != "200" ]; then
+  echo "FAIL: B token invalid after A deleted device, got ${CODE_B}" >&2
+  exit 1
+fi
+# 验证：B 的 token 数量不变
+AFTER=$(node -e "
+const Database = require('better-sqlite3');
+const db = new Database(process.argv[1]);
+const cnt = db.prepare('SELECT count(*) as c FROM tokens WHERE user_id = ?').get('user_smoke_deldev_b');
+console.log(cnt.c);
+db.close();
+" "${DB}")
+if [ "$BEFORE" != "$AFTER" ]; then
+  echo "FAIL: B token count changed: before=${BEFORE} after=${AFTER}" >&2
+  exit 1
+fi
+echo "    ok (A device deleted, B token count unchanged: ${AFTER})"
+
 echo "SMOKE TEST PASSED"
