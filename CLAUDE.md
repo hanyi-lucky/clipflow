@@ -88,13 +88,16 @@
 ## 构建、测试、检查
 
 ```bash
-# 运行所有测试（无需服务器连接即可跑核心服务测试）
+# 运行所有测试（无需服务器连接即可跑核心服务测试，约 540 个用例）
 flutter test
 
 # 运行单个测试文件
 flutter test test/services/encryption_service_test.dart
 
-# 静态检查（info 级别也会导致 exit code 1，只有 error 需要关注）
+# 服务器端 smoke 测试（自动本地起/停 server，56 个用例）
+bash server/smoke-test.sh
+
+# 静态检查（warning 和 error 都会导致 exit code 1，只有 error 必须处理；info 为存量基线 ~89 条）
 flutter analyze
 
 # 在 macOS 上运行
@@ -116,19 +119,22 @@ flutter build windows --release   # Windows .exe
 
 ```
 Flutter App
-    ↓ HTTP POST (JSON)
-Node.js Server (Express + SQLite)
-    ↓
-阿里云 ECS (2核2G, 40GB SSD)
+    ├─ 云端同步：HTTPS 直连 IP + 自签证书指纹固定（pinned_client.dart）
+    │       ↓ JSON over TLS
+    │   Node.js Server (Express + SQLite，仅监听 127.0.0.1，经 Cloudflare Tunnel 对外)
+    │       ↓ 阿里云 ECS (2核2G, 40GB SSD)
+    ├─ LAN 优先同步：mDNS 发现 + 自签 TLS + A3 双向挑战握手，文本/图片/文件直传，云端兜底
+    │       ↓ LanSyncManager/LanTransport/LanProtocol 等 8 个 lan_*.dart
+    └─ 混合同步调度：SyncCoordinator + durable outbox（离线操作排队重放），LAN-only 独立模式
 ```
 
 ### 服务器地址
 
-- **API 基础地址：** `http://121.196.222.122:3000/api`
-- **健康检查：** `http://121.196.222.122:3000/api/ping`
+- **生产 API：** `https://121.196.222.122/api`（客户端直连 IP + 自签证书 DER SHA-256 指纹固定，见 `lib/services/pinned_client.dart`；域名+Cloudflare Tunnel 方案已废弃，因 SNI 拦截）
+- **健康检查：** `https://121.196.222.122/api/ping`（服务器本机调试用 `http://127.0.0.1:3000/api/ping`）
 - **SSH：** `ssh -i /Users/hanyi/Downloads/key241294.pem root@121.196.222.122`
 - **服务管理：** `systemctl restart clipflow`
-- **服务器代码路径：** `/opt/clipflow/index.js`
+- **服务器代码路径：** `/opt/clipflow/index.js`（与仓库 `server/index.js` 同步部署）
 - **数据库路径：** `/opt/clipflow/clipflow.db`（SQLite）
 
 ## 历史重大决策
@@ -251,14 +257,14 @@ token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
 
 ## 入口与路由
 
-- `lib/main.dart` — 应用入口。用 `MultiProvider` 包裹组件树启动 App。
-- `lib/app.dart` — `MaterialApp`，3 个命名路由：`/unlock` → `/home` → `/settings`。
+- `lib/main.dart` — 应用入口。用 `MultiProvider` 包裹组件树启动 App（含 `Provider<AppInfo>`、CrashReporter 全局错误钩子）。
+- `lib/app.dart` — `MaterialApp`，3 个命名路由：`/unlock` → `/home` → `/settings`；另有 push 路由：垃圾箱（TrashScreen）、备份导出/导入/云端拉取（backup/ 下 3 屏）、图片预览。
 
 ## Provider 状态层
 
 - `AuthProvider` — 生成设备 ID + 设备注册。通过 `LocalStorage` 在本地存储 `deviceId`/`deviceName`。
-- `SettingsProvider` — 自动同步开关、历史记录条数限制。底层使用 `SharedPreferences`。
-- `ClipboardProvider` — **核心调度器。** 持有 `SyncService`、`ClipboardMonitor`、`HistoryService`、`EncryptionService`。管理同步循环（500ms 轮询）、多选拼接状态、以及所有剪切板读写（含循环防护）。
+- `SettingsProvider` — 自动同步/后台同步/LAN 加速/LAN-only 开关、历史记录条数限制（10-100，已接入 HistoryService 即时生效）。底层使用 `SharedPreferences`。
+- `ClipboardProvider` — **核心调度器。** 持有 `SyncService`、`ClipboardMonitor`、`HistoryService`、`EncryptionService`、`SyncCoordinator`、`LanSyncManager`。管理同步循环（500ms 轮询 + 指数退避）、云端/LAN/LAN-only 三态路由、多选拼接状态、垃圾箱操作（经 durable outbox）、以及所有剪切板读写（含循环防护）。监听 SettingsProvider 变更动态应用设置。
 
 ## 数据流（复制 → 同步 → 粘贴）
 
@@ -266,36 +272,63 @@ token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
 [设备 A 复制内容]
     ↓ ClipboardMonitor 检测变化（桌面端 500ms 轮询，Android 原生监听）
     ↓ _onClipboardChanged() → 防抖 500ms → _uploadContent()
-    ↓ SyncService.uploadContent()：SHA256 哈希 → AES-256-GCM 加密 → 调用服务器 API 写入数据库
+    ↓ SyncCoordinator 统一调度（single-flight/去重/退避）：
+        文本/图片/文件 → AES-256-GCM 客户端加密 → outbox 持久化
+        → 优先 LAN 推送（mDNS 对端在线时）→ 云端 API 兜底上传
     ↓
-[其他设备通过 _startSyncLoop() 每 500ms 轮询服务器]
+[其他设备通过 _startSyncLoop() 周期轮询 + durable cursor 增量拉取]
     ↓ SyncService.downloadLatestContent()：跳过自己的上传或过期数据 → 解密 → 返回
     ↓ ClipboardProvider 写入系统剪切板（先暂停监听器防止循环同步）
-    ↓ 条目加入 HistoryService
+    ↓ 条目加入 HistoryService（按 historyLimit 截断，置顶不占名额）
+    ↓ 删除/恢复操作经 durable outbox + sync_tombstones 多设备收敛
 ```
 
 ## 服务器 API
 
-服务器通过 HTTP 接收 JSON 请求：
+服务器通过 HTTP/HTTPS 接收 JSON 请求（`/api/auth` 有 IP+userId 双桶限流；`/api/crash` 可选认证+独立限流）：
 
 | 方法 | 路径 | 说明 |
 |-----|------|------|
 | GET | `/api/ping` | 健康检查 |
-| POST | `/api/auth` | 登录/注册（body: `{ userId }`） |
-| GET | `/api/clipboard` | 获取最新剪切板 |
-| POST | `/api/clipboard` | 上传剪切板内容 |
+| POST | `/api/auth` | 登录/注册（body: `{ userId }`，429 限流） |
+| GET | `/api/clipboard` | 获取最新剪切板（含 deletedIds/restoredEntries 增量） |
+| POST | `/api/clipboard` | 上传剪切板内容（触发 history 裁剪） |
 | GET | `/api/history` | 获取历史记录 |
+| GET | `/api/history/trash` | 获取垃圾箱列表 |
+| DELETE | `/api/history/trash` | 清空垃圾箱 |
+| GET | `/api/history/:id/content` | 获取历史条目文件内容 |
+| POST | `/api/history/:id/restore` | 恢复历史条目 |
 | PATCH | `/api/history/:id` | 更新历史记录（置顶等） |
-| DELETE | `/api/history/:id` | 删除历史记录 |
+| DELETE | `/api/history/:id` | 删除历史记录（软删除） |
 | POST | `/api/device` | 注册/更新设备 |
 | GET | `/api/devices` | 获取设备列表 |
+| PATCH | `/api/device/:id` | 重命名设备 |
+| DELETE | `/api/device/:id` | 移除设备（软删 + 踢该设备 token） |
 | GET | `/api/salt` | 获取加密盐值 |
 | POST | `/api/salt` | 设置加密盐值 |
+| POST | `/api/sync/commit` | 提交 durable 同步操作（删除/恢复） |
+| GET | `/api/sync/changes` | 按单调游标拉取变更 |
+| POST | `/api/file` | 文件上传（base64，流式密文） |
+| GET | `/api/file/:id/content` | 文件内容下载 |
+| POST | `/api/file/presign-upload` | OSS 预签名上传（未配 OSS 时 503，客户端回退 relay） |
+| POST | `/api/file/presign-upload/confirm` | OSS 上传确认 |
+| GET | `/api/file/:id/presign-download` | OSS 预签名下载 |
+| POST | `/api/lan/ticket` | LAN 握手票据签发（HMAC，5min TTL） |
+| POST | `/api/lan/ticket/verify` | LAN 握手票据验证 |
+| POST | `/api/crash` | 崩溃上报（可选认证 + 独立限流 + 30 天清理） |
 
 ## 加密
 
-- `EncryptionService` 在 `lib/services/encryption_service.dart` — AES-256-GCM（基于 pointycastle）。密钥通过 PBKDF2-HMAC-SHA256 派生（10 万次迭代）。`EncryptedData` 将 IV + 密文打包为单个 base64 字符串。
+- `EncryptionService` 在 `lib/services/encryption_service.dart` — AES-256-GCM（基于 pointycastle ^3.9.1，4.x 升级已列入计划）。密钥通过 PBKDF2-HMAC-SHA256 派生（10 万次迭代）。`EncryptedData` 将 IV + 密文打包为单个 base64 字符串。文件用 `FileProcessingService` 流式加解密（同一套密钥）。
 - 主密码在 `UnlockScreen` 输入。Salt 存储在服务器数据库。所有设备使用相同密码即可派生相同密钥。
+- **LAN 认证密钥隔离：** `K_lan = HMAC-SHA256(账户密钥, "clipflow:lan-auth-v1")`，与内容加密密钥用途隔离；LAN 传输经自签 TLS（证书指纹固定，区别于云端指纹）。
+
+## LAN 同步子系统（Phase 2.1-2.4 / 5.1-5.2，详见 docs/decisions/003-009）
+
+- 8 个服务：`lan_discovery_service`（mDNS 桥接+黑名单）、`lan_handshake_service`（A3 双向挑战+nonce 重放防护）、`lan_tls`（自签证书指纹固定）、`lan_protocol`（帧编解码）、`lan_transport`（TLS 会话+分块帧+逐帧超时）、`lan_sync_manager`（push/pull/待确认表）、`lan_network_channel`（平台 MethodChannel：macOS NSNetService / Android NsdManager / Windows Win32 DNS-SD）、`lan_diagnostics`（计数埋点）。
+- 平台插件：macOS `LanNetworkPlugin.swift`、Android `LanNetworkPlugin.kt`、Windows `lan_network_plugin.cpp`（决策 009：Win32 DNS-SD，否决 WinRT）。
+- 可靠性：LAN 专属 outbox（`clipflow_lan_outbox/`，原子写）、fileAck 确认帧、`FileDownloadBreaker` 重下熔断（3 次坏 artifact → 60s 冷却）、幂等会话替换。
+- LAN-only 模式（决策 007）：三型内容路由 + 降级横幅 + 重启恢复，默认关。
 
 ## 剪切板监听
 
@@ -304,6 +337,12 @@ token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
 - **Android：** 通过 `MethodChannel` (`clipflow/clipboard`) 与原生层通信。原生层使用 `ClipboardManager.OnPrimaryClipChangedListener` + Foreground Service 保活，检测到变化后调用 `syncClipboard` 传入剪切板内容（Android 10+ 限制后台读取剪切板，因此由原生层传递内容而非 Flutter 层主动读取）
 - 提供 `pause()`/`resume()` 方法，在将接收到的数据写入剪切板时暂停监听以防止循环同步
 - `ignoreHashes` 机制：从其他设备同步来的内容加入忽略列表，防止上传自己刚下载的内容
+- 文件在途签名守卫（Phase 2.1 ⑧）：防止文件回写触发重复上传
+
+## OSS 直传（Phase 5.3，决策 010：实现完成、生产暂缓）
+
+- 无 OSS env 时服务器 presign 端点返回 503，客户端自动回退经 ECS relay——当前生产即此 compat 模式。
+- 启用阈值：月非 LAN 流量逼近 6GB / 磁盘 >30GB。客户端 `oss_direct_client.dart` + 仓库层 direct/fallback 已就绪并有单测。
 
 ## 数据库模型
 
@@ -311,19 +350,29 @@ token 失效(401) → 自动重新 POST /api/auth → 获取新 token → 重试
 
 ```sql
 users (id TEXT PK, password_hash TEXT, salt TEXT, created_at TEXT)
-devices (id TEXT PK, user_id TEXT, name TEXT, platform TEXT, last_seen TEXT)
+devices (id TEXT PK, user_id TEXT, name TEXT, platform TEXT, last_seen TEXT,
+         removed_at INTEGER)   -- 设备软删除
 clipboard (id TEXT PK, user_id TEXT, content TEXT, hash TEXT, source_device TEXT,
-           source_device_name TEXT, source_platform TEXT, timestamp INTEGER, type TEXT)
+           source_device_name TEXT, source_platform TEXT, timestamp INTEGER, type TEXT,
+           thumb TEXT, width INTEGER, height INTEGER, format TEXT, history_id TEXT)
 history (id TEXT PK, user_id TEXT, content TEXT, source_device TEXT,
          source_device_name TEXT, source_platform TEXT, timestamp INTEGER,
-         type TEXT, pinned INTEGER, deleted_at INTEGER, restored_at INTEGER)
+         type TEXT, pinned INTEGER, deleted_at INTEGER, restored_at INTEGER,
+         hash TEXT, thumb TEXT, width INTEGER, height INTEGER, format TEXT)
 salt (user_id TEXT PK, value TEXT)
-tokens (token TEXT PK, user_id TEXT, created_at TEXT)
+tokens (token TEXT PK, user_id TEXT, created_at TEXT, device_id TEXT)
+crash_reports (id TEXT PK, user_id TEXT, device_id TEXT, app_version TEXT,
+               platform TEXT, device_model TEXT, exception_type TEXT,
+               message TEXT, stack TEXT, reported_at TEXT)
+sync_operations (seq INTEGER PK AUTOINCREMENT, operation_id TEXT, user_id TEXT,
+                kind TEXT, entry_id TEXT, payload TEXT, created_at TEXT)  -- 唯一索引 user_id+operation_id
+sync_tombstones (user_id TEXT, entry_id TEXT, entry_type TEXT, deleted_at INTEGER,
+                 restored_at INTEGER, seq INTEGER, snapshot TEXT)  -- 联合主键 user_id+entry_id
 ```
 
 - `clipboard` 表仅保留每用户最新 1 条记录（上传时 DELETE + INSERT）
-- `history` 表保留最近 100 条（服务端自动清理），支持软删除（`deleted_at`）和恢复（`restored_at`）
-- `tokens` 每小时清理超过 24 小时的过期 token
+- `history` 表保留最近 100 条**非置顶活跃**条目（服务端自动清理；**置顶条目不占名额永不裁剪，垃圾箱软删条目不参与裁剪不占名额**——与客户端 `HistoryService._trim()` 语义对齐），支持软删除（`deleted_at`）和恢复（`restored_at`）
+- `sync_operations` 7 天清理；`sync_tombstones` 快照 24h 清理；`tokens` 每小时清理超过 24 小时的过期 token；`crash_reports` 30 天清理；软删 history 超 24h 触发文件清理
 
 ## 同步去重
 
@@ -338,7 +387,7 @@ tokens (token TEXT PK, user_id TEXT, created_at TEXT)
 
 ## 测试说明
 
-核心服务测试（加密、历史记录、数据模型）不依赖服务器，可直接运行。UI 测试需要网络连接，当前以 smoke test 为主。`test/widget_test.dart` 包含核心模型和服务的基础验证。
+约 540 个测试不依赖服务器，可直接运行（加密、历史、同步、LAN 协议/传输/管理器、outbox、备份、i18n 护栏、Provider 集成等）。服务器行为用 `server/smoke-test.sh` 覆盖（本地自动起停 server，56 用例含 history 裁剪/token/限流/OSS compat 回归）。i18n 护栏：`hardcoded_chinese_test.dart` 阻止硬编码中文回流。
 
 ## 服务器部署
 

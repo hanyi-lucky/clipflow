@@ -1,10 +1,31 @@
 # ClipFlow 开发进度
 
-> 更新时间：2026-08-06
+> 更新时间：2026-09-04
 
 ---
 
 ## 已完成的功能
+
+### 0. 全项目交付后审查 + P1/P2 修复批（2026-09-04）
+
+> 依据 `docs/project-review-prompt.md` 定制审查工作流执行：Phase 0 事实基线 → 五维并行审查（质量/安全/验收/文档债/功能与三端统一性）→ 交叉验证 → 汇总。结论：26 条交付声明零虚报（24✅/2⚠️）、13 项安全机制全部成立、无 P0；产出 8 项 P1 + 13 项 P2。本批修复其中最高优先级的 4 组。
+
+**审查确认无问题**（防重查）：加密链路（IV CSPRNG/PBKDF2/GCM tag）、双证书指纹固定无绕过、9 表全量 userId 过滤、SQL 全参数化、路径正则校验、LAN A3 握手、明文零泄露、Timer/监听器生命周期、防循环三级去重、限流与各清理任务。
+
+**本批修复（已全部本地验证 + 生产部署）：**
+
+| 修复 | 内容 | 验证 |
+|------|------|------|
+| history 裁剪 SQL（P1×2） | 两处裁剪加 `deleted_at IS NULL AND pinned = 0`：置顶条目永不裁剪、垃圾箱软删条目不参与不占名额（语义与客户端 `_trim()` 对齐，见决策 011） | smoke 54/55/56 |
+| token 删除跨用户防护（P2） | `DELETE /api/device/:id` 踢 token 补 `user_id` 过滤 | smoke 56 |
+| HOST 不安全默认（P2） | `index.js` 默认 `0.0.0.0` → `127.0.0.1`（生产 deploy.sh 显式 HOST 不受影响；本地 LAN 联调需显式 `HOST=0.0.0.0`） | 部署后 ss 验证 |
+| historyLimit 接线（P1） | 设置 10-100 真实生效：`HistoryService.updateMaxEntries()` + ClipboardProvider 监听 SettingsProvider（防重复守卫 + dispose 清理），改设置即时截断 | 6 个新测试 |
+| 三端样式统一（P2×2） | 3 个 TextField 补 filled/fillColor/border（device_management 重命名框、cloud_pull、import_backup）+ 7 个 AlertDialog 补 `surfaceTintColor: Colors.transparent` | 手动三端重启验证 |
+| 文档大修 | CLAUDE.md：架构图补 LAN/OSS/outbox、API 表 11→27 端点、表结构 6→9 张（补 crash_reports/sync_operations/sync_tombstones 及新字段）、HTTPS 直连地址、测试说明 537、analyze 语义修正（warning 也致 exit 1） | — |
+
+**验证结果：** flutter test 537/537 全绿（新增 6 用例）· analyze 0 error/11 warning 零新增 · smoke 56/56 全绿 · reviewer 终审通过无高置信问题 · 已部署生产（md5 校验一致 + ping SUCCESS + 监听 127.0.0.1:3000）。
+
+**审查遗留未修项（有意搁置，见审查报告 §2）：** 401 重登失败裸异常（P1-3）、桌面文件事件不查 pause（P1-4）、熔断 60s 无 UI 反馈（P1-6）、LAN-only 降级无手动重连（P1-7）、cloudbase_service 无测试（P2）、E 维度 12 项体验细节、pointycastle 4/permission_handler 13 升级（既有计划）。/code-review 两条裁定不改：HOST 默认是安全本意；设置监听全触发开销可忽略。
 
 ### 1. 核心同步机制
 - [x] 跨设备剪切板同步（macOS ↔ Android ↔ Windows）
@@ -247,7 +268,7 @@ Node.js Server (Express + SQLite)
 
 ## 服务器信息
 
-- **地址：** `http://121.196.222.122:3000/api`
+- **生产 API：** `https://121.196.222.122/api`（直连 IP + 自签证书指纹固定；服务器仅监听 127.0.0.1:3000 经 Cloudflare Tunnel）
 - **SSH：** `ssh -i /Users/hanyi/Downloads/key241294.pem root@121.196.222.122`
 - **服务管理：** `systemctl restart clipflow`
 - **代码路径：** `/opt/clipflow/index.js`
