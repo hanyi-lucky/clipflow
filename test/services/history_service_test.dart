@@ -299,4 +299,99 @@ void main() {
       expect(service.entries.length, equals(2));
     });
   });
+
+  group('updateMaxEntries', () {
+    test('updateMaxEntries_reducesLimit_trimsOldestUnpinned', () {
+      final svc = HistoryService(maxEntries: 100);
+      // Add 50 unpinned entries (newest last in addOrder)
+      for (int i = 0; i < 50; i++) {
+        svc.addEntry(ClipboardEntry(
+          id: 'trim-$i', content: 'Trim $i', sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac', timestamp: DateTime(2024, 1, i + 1),
+          type: ContentType.text, isPinned: false,
+        ));
+      }
+      expect(svc.entries.length, equals(50));
+
+      // Reduce limit to 20 — should trim oldest 30 unpinned
+      svc.updateMaxEntries(20);
+
+      expect(svc.entries.length, equals(20));
+      // entries sorted by timestamp desc: newest first
+      expect(svc.entries.first.content, equals('Trim 49'));
+      expect(svc.entries.last.content, equals('Trim 30'));
+    });
+
+    test('updateMaxEntries_preservesPinned', () {
+      final svc = HistoryService(maxEntries: 100);
+      // Add 10 pinned entries
+      for (int i = 0; i < 10; i++) {
+        svc.addEntry(ClipboardEntry(
+          id: 'pin-$i', content: 'Pinned $i', sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac', timestamp: DateTime(2024, 1, i + 1),
+          type: ContentType.text, isPinned: true,
+        ));
+      }
+      // Add 50 unpinned entries
+      for (int i = 0; i < 50; i++) {
+        svc.addEntry(ClipboardEntry(
+          id: 'up-$i', content: 'Unpinned $i', sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac', timestamp: DateTime(2024, 2, i + 1),
+          type: ContentType.text, isPinned: false,
+        ));
+      }
+      // 60 total: 10 pinned + 50 unpinned
+      expect(svc.entries.length, equals(60));
+
+      // Reduce to 30 — should keep all 10 pinned + 30 most recent unpinned
+      svc.updateMaxEntries(30);
+
+      expect(svc.entries.length, equals(40)); // 10 pinned + 30 unpinned
+      final pinned = svc.entries.where((e) => e.isPinned).toList();
+      expect(pinned.length, equals(10));
+    });
+
+    test('updateMaxEntries_increaseLimit_noOp', () {
+      final svc = HistoryService(maxEntries: 20);
+      for (int i = 0; i < 20; i++) {
+        svc.addEntry(ClipboardEntry(
+          id: 'e-$i', content: 'Entry $i', sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac', timestamp: DateTime(2024, 1, i + 1),
+          type: ContentType.text, isPinned: false,
+        ));
+      }
+      expect(svc.entries.length, equals(20));
+
+      // Increase limit — nothing should be removed
+      svc.updateMaxEntries(50);
+
+      expect(svc.entries.length, equals(20));
+    });
+
+    test('updateMaxEntries_zeroOrNegative_ignoredOrClamped', () {
+      final svc = HistoryService(maxEntries: 10);
+      for (int i = 0; i < 5; i++) {
+        svc.addEntry(ClipboardEntry(
+          id: 'z-$i', content: 'Zero $i', sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac', timestamp: DateTime(2024, 1, i + 1),
+          type: ContentType.text, isPinned: false,
+        ));
+      }
+      // Setting to 0 trims all unpinned (maxEntries=0 means keep 0 unpinned)
+      svc.updateMaxEntries(0);
+      expect(svc.entries.length, equals(0));
+
+      // Negative is clamped to 0, also trims all
+      final svc2 = HistoryService(maxEntries: 10);
+      for (int i = 0; i < 3; i++) {
+        svc2.addEntry(ClipboardEntry(
+          id: 'n-$i', content: 'Neg $i', sourceDeviceId: 'd1',
+          sourceDeviceName: 'Mac', timestamp: DateTime(2024, 1, i + 1),
+          type: ContentType.text, isPinned: false,
+        ));
+      }
+      svc2.updateMaxEntries(-5);
+      expect(svc2.entries.length, equals(0));
+    });
+  });
 }

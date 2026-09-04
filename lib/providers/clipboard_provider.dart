@@ -305,7 +305,18 @@ class ClipboardProvider extends ChangeNotifier
 
   /// Set the SettingsProvider reference for lifecycle-aware sync decisions
   void setSettingsProvider(SettingsProvider settings) {
+    if (_settingsProvider == settings) return;
+    _settingsProvider?.removeListener(_onSettingsChanged);
     _settingsProvider = settings;
+    _settingsProvider?.addListener(_onSettingsChanged);
+    _historyService.updateMaxEntries(settings.historyLimit);
+  }
+
+  void _onSettingsChanged() {
+    final limit = _settingsProvider?.historyLimit;
+    if (limit != null) {
+      _historyService.updateMaxEntries(limit);
+    }
   }
 
   // -- LAN 加速（Phase 2.1）--
@@ -2733,6 +2744,7 @@ class ClipboardProvider extends ChangeNotifier
       _savePending = false;
     }
     _monitor?.removeListener(_onMonitorChanged);
+    _settingsProvider?.removeListener(_onSettingsChanged);
     unawaited(_lanManager?.stop());
     _lanManager = null;
     _syncCoordinator?.close();

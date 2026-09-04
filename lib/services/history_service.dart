@@ -2,7 +2,7 @@ import 'dart:convert';
 import '../models/clipboard_entry.dart';
 
 class HistoryService {
-  final int maxEntries;
+  int maxEntries;
   final List<ClipboardEntry> _entries = [];
 
   List<ClipboardEntry> get entries {
@@ -116,6 +116,11 @@ class HistoryService {
     if (index >= 0) {
       _entries[index] = _entries[index].copyWith(isPinned: !_entries[index].isPinned);
     }
+  }
+
+  void updateMaxEntries(int newMax) {
+    maxEntries = newMax < 0 ? 0 : newMax;
+    _trim();
   }
 
   void _trim() {
