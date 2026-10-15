@@ -61,7 +61,7 @@ ClipFlow：跨平台剪切板同步工具（macOS / Android / Windows，iPad 走
 - 服务器保留策略的实现核对：clipboard 表仅留 1 条、history 留 100 条、token 24h 清理、垃圾箱 24h 自动清理——逐一找到实现代码并核对触发时机
 
 **B · 安全审计**
-- 加密实现：AES-256-GCM 的 IV 生成方式与唯一性保障（`encryption_service.dart`）；PBKDF2 迭代次数、salt 的存取路径与传输是否经认证；`EncryptedData` 打包格式（IV+密文 base64）的正确性
+- 加密实现：AES-256-GCM 的 IV 生成方式与唯一性保障（`encryption_service.dart`）；PBKDF2 迭代次数、salt 的存取路径与传输是否经认证；`EncryptedData` 打包格式（**`[2字节 IV 长度][IV][密文+tag]` 的整体 base64**，注意那 2 字节长度前缀）的正确性
 - 密钥生命周期：派生后的密钥在内存中驻留多久、是否有不必要的持久化/日志泄露
 - 自签证书体系：decision 001 的证书指纹固定（pinning）实现强度；`lan_tls.dart` 的校验逻辑是否存在接受任意证书的路径
 - 数据隔离：不同密码 → 不同 userId → 数据完全隔离，是否在 clipboard / history / devices / salt / tokens **每张表**都成立；userId 可否被伪造冒用

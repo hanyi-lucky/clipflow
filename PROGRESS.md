@@ -1,6 +1,12 @@
 # ClipFlow 开发进度
 
-> 更新时间：2026-09-04
+> 更新时间：2026-10-15（**只刷新过期的"当前"数字**；下文带日期的验证记录、修复清单、技术债条目一律原样保留，不改写历史）
+
+> **2026-09-04 之后的快照（2026-10-15 实测）**
+> - `flutter test` **537/537 全绿**
+> - `flutter analyze` **102 条 = info 89 + warning 13 + error 0**（exit 1；`--no-fatal-warnings` / `--no-fatal-infos` 对照实验证明 **warning 与 info 各自单独都致命**，两个都关才 exit 0）
+> - 文档结构：`CLAUDE.md` 改为薄导入层（独立一行 `@AGENTS.md` + 硬红线保底），**`AGENTS.md` 成为唯一事实源并入库**；进度与计划的入口见 `AGENTS.md`「进度在哪」一节
+> - 工具链：Claude Code 2.1.300（`~/.local` npm 全局），Flutter 3.47.7 @ `~/development/flutter/bin/flutter`（旧的 `/opt/homebrew/bin/flutter` 已不存在）
 
 ---
 
@@ -92,7 +98,7 @@
 
 ---
 
-## 测试覆盖（当前 238 个测试）
+## 测试覆盖（历史基线 238 @2026-08-06；**当前数字见文首 2026-10-15 快照，或直接跑 `flutter test`**）
 
 | 模块 | 测试文件 | 数量 |
 |------|---------|------|

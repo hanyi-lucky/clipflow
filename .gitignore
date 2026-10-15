@@ -48,10 +48,19 @@ app.*.map.json
 # Release binaries
 /releases/
 
-# Agent configuration (local development tools)
+# Agent configuration
+# 注意：AGENTS.md 是本项目**唯一的 AI 指引事实源**，必须入库，不要再加回忽略列表。
+#   CLAUDE.md 只是它的薄导入层（@AGENTS.md）+ Claude Code 硬红线保底。
+#   .codex/ 其余仍忽略：agents/*.toml 是 .claude/agents/*.md 的容器格式镜像
+#   （由 scripts/check-agent-docs.sh 校验两边一致）；pipeline/ 里除 summary.md
+#   外都是运行期任务产物。
+#   ⚠️ 目录级 `.codex/` 会让 git 不再下钻，内部的 `!` 例外一律无效，
+#   所以下面必须写成 `.codex/*` 逐层排除 + 逐层放行。
 .agents/
-.codex/
-AGENTS.md
+.codex/*
+!.codex/pipeline/
+.codex/pipeline/*
+!.codex/pipeline/summary.md
 
 # Android build reports
 /android/build/
