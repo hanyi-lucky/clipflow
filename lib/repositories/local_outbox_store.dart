@@ -49,7 +49,9 @@ class LocalOutboxStore implements OutboxStore {
 
   Future<Directory> _userDirectory(String userId, {bool create = true}) async {
     final base = await _basePath();
-    final dir = Directory('$base/clipflow_outbox/$userId');
+    final dir = Directory.fromUri(
+      Directory(base).uri.resolve('clipflow_outbox/$userId'),
+    );
     if (create && !dir.existsSync()) {
       await dir.create(recursive: true);
     }
@@ -62,6 +64,12 @@ class LocalOutboxStore implements OutboxStore {
     return 'v2-$digest.json';
   }
 
+  @visibleForTesting
+  String outboxPathKey(File f) => f.uri.toFilePath();
+
+  File _fileIn(Directory dir, String name) =>
+      File.fromUri(dir.uri.resolve(name));
+
   @override
   Future<List<SyncOperation>> loadActive(String userId) async {
     final dir = await _userDirectory(userId, create: false);
@@ -72,7 +80,7 @@ class LocalOutboxStore implements OutboxStore {
     await for (final entity in dir.list()) {
       if (entity is! File || !_isOutboxCandidate(entity)) continue;
       if (!_isTemp(entity) && _isCanonicalShaped(entity)) {
-        canonicalPaths.add(entity.path);
+        canonicalPaths.add(outboxPathKey(entity));
       }
       final record = await _readRecord(entity, userId);
       if (record == null || !record.operation.isActive) continue;
@@ -139,7 +147,7 @@ class LocalOutboxStore implements OutboxStore {
 
     final operationId = records.first.operation.operationId;
     final dir = records.first.file.parent;
-    final target = File('${dir.path}/${canonicalName(operationId)}');
+    final target = _fileIn(dir, canonicalName(operationId));
     final canonical = records
         .where((record) => _samePath(record.file, target))
         .toList();
@@ -197,7 +205,7 @@ class LocalOutboxStore implements OutboxStore {
       return misplacedCanonical.first.operation;
     }
 
-    if (canonicalPaths.contains(target.path)) {
+    if (canonicalPaths.contains(outboxPathKey(target))) {
       // A canonical-shaped artifact is never migrated, deleted, or
       // overwritten by loadActive, regardless of its manifest content.
       final source = legacy.isNotEmpty ? legacy.first : temps.first;
@@ -289,7 +297,7 @@ class LocalOutboxStore implements OutboxStore {
     for (final record in records) {
       if (_samePath(record.file, canonical)) continue;
       if (record.operation.operationId != operationId) continue;
-      if (canonicalPaths.contains(record.file.path)) continue;
+      if (canonicalPaths.contains(outboxPathKey(record.file))) continue;
       await _deleteQuietly(record.file);
     }
   }
@@ -297,7 +305,7 @@ class LocalOutboxStore implements OutboxStore {
   @override
   Future<void> put(SyncOperation operation) async {
     final dir = await _userDirectory(operation.userId);
-    final target = File('${dir.path}/${canonicalName(operation.operationId)}');
+    final target = _fileIn(dir, canonicalName(operation.operationId));
     await _writeManifest(operation, target);
   }
 
@@ -333,8 +341,10 @@ class LocalOutboxStore implements OutboxStore {
             operation.operationId == operationId) {
           matches.add(entity);
         }
-      } catch (_) {
-        // An unreadable or foreign manifest is not proof of this operation.
+      } on _CorruptManifest {
+        // A corrupt manifest is not proof of this operation.
+      } on FileSystemException {
+        rethrow;
       }
     }
 
@@ -394,7 +404,8 @@ class LocalOutboxStore implements OutboxStore {
     return _canonicalStemPattern.hasMatch(stem);
   }
 
-  bool _samePath(File left, File right) => left.path == right.path;
+  bool _samePath(File left, File right) =>
+      outboxPathKey(left) == outboxPathKey(right);
 
   Future<void> _deleteQuietly(File file) async {
     try {
