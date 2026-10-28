@@ -85,12 +85,11 @@ class LocalOutboxStore implements OutboxStore {
       if (operation.userId != userId) return null;
       return _OutboxRecord(file, operation);
     } on _CorruptManifest {
-      // JSON/schema damage is not recoverable. The source is not an I/O
-      // failure, so it is safe to quarantine by deleting only this artifact.
+      // JSON/schema damage is not recoverable. Delete only that artifact.
       await _deleteQuietly(file);
       return null;
     } on FileSystemException {
-      // An unreadable file may become readable later. Never delete it here.
+      // An I/O failure may be transient. Never delete the source.
       return null;
     }
   }
@@ -119,18 +118,11 @@ class LocalOutboxStore implements OutboxStore {
     if (records.isEmpty) return null;
 
     final operationId = records.first.operation.operationId;
-    final target = File('${records.first.file.parent.path}/${canonicalName(operationId)}');
-    final canonical = records.where((record) => _samePath(record.file, target)).toList();
-    if (canonical.isEmpty) {
-      final occupant = await _canonicalOccupant(records.first.file.parent, operationId);
-      if (occupant != null) {
-        // Another valid opId owns the deterministic hash path. Keep both
-        // sources and do not rotate either manifest into a lossy path.
-        return records
-            .map((record) => record.operation)
-            .reduce((a, b) => a.updatedAtMs >= b.updatedAtMs ? a : b);
-      }
-    }
+    final dir = records.first.file.parent;
+    final target = File('${dir.path}/${canonicalName(operationId)}');
+    final canonical = records
+        .where((record) => _samePath(record.file, target))
+        .toList();
     final legacy = records
         .where((record) =>
             !_isTemp(record.file) && !_samePath(record.file, target))
@@ -151,34 +143,45 @@ class LocalOutboxStore implements OutboxStore {
         );
         try {
           await _writeManifest(operation, target);
+          operation = await _readManifest(target);
         } on FileSystemException {
           operation = current.operation;
         } on _CorruptManifest {
           operation = current.operation;
         }
       }
-      await _cleanupSecondary(records, target, canonical.first.operation);
+      await _cleanupSecondary(
+        records,
+        target,
+        canonical.first.operation.operationId,
+      );
       return operation;
     }
 
-    final chosen = legacy.isNotEmpty ? legacy.first : temps.first;
-    var operation = chosen.operation;
-    if (operation.state == SyncOperationState.sending) {
-      operation = operation.copyWith(
-        state: SyncOperationState.pending,
-        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
-      );
+    final occupant = await _canonicalOccupant(dir, operationId);
+    if (occupant != null) {
+      // A different valid opId owns this hash path. Keep this group's source
+      // and return it without overwriting the occupant.
+      final source = legacy.isNotEmpty ? legacy.first : temps.first;
+      return source.operation;
     }
+
+    final chosen = legacy.isNotEmpty ? legacy.first : temps.first;
+    final operation = chosen.operation.state == SyncOperationState.sending
+        ? chosen.operation.copyWith(
+            state: SyncOperationState.pending,
+            updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+          )
+        : chosen.operation;
 
     try {
       await _promote(chosen, operation, target);
       final readBack = await _readManifest(target);
       if (readBack.operationId != operationId) return operation;
-      await _cleanupSecondary(records, target, chosen.operation);
+      await _cleanupSecondary(records, target, operationId);
       return readBack;
     } on FileSystemException {
-      // The source remains recoverable. Return its in-memory value so the
-      // coordinator can still drain an already durable operation.
+      // The source remains recoverable for the next load.
       return operation;
     } on _CorruptManifest {
       return operation;
@@ -190,8 +193,7 @@ class LocalOutboxStore implements OutboxStore {
     if (!target.existsSync()) return null;
     try {
       final existing = await _readManifest(target);
-      if (existing.operationId != operationId) return target;
-      return null;
+      return existing.operationId == operationId ? null : target;
     } on _CorruptManifest {
       return null;
     } on FileSystemException {
@@ -208,12 +210,12 @@ class LocalOutboxStore implements OutboxStore {
       try {
         final existing = await _readManifest(target);
         if (existing.operationId == operation.operationId) return;
-        // A different valid opId owns this hash path. Preserve both records.
         throw const FileSystemException('canonical hash path occupied');
       } on _CorruptManifest {
-        // Only JSON/schema damage may be cleared; I/O errors must preserve the
-        // target and the source.
-        final corrupt = File('${target.path}.corrupt-${pid}-${DateTime.now().microsecondsSinceEpoch}.tmp');
+        // JSON/schema damage may be quarantined; I/O errors preserve both.
+        final corrupt = File(
+          '${target.path}.corrupt-${pid}-${DateTime.now().microsecondsSinceEpoch}.tmp',
+        );
         await _rename(target, corrupt.path);
       }
     }
@@ -240,7 +242,9 @@ class LocalOutboxStore implements OutboxStore {
             throw const FileSystemException('canonical hash path occupied');
           }
         } on _CorruptManifest {
-          final corrupt = File('${target.path}.corrupt-${pid}-${DateTime.now().microsecondsSinceEpoch}.tmp');
+          final corrupt = File(
+            '${target.path}.corrupt-${pid}-${DateTime.now().microsecondsSinceEpoch}.tmp',
+          );
           await _rename(target, corrupt.path);
         }
       }
@@ -254,32 +258,24 @@ class LocalOutboxStore implements OutboxStore {
   Future<void> _cleanupSecondary(
     List<_OutboxRecord> records,
     File canonical,
-    SyncOperation authoritative,
+    String operationId,
   ) async {
     bool canonicalBelongs = false;
     if (canonical.existsSync()) {
       try {
         canonicalBelongs =
-            (await _readManifest(canonical)).operationId == authoritative.operationId;
+            (await _readManifest(canonical)).operationId == operationId;
       } catch (_) {
         canonicalBelongs = false;
       }
     }
     for (final record in records) {
       if (_samePath(record.file, canonical)) continue;
-      if (!_sameOperation(record.operation, authoritative)) continue;
+      if (record.operation.operationId != operationId) continue;
       if (_isTemp(record.file) || canonicalBelongs) {
         await _deleteQuietly(record.file);
       }
     }
-  }
-
-  bool _sameOperation(SyncOperation left, SyncOperation right) {
-    return left.operationId == right.operationId &&
-        left.kind == right.kind &&
-        left.dedupeKey == right.dedupeKey &&
-        left.createdAtMs == right.createdAtMs &&
-        jsonEncode(left.payload) == jsonEncode(right.payload);
   }
 
   @override
@@ -331,10 +327,11 @@ class LocalOutboxStore implements OutboxStore {
         .where((file) => file.uri.pathSegments.last == exactCanonicalName)
         .toList();
 
+    // The canonical manifest is the last authoritative copy. Any failure on a
+    // secondary artifact propagates before canonical deletion is attempted.
     for (final file in secondary) {
       await _deleteRequired(file);
     }
-    // The canonical manifest is the final authoritative copy.
     for (final file in canonical) {
       await _deleteRequired(file);
     }
