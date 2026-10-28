@@ -476,9 +476,12 @@ void main() {
     );
 
     expect(await outbox.loadActive('user-1'), isEmpty);
-    final deadFile = File('${directory.path}/clipflow_outbox/user-1/del:entry-x.json');
+    final deadFile = File(
+      '${directory.path}/clipflow_outbox/user-1/'
+      '${outbox.canonicalName('del:entry-x')}',
+    );
     expect(deadFile.existsSync(), isFalse,
-        reason: 'dead delete op must be removed, not persisted as dead file');
+        reason: 'dead delete op must be removed from its canonical path');
   });
 
   test('sweep removes delete ops older than 7 days without sending them', () async {
