@@ -59,6 +59,15 @@ void main() {
     return file;
   }
 
+  List<String> fileNameList() {
+    return userDirectory()
+        .listSync()
+        .whereType<File>()
+        .map((file) => file.uri.pathSegments.last)
+        .toList()
+      ..sort();
+  }
+
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('clipflow-outbox-test-');
     store = LocalOutboxStore(directoryPath: directory.path);
@@ -168,6 +177,226 @@ void main() {
     expect(active.single.state, SyncOperationState.retryable);
     expect(active.single.lastError, 'offline');
     expect(canonicalFile(active.single).existsSync(), isTrue);
+  });
+
+  test('migrates UUID legacy files and removes the source after readback',
+      () async {
+    final legacyOp = operation(id: '0f5bb4d8-1111-4444-8888-123456789abc');
+    final legacy = await writeManifest('${legacyOp.operationId}.json', legacyOp);
+
+    final active = await store.loadActive('user-1');
+
+    expect(active.single.operationId, legacyOp.operationId);
+    expect(canonicalFile(legacyOp).existsSync(), isTrue);
+    expect(legacy.existsSync(), isFalse);
+  });
+
+  test('migrates a manifest whose filename is not its opId using manifest identity',
+      () async {
+    final legacyOp = operation(
+      id: 'del:entry-7',
+      kind: SyncOperationKind.delete,
+      payload: const {'entryId': 'entry-7'},
+    );
+    final legacy = await writeManifest('del:entry-7.json', legacyOp);
+
+    final active = await store.loadActive('user-1');
+
+    expect(active.single.operationId, 'del:entry-7');
+    expect(canonicalFile(legacyOp).existsSync(), isTrue);
+    expect(legacy.existsSync(), isFalse);
+  });
+
+  test('skips manifest entries belonging to another user', () async {
+    await writeManifest(
+      'v2-foreign.json',
+      operation(id: 'foreign-op', userId: 'user-2'),
+    );
+
+    expect(await store.loadActive('user-1'), isEmpty);
+  });
+
+  test('dual canonical and legacy records yield a single active operation',
+      () async {
+    final op = operation();
+    await store.put(op);
+    final legacy = await writeManifest('${op.operationId}.json', op);
+    final canonical = canonicalFile(op);
+    final canonicalUpdatedAt = DateTime.fromMillisecondsSinceEpoch(200);
+
+    await canonical.writeAsString(
+      jsonEncode(op.copyWith(updatedAtMs: 200).toJson()),
+    );
+    await legacy.writeAsString(jsonEncode(op.toJson()));
+
+    final active = await store.loadActive('user-1');
+
+    expect(active, hasLength(1));
+    expect(active.single.updatedAtMs, 200);
+    expect(canonical.existsSync(), isTrue);
+    expect(canonical.statSync().modified, isNotNull);
+    expect(canonicalUpdatedAt.year, greaterThanOrEqualTo(2020));
+    expect(legacy.existsSync(), isFalse);
+    expect(fileNameList(), [canonicalName(op.operationId)]);
+  });
+
+  test('canonical record wins when a dual legacy copy is newer', () async {
+    final op = operation();
+    final canonicalOp = op.copyWith(updatedAtMs: 100);
+    await store.put(canonicalOp);
+    await writeManifest(
+      '${op.operationId}.json',
+      op.copyWith(updatedAtMs: 200),
+    );
+
+    final active = await store.loadActive('user-1');
+
+    expect(active.single.updatedAtMs, 100);
+  });
+
+  test('recovers a temp-only manifest and returns it only once', () async {
+    final op = operation(id: 'temp-only');
+    final temp = await writeManifest('${canonicalName(op.operationId)}.tmp', op);
+
+    final first = await store.loadActive('user-1');
+    final second = await store.loadActive('user-1');
+
+    expect(first.single.operationId, 'temp-only');
+    expect(second, hasLength(1));
+    expect(canonicalFile(op).existsSync(), isTrue);
+    expect(temp.existsSync(), isFalse);
+  });
+
+  test('corrupt canonical falls back to legacy and deletes only corrupt data',
+      () async {
+    final op = operation(id: 'fallback');
+    final canonical = await writeManifest(canonicalName(op.operationId), op);
+    final legacy = await writeManifest('${op.operationId}.json', op);
+    await canonical.writeAsString('{not-json');
+
+    final active = await store.loadActive('user-1');
+
+    expect(active.single.operationId, 'fallback');
+    expect(canonical.existsSync(), isFalse);
+    expect(legacy.existsSync(), isFalse);
+    expect(canonicalFile(op).existsSync(), isTrue);
+  });
+
+  test('keeps legacy source when canonical rename fails and retries next load',
+      () async {
+    final op = operation(id: 'rename-failure');
+    final legacy = await writeManifest('${op.operationId}.json', op);
+    var failed = false;
+    final flakyStore = LocalOutboxStore(
+      directoryPath: directory.path,
+      rename: (source, target) async {
+        if (!failed) {
+          failed = true;
+          throw const FileSystemException('rename failed');
+        }
+        await source.rename(target);
+      },
+    );
+
+    final first = await flakyStore.loadActive('user-1');
+    expect(first.single.operationId, 'rename-failure');
+    expect(legacy.existsSync(), isTrue);
+
+    final retry = LocalOutboxStore(directoryPath: directory.path);
+    final second = await retry.loadActive('user-1');
+
+    expect(second.single.operationId, 'rename-failure');
+    expect(legacy.existsSync(), isFalse);
+    expect(canonicalFile(op).existsSync(), isTrue);
+  });
+
+  test('preserves both operations when hash collides for distinct opIds',
+      () async {
+    const firstId = 'first-op';
+    const secondId = 'second-op';
+    final first = operation(id: firstId);
+    final second = await writeManifest(
+      canonicalName(firstId),
+      operation(id: secondId),
+    );
+
+    final active = await store.loadActive('user-1');
+
+    expect(
+      active.map((item) => item.operationId),
+      containsAll(<String>[firstId, secondId]),
+    );
+    expect(second.existsSync(), isTrue);
+    expect(firstId, isNot(secondId));
+  });
+
+  test('remove deletes canonical and legacy artifacts for the same opId',
+      () async {
+    final op = operation();
+    await store.put(op);
+    final legacy = await writeManifest('${op.operationId}.json', op);
+    await store.remove('user-1', op.operationId);
+
+    expect(canonicalFile(op).existsSync(), isFalse);
+    expect(legacy.existsSync(), isFalse);
+    expect(fileNameList(), isEmpty);
+  });
+
+  test('remove does not delete another operation sharing a canonical path',
+      () async {
+    final first = operation(id: 'first-op');
+    await store.put(first);
+    final second = await writeManifest(
+      canonicalName(first.operationId),
+      operation(id: 'second-op'),
+    );
+
+    expect(canonicalFile(first).existsSync(), isTrue);
+    await store.remove('user-1', first.operationId);
+
+    expect(second.existsSync(), isTrue);
+    expect((await store.loadActive('user-1')).single.operationId, 'second-op');
+  });
+
+  test('clearUser deduplicates artifact ids and isolates directories',
+      () async {
+    await store.put(operation(id: 'one', artifactId: 'artifact-1'));
+    await store.put(operation(id: 'two', artifactId: 'artifact-1'));
+    await writeManifest(
+      '${canonicalName('legacy')}.json',
+      operation(id: 'legacy', artifactId: 'artifact-1'),
+    );
+    await store.put(
+      operation(id: 'other', userId: 'user-2', artifactId: 'artifact-2'),
+    );
+    await writeManifest(
+      'del:old.json',
+      operation(
+        id: 'del:old',
+        kind: SyncOperationKind.delete,
+        payload: const {'entryId': 'old'},
+      ),
+    );
+
+    final artifacts = await store.clearUser('user-1');
+
+    expect(artifacts, ['artifact-1']);
+    expect(userDirectory().existsSync(), isFalse);
+    expect(await store.loadActive('user-2'), hasLength(1));
+  });
+
+  test('findActiveByDedupeKey returns canonical and legacy operations',
+      () async {
+    final legacy = operation(id: 'legacy-op');
+    await writeManifest('${legacy.operationId}.json', legacy);
+
+    final found = await store.findActiveByDedupeKey(
+      'user-1',
+      SyncOperationKind.text,
+      legacy.dedupeKey,
+    );
+
+    expect(found?.operationId, 'legacy-op');
   });
 
   test('finds an active operation by user, kind and dedupe key', () async {
