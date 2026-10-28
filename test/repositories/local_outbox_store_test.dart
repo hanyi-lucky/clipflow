@@ -389,6 +389,19 @@ void main() {
     expect(temp.existsSync(), isFalse);
   });
 
+  test('remove ignores a matching opId owned by another user', () async {
+    final foreign = operation(id: 'shared-op', userId: 'user-2');
+    final foreignFile = await writeManifest(
+      canonicalName(foreign.operationId),
+      foreign,
+      directoryUserId: 'user-1',
+    );
+
+    await store.remove('user-1', foreign.operationId);
+
+    expect(foreignFile.existsSync(), isTrue);
+  });
+
   test('remove does not delete a path whose manifest has another opId',
       () async {
     final first = operation(id: 'first-op');

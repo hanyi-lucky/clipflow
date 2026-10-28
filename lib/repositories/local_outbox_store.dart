@@ -320,7 +320,9 @@ class LocalOutboxStore implements OutboxStore {
       if (entity is! File || !_isOutboxCandidate(entity)) continue;
       try {
         final operation = await _readManifest(entity);
-        if (operation.operationId == operationId) matches.add(entity);
+        if (operation.userId == userId && operation.operationId == operationId) {
+          matches.add(entity);
+        }
       } catch (_) {
         // An unreadable or foreign manifest is not proof of this operation.
       }
