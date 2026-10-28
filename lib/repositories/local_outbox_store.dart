@@ -256,9 +256,19 @@ class LocalOutboxStore implements OutboxStore {
     File canonical,
     SyncOperation authoritative,
   ) async {
+    bool canonicalBelongs = false;
+    if (canonical.existsSync()) {
+      try {
+        canonicalBelongs =
+            (await _readManifest(canonical)).operationId == authoritative.operationId;
+      } catch (_) {
+        canonicalBelongs = false;
+      }
+    }
     for (final record in records) {
-      if (!_samePath(record.file, canonical) &&
-          _sameOperation(record.operation, authoritative)) {
+      if (_samePath(record.file, canonical)) continue;
+      if (!_sameOperation(record.operation, authoritative)) continue;
+      if (_isTemp(record.file) || canonicalBelongs) {
         await _deleteQuietly(record.file);
       }
     }
