@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# clipflow: 提交前校验 AI 指引单一事实源未被破坏（AGENTS.md 入库 / CLAUDE.md 有 @ 导入与硬红线 / 两套 agent 定义一致）
+# clipflow: 提交前校验项目治理基线（AI 指引/agent 一致 + 治理快照）
 #
 # 启用（每台机器一次）： git config core.hooksPath .githooks
 # 卸载：                 git config --unset core.hooksPath
 # 跳过单次提交：         git commit --no-verify
 cd "$(git rev-parse --show-toplevel)" || exit 0
 [ -f scripts/check-agent-docs.sh ] || { echo "pre-commit: 找不到 scripts/check-agent-docs.sh"; exit 1; }
-out=$(bash scripts/check-agent-docs.sh --strict 2>&1); rc=$?
+out=$(bash scripts/check-agent-docs.sh --staged --strict 2>&1); rc=$?
 printf '%s\n' "$out"
 if [ "$rc" -ne 0 ]; then
-  echo "pre-commit: AI 指引一致性校验未通过，已阻止本次提交（退出码 ${rc}）。"
+  echo "pre-commit: 项目治理基线校验未通过，已阻止本次提交（退出码 ${rc}）。"
   exit 1
 fi
 exit 0

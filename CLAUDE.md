@@ -5,7 +5,7 @@
 上一行是 Claude Code 的记忆导入：会话启动时会把 `AGENTS.md`（本项目**唯一的 AI 指引事实源**）机械展开进上下文。
 
 本文件**只保留一样东西**：即使导入失败也必须遵守的硬红线。
-管线工作流、构建测试、架构、决策、API、加密、LAN、OSS、数据库模型等全部内容在 `AGENTS.md`，本文件不重复第二份 —— 避免两处各自漂移。
+`AGENTS.md` 是路由入口：管线细则、架构/数据流、服务器运维等专题正文分别在 `docs/pipeline-workflow.md`、`docs/architecture.md`、`docs/server-operations.md`，设计理由在 `docs/decisions/`。本文件不重复专题正文，避免两处各自漂移。
 
 ## 硬红线（不可协商）
 

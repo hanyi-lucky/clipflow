@@ -24,7 +24,7 @@ description: ClipFlow 代码实现代理，按方案执行 TDD 开发
 - Provider：AuthProvider、SettingsProvider、ClipboardProvider（核心调度）
 - Service：SyncService、EncryptionService、ClipboardMonitor、HistoryService
 - Repository：CloudRepository、LocalStorage
-- Server：server/index.js，6张表（users、devices、clipboard、history、salt、tokens）
+- Server：server/index.js；表结构与同步 schema 以 `docs/architecture.md` 为专题事实源，不在 agent 中维护易漂移的静态表清单
 
 ## TDD 铁律
 

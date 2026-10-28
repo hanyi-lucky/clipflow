@@ -51,8 +51,8 @@ description: ClipFlow 测试验证代理，执行测试并验证完成声明
 
 ### 必测项（全部执行）
 
-1. **静态检查**：`/opt/homebrew/bin/flutter analyze`（关注 error 级别）
-2. **单元测试**：`/opt/homebrew/bin/flutter test`（全部测试文件）
+1. **静态检查**：优先 `command -v flutter`；不可用时用 `~/development/flutter/bin/flutter analyze`（关注 error 级别）
+2. **单元测试**：优先 `command -v flutter`；不可用时用 `~/development/flutter/bin/flutter test`（全部测试文件）
 3. **核心场景验证**：根据 coder 的改动范围和提示，针对性检查：
    - 加密/解密往返正确性
    - 历史记录增删改查

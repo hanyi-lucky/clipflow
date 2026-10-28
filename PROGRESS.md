@@ -1,6 +1,6 @@
 # ClipFlow 开发进度
 
-> 更新时间：2026-10-15（**只刷新过期的"当前"数字**；下文带日期的验证记录、修复清单、技术债条目一律原样保留，不改写历史）
+> 更新时间：2026-10-28（**只刷新过期的"当前"数字与文档入口**；下文带日期的验证记录、修复清单、技术债条目一律原样保留，不改写历史）
 
 > **2026-09-04 之后的快照（2026-10-15 实测）**
 > - `flutter test` **537/537 全绿**
@@ -205,7 +205,7 @@
 
 ### v1.5 Phase 1/2（2026-08-06）
 
-- Phase 1 HTTPS：Cloudflare Tunnel + 标准 443（`https://api.yihanlife.ccwu.cc/api`），不备案；服务器仅监听 127.0.0.1:3000。
+- Phase 1 HTTPS：当时采用 Cloudflare Tunnel + 标准 443（`https://api.yihanlife.ccwu.cc/api`），不备案；服务器仅监听 127.0.0.1:3000。**该接入方式已于 2026-08-07 被决策 001 取代，仅作历史记录。**
 - Phase 2 设备管理：机型识别默认名（平台+机型、同名自动加序号）、设置页设备列表（查看/重命名/移除踢 token）、来源筛选；服务端 `tokens.device_id` 绑定与 `PATCH/DELETE /api/device/:id`。
 - Phase 2 修复：设备列表 `last_seen` 解析兼容；旧默认设备名自动升级；设备软删除（`removed_at`）并禁止重登/重注册；`_callApi` 自动重登携带 deviceId；token 每次请求刷新 `last_seen` 作为在线心跳。
 - `flutter test` 238/238（本机文件上传用例存在既有偶发超时，重跑全绿；Windows 上正常）。
@@ -274,7 +274,7 @@ Node.js Server (Express + SQLite)
 
 ## 服务器信息
 
-- **生产 API：** `https://121.196.222.122/api`（直连 IP + 自签证书指纹固定；服务器仅监听 127.0.0.1:3000 经 Cloudflare Tunnel）
+- **生产 API：** `https://121.196.222.122/api`（直连 IP + 自签证书指纹固定；服务器进程仅监听 127.0.0.1:3000，由本机 TLS 层对外；Cloudflare Tunnel 已废弃，见决策 001）
 - **SSH：** `ssh -i /Users/hanyi/Downloads/key241294.pem root@121.196.222.122`
 - **服务管理：** `systemctl restart clipflow`
 - **代码路径：** `/opt/clipflow/index.js`
