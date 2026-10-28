@@ -1,7 +1,7 @@
 # 012 · Phase 1A：outbox 文件名安全化与迁移
 
 - 日期：2026-10-28
-- 状态：Phase 1A 已实现，Windows 真机验收待完成
+- 状态：Phase 1A 本地与 Windows 真机验收通过；旧冒号 ADS 残余风险已记录
 - 档位/组合：完整（architect 冻结 → coder TDD → tester / reviewer 待接力）
 
 ## 背景
@@ -68,6 +68,29 @@ LAN、加密、userId 派生或 token 持久化。
 - 旧 UUID / `del:` / `rest:` manifest 可在升级后加载、迁移、删除并且不重复入队。
 - 迁移中断时源文件保留，下一次 `loadActive` 可重试；at-least-once 语义保留。
 - 协议层 operationId 保持原样，`del:<entryId>` / `rest:<entryId>` 不变。
-- 本工作树仅完成 LOCAL_GREEN；Windows 真机 `put → restart → load → remove`、
-  非法文件名/ADS 检查仍为 `WINDOWS_VERIFICATION_PENDING`，不得据此宣称
-  Phase 1A 整体完成。
+- Windows 真机已完成 `put → restart → load → remove`、非法文件名与 ADS
+  检查；旧冒号 ADS 的不可枚举限制见下节。
+
+## Windows 真机验收（2026-10-28，SHA cdc785d）
+
+- 同 SHA 独立 worktree 运行 `local_outbox_store_test.dart`：33 passed、0 failed、
+  1 skipped（POSIX-only chmod 故障注入）。
+- `sync_coordinator_test.dart`：17/17 passed。
+- `flutter build windows --release` 成功；`clipflow.exe`、`flutter_windows.dll`、
+  `data/app.so`、`data/icudtl.dat`、`flutter_assets` 均存在。
+- `flutter analyze --no-pub`：0 error / 11 warning / 89 info，exit 1（既有基线）。
+- Windows 全量串行测试中的 `cloud_repository_oss_test` 临时文件占用失败，在
+  同一 Windows 环境的 `main` 基线 worktree 复现，属既有测试缺陷，不是
+  Phase 1A 回归。
+
+### 旧冒号文件与 ADS 残余风险
+
+Dart 真机探测结果：
+
+- `File('...\\del:entry-1.json').writeAsString(...)` 在 NTFS 上返回成功；
+- 目录枚举只看到基础文件 `del`，看不到冒号后的命名流。
+
+因此旧 `del:`/`rest:` 文件若历史上在 Windows 上真实落盘，可能是 ADS 而非普通
+文件，`Directory.list()` 无法枚举迁移。本阶段不新增 Win32 ADS 枚举插件，明确
+接受该残余风险；真实用户 outbox 当前为空，未发现现存 ADS 数据。新 canonical
+文件名不包含冒号，不会产生新的 ADS。
