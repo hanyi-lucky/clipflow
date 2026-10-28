@@ -40,12 +40,12 @@ void main() {
   late LocalOutboxStore store;
 
   Directory userDirectory([String userId = 'user-1']) {
-    return Directory('${directory.path}/clipflow_outbox/$userId');
+    return Directory.fromUri(directory.uri.resolve('clipflow_outbox/$userId'));
   }
 
   File canonicalFile(SyncOperation op) {
-    return File(
-      '${userDirectory(op.userId).path}/${canonicalName(op.operationId)}',
+    return File.fromUri(
+      userDirectory(op.userId).uri.resolve(canonicalName(op.operationId)),
     );
   }
 
@@ -56,7 +56,7 @@ void main() {
   }) async {
     final dir = userDirectory(directoryUserId ?? op.userId);
     await dir.create(recursive: true);
-    final file = File('${dir.path}/$fileName');
+    final file = File.fromUri(dir.uri.resolve(fileName));
     await file.writeAsString(jsonEncode(op.toJson()), flush: true);
     return file;
   }
@@ -728,6 +728,38 @@ void main() {
       throwsA(isA<FileSystemException>()),
     );
 
+    expect(canonical.existsSync(), isTrue);
+    expect(legacy.existsSync(), isTrue);
+  });
+
+  test('remove rethrows scan I/O failure and keeps canonical and legacy copies',
+      () async {
+    final op = operation(id: 'remove-scan-io-failure');
+    await store.put(op);
+    final canonical = canonicalFile(op);
+    final legacy = await writeManifest('${op.operationId}.json', op);
+
+    ProcessResult chmod;
+    try {
+      chmod = await Process.run('chmod', ['000', legacy.path]);
+    } on ProcessException {
+      markTestSkipped('chmod unavailable; POSIX-only scan I/O failure trigger');
+      return;
+    }
+    if (chmod.exitCode != 0) {
+      markTestSkipped('chmod failed; cannot trigger scan I/O failure');
+      return;
+    }
+    addTearDown(() async {
+      try {
+        await Process.run('chmod', ['644', legacy.path]);
+      } catch (_) {}
+    });
+
+    await expectLater(
+      store.remove('user-1', op.operationId),
+      throwsA(isA<FileSystemException>()),
+    );
     expect(canonical.existsSync(), isTrue);
     expect(legacy.existsSync(), isTrue);
   });
