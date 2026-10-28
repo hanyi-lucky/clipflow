@@ -65,16 +65,20 @@ LAN、加密、userId 派生或 token 持久化。
 ## 后果
 
 - 文件名不再包含 `:`，路径满足 Windows 常规文件约束。
-- 旧 UUID / `del:` / `rest:` manifest 可在升级后加载、迁移、删除并且不重复入队。
+- 普通 legacy 文件（旧 UUID 或可被目录枚举的通用文件名）可在升级后加载、
+  迁移、删除并且不重复入队。
+- Windows 历史上以 `del:` / `rest:` 形成命名流（ADS）的旧文件不在本阶段
+  恢复范围；Dart 目录枚举无法看到这些记录。
 - 迁移中断时源文件保留，下一次 `loadActive` 可重试；at-least-once 语义保留。
 - 协议层 operationId 保持原样，`del:<entryId>` / `rest:<entryId>` 不变。
-- Windows 真机已完成 `put → restart → load → remove`、非法文件名与 ADS
-  检查；旧冒号 ADS 的不可枚举限制见下节。
+- 新 canonical、legacy、temp 与 remove 组合用例已在 Windows 真机通过；
+  旧冒号 ADS 的不可枚举限制见下节。
 
 ## Windows 真机验收（2026-10-28，SHA cdc785d）
 
 - 同 SHA 独立 worktree 运行 `local_outbox_store_test.dart`：33 passed、0 failed、
-  1 skipped（POSIX-only chmod 故障注入）。
+  1 skipped（POSIX-only chmod 故障注入）。这覆盖 canonical 写读、重启恢复、
+  legacy 迁移、temp/占用路径、remove 等专项用例组合，不是独立端到端用例。
 - `sync_coordinator_test.dart`：17/17 passed。
 - `flutter build windows --release` 成功；`clipflow.exe`、`flutter_windows.dll`、
   `data/app.so`、`data/icudtl.dat`、`flutter_assets` 均存在。
@@ -82,6 +86,9 @@ LAN、加密、userId 派生或 token 持久化。
 - Windows 全量串行测试中的 `cloud_repository_oss_test` 临时文件占用失败，在
   同一 Windows 环境的 `main` 基线 worktree 复现，属既有测试缺陷，不是
   Phase 1A 回归。
+- Windows 全量串行测试中的 `clipboard_provider_lan_file_test.dart` LAN-only
+  图片缓存断言失败，单跑通过；相关实现/测试相对 `main` 无 diff，属既有平台
+  时序问题，不是 Phase 1A 回归。
 
 ### 旧冒号文件与 ADS 残余风险
 
