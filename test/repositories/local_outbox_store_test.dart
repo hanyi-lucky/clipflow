@@ -286,6 +286,26 @@ void main() {
     expect(canonicalFile(op).existsSync(), isFalse);
   });
 
+  test('preserves schema-invalid canonical temp without promoting or returning',
+      () async {
+    final op = operation(id: 'schema-bad-temp');
+    final temp = await writeManifest(
+      '${canonicalName(op.operationId)}.tmp',
+      op,
+    );
+    await temp.writeAsString(
+      jsonEncode({...op.toJson(), 'schemaVersion': 999}),
+    );
+
+    final first = await store.loadActive('user-1');
+    final second = await store.loadActive('user-1');
+
+    expect(first, isEmpty);
+    expect(second, isEmpty);
+    expect(temp.existsSync(), isTrue);
+    expect(canonicalFile(op).existsSync(), isFalse);
+  });
+
   test('partial canonical temp does not shadow valid canonical', () async {
     final op = operation(id: 'partial-with-canonical');
     final canonical = await writeManifest(canonicalName(op.operationId), op);
