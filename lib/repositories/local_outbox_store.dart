@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/sync_operation.dart';
@@ -52,6 +53,7 @@ class LocalOutboxStore implements OutboxStore {
     return dir;
   }
 
+  @visibleForTesting
   String canonicalName(String operationId) {
     final digest = sha256.convert(utf8.encode(operationId)).toString();
     return 'v2-$digest.json';
