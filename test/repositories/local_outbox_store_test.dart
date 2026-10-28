@@ -175,6 +175,59 @@ void main() {
     expect(fileNameList(), [canonicalName(pending.operationId)]);
   });
 
+  test(
+    'update preserves the existing canonical bytes and removes its temp when '
+    'the replacement rename fails',
+    () async {
+      final pending = operation();
+      await store.put(pending);
+      final canonical = canonicalFile(pending);
+      final originalBytes = await canonical.readAsBytes();
+      final updated = pending.copyWith(
+        state: SyncOperationState.retryable,
+        updatedAtMs: 200,
+        lastError: 'offline',
+      );
+      var renameAttempts = 0;
+      final failingStore = LocalOutboxStore(
+        directoryPath: directory.path,
+        rename: (source, target) async {
+          renameAttempts++;
+          if (renameAttempts == 1) {
+            throw const FileSystemException('rename failed');
+          }
+          await source.rename(target);
+        },
+      );
+
+      await expectLater(
+        failingStore.update(updated),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      expect(await canonical.readAsBytes(), originalBytes);
+      expect(fileNameList(), [canonicalName(pending.operationId)]);
+      expect(
+        (jsonDecode(await canonical.readAsString())
+            as Map<String, dynamic>)['state'],
+        'pending',
+      );
+
+      await LocalOutboxStore(
+        directoryPath: directory.path,
+      ).update(updated);
+
+      final persisted =
+          jsonDecode(await canonical.readAsString()) as Map<String, dynamic>;
+      expect(persisted['operationId'], pending.operationId);
+      expect(persisted['state'], 'retryable');
+      expect(persisted['updatedAtMs'], 200);
+      expect(persisted['lastError'], 'offline');
+      expect(await canonical.readAsBytes(), isNot(originalBytes));
+      expect(fileNameList(), [canonicalName(pending.operationId)]);
+    },
+  );
+
   test('migrates a UUID legacy file and removes legacy source after readback',
       () async {
     final legacyOp = operation(id: '0f5bb4d8-1111-4444-8888-123456789abc');
