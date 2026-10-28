@@ -23,6 +23,8 @@ class _CorruptManifest implements Exception {
 }
 
 class LocalOutboxStore implements OutboxStore {
+  static final RegExp _canonicalStemPattern = RegExp(r'^v2-[0-9a-f]{64}$');
+
   final String? _overrideDirectoryPath;
   final OutboxRename _rename;
   final OutboxDelete _delete;
@@ -32,12 +34,13 @@ class LocalOutboxStore implements OutboxStore {
     String? directoryPath,
     OutboxRename? rename,
     OutboxDelete? deleteFile,
-  })  : _overrideDirectoryPath = directoryPath,
-        _rename = rename ??
-            ((source, target) async {
-              await source.rename(target);
-            }),
-        _delete = deleteFile ?? ((file) => file.delete());
+  }) : _overrideDirectoryPath = directoryPath,
+       _rename =
+           rename ??
+           ((source, target) async {
+             await source.rename(target);
+           }),
+       _delete = deleteFile ?? ((file) => file.delete());
 
   Future<String> _basePath() async {
     return _overrideDirectoryPath ??
@@ -64,19 +67,24 @@ class LocalOutboxStore implements OutboxStore {
     final dir = await _userDirectory(userId, create: false);
     if (!dir.existsSync()) return [];
 
+    final canonicalPaths = <String>{};
     final grouped = <String, List<_OutboxRecord>>{};
     await for (final entity in dir.list()) {
       if (entity is! File || !_isOutboxCandidate(entity)) continue;
+      if (!_isTemp(entity) && _isCanonicalShaped(entity)) {
+        canonicalPaths.add(entity.path);
+      }
       final record = await _readRecord(entity, userId);
       if (record == null || !record.operation.isActive) continue;
       grouped
           .putIfAbsent(record.operation.operationId, () => <_OutboxRecord>[])
           .add(record);
     }
+    canonicalPaths.removeWhere((path) => !File(path).existsSync());
 
     final operations = <SyncOperation>[];
     for (final group in grouped.values) {
-      final operation = await _selectAndMigrate(group);
+      final operation = await _selectAndMigrate(group, canonicalPaths);
       if (operation != null) operations.add(operation);
     }
 
@@ -93,8 +101,9 @@ class LocalOutboxStore implements OutboxStore {
       if (operation.userId != userId) return null;
       return _OutboxRecord(file, operation);
     } on _CorruptManifest {
-      // JSON/schema damage is not recoverable. Delete only that artifact.
-      await _deleteQuietly(file);
+      // A temp may be a partially written artifact. A final JSON artifact is
+      // known not to be in-flight, so only that can be cleaned here.
+      if (!_isTemp(file)) await _deleteQuietly(file);
       return null;
     } on FileSystemException {
       // An I/O failure may be transient. Never delete the source.
@@ -122,7 +131,10 @@ class LocalOutboxStore implements OutboxStore {
     }
   }
 
-  Future<SyncOperation?> _selectAndMigrate(List<_OutboxRecord> records) async {
+  Future<SyncOperation?> _selectAndMigrate(
+    List<_OutboxRecord> records,
+    Set<String> canonicalPaths,
+  ) async {
     if (records.isEmpty) return null;
 
     final operationId = records.first.operation.operationId;
@@ -131,15 +143,26 @@ class LocalOutboxStore implements OutboxStore {
     final canonical = records
         .where((record) => _samePath(record.file, target))
         .toList();
-    final legacy = records
-        .where((record) =>
-            !_isTemp(record.file) && !_samePath(record.file, target))
-        .toList()
-      ..sort((a, b) =>
-          b.operation.updatedAtMs.compareTo(a.operation.updatedAtMs));
+    final misplacedCanonical = records
+        .where(
+          (record) => !_isTemp(record.file) && _isCanonicalShaped(record.file),
+        )
+        .toList();
+    final legacy =
+        records
+            .where(
+              (record) =>
+                  !_isTemp(record.file) && !_samePath(record.file, target),
+            )
+            .toList()
+          ..sort(
+            (a, b) =>
+                b.operation.updatedAtMs.compareTo(a.operation.updatedAtMs),
+          );
     final temps = records.where((record) => _isTemp(record.file)).toList()
-      ..sort((a, b) =>
-          b.operation.updatedAtMs.compareTo(a.operation.updatedAtMs));
+      ..sort(
+        (a, b) => b.operation.updatedAtMs.compareTo(a.operation.updatedAtMs),
+      );
 
     if (canonical.isNotEmpty) {
       final current = canonical.first;
@@ -162,15 +185,21 @@ class LocalOutboxStore implements OutboxStore {
       await _cleanupSecondary(
         records,
         target,
+        canonicalPaths,
         canonical.first.operation.operationId,
       );
       return operation;
     }
 
-    final occupant = await _canonicalOccupant(dir, operationId);
-    if (occupant != null) {
-      // A different valid opId owns this hash path. Keep this group's source
-      // and return it without overwriting the occupant.
+    if (misplacedCanonical.isNotEmpty) {
+      // A valid canonical-shaped artifact at another operation's hash path is
+      // returned by content identity but never migrated or deleted here.
+      return misplacedCanonical.first.operation;
+    }
+
+    if (canonicalPaths.contains(target.path)) {
+      // A canonical-shaped artifact is never migrated, deleted, or
+      // overwritten by loadActive, regardless of its manifest content.
       final source = legacy.isNotEmpty ? legacy.first : temps.first;
       return source.operation;
     }
@@ -187,26 +216,13 @@ class LocalOutboxStore implements OutboxStore {
       await _promote(chosen, operation, target);
       final readBack = await _readManifest(target);
       if (readBack.operationId != operationId) return operation;
-      await _cleanupSecondary(records, target, operationId);
+      await _cleanupSecondary(records, target, canonicalPaths, operationId);
       return readBack;
     } on FileSystemException {
       // The source remains recoverable for the next load.
       return operation;
     } on _CorruptManifest {
       return operation;
-    }
-  }
-
-  Future<File?> _canonicalOccupant(Directory dir, String operationId) async {
-    final target = File('${dir.path}/${canonicalName(operationId)}');
-    if (!target.existsSync()) return null;
-    try {
-      final existing = await _readManifest(target);
-      return existing.operationId == operationId ? null : target;
-    } on _CorruptManifest {
-      return null;
-    } on FileSystemException {
-      return target;
     }
   }
 
@@ -267,23 +283,14 @@ class LocalOutboxStore implements OutboxStore {
   Future<void> _cleanupSecondary(
     List<_OutboxRecord> records,
     File canonical,
+    Set<String> canonicalPaths,
     String operationId,
   ) async {
-    bool canonicalBelongs = false;
-    if (canonical.existsSync()) {
-      try {
-        canonicalBelongs =
-            (await _readManifest(canonical)).operationId == operationId;
-      } catch (_) {
-        canonicalBelongs = false;
-      }
-    }
     for (final record in records) {
       if (_samePath(record.file, canonical)) continue;
       if (record.operation.operationId != operationId) continue;
-      if (_isTemp(record.file) || canonicalBelongs) {
-        await _deleteQuietly(record.file);
-      }
+      if (canonicalPaths.contains(record.file.path)) continue;
+      await _deleteQuietly(record.file);
     }
   }
 
@@ -322,7 +329,8 @@ class LocalOutboxStore implements OutboxStore {
       if (entity is! File || !_isOutboxCandidate(entity)) continue;
       try {
         final operation = await _readManifest(entity);
-        if (operation.userId == userId && operation.operationId == operationId) {
+        if (operation.userId == userId &&
+            operation.operationId == operationId) {
           matches.add(entity);
         }
       } catch (_) {
@@ -375,6 +383,16 @@ class LocalOutboxStore implements OutboxStore {
   }
 
   bool _isTemp(File file) => file.uri.pathSegments.last.endsWith('.tmp');
+
+  bool _isCanonicalShaped(File file) {
+    final name = file.uri.pathSegments.last;
+    final canonical = name.endsWith('.tmp')
+        ? name.substring(0, name.length - '.tmp'.length)
+        : name;
+    if (!canonical.endsWith('.json')) return false;
+    final stem = canonical.substring(0, canonical.length - '.json'.length);
+    return _canonicalStemPattern.hasMatch(stem);
+  }
 
   bool _samePath(File left, File right) => left.path == right.path;
 
