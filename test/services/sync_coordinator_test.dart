@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:clipflow/models/sync_operation.dart';
@@ -461,7 +460,6 @@ void main() {
   });
 
   test('a dead (4xx) delete op is removed from the outbox immediately', () async {
-    final transport = _RecordingTransport()..failuresRemaining = 0;
     final coordinator = SyncCoordinator(
       userId: 'user-1',
       syncService: syncService,

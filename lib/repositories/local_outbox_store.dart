@@ -221,7 +221,7 @@ class LocalOutboxStore implements OutboxStore {
       } on _CorruptManifest {
         // JSON/schema damage may be quarantined; I/O errors preserve both.
         final corrupt = File(
-          '${target.path}.corrupt-${pid}-${DateTime.now().microsecondsSinceEpoch}.tmp',
+          '${target.path}.corrupt-$pid-${DateTime.now().microsecondsSinceEpoch}.tmp',
         );
         await _rename(target, corrupt.path);
       }
@@ -238,7 +238,7 @@ class LocalOutboxStore implements OutboxStore {
     final dir = target.parent;
     if (!dir.existsSync()) await dir.create(recursive: true);
     final temp = File(
-      '${target.path}.${pid}-${DateTime.now().microsecondsSinceEpoch}-${_tempSequence++}.tmp',
+      '${target.path}.$pid-${DateTime.now().microsecondsSinceEpoch}-${_tempSequence++}.tmp',
     );
     try {
       await temp.writeAsString(jsonEncode(operation.toJson()), flush: true);
@@ -250,7 +250,7 @@ class LocalOutboxStore implements OutboxStore {
           }
         } on _CorruptManifest {
           final corrupt = File(
-            '${target.path}.corrupt-${pid}-${DateTime.now().microsecondsSinceEpoch}.tmp',
+            '${target.path}.corrupt-$pid-${DateTime.now().microsecondsSinceEpoch}.tmp',
           );
           await _rename(target, corrupt.path);
         }
