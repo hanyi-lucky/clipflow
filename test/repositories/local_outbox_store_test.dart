@@ -256,6 +256,55 @@ void main() {
     expect(fileNameList(), [canonicalName(op.operationId)]);
   });
 
+  for (final exactFirst in <bool>[true, false]) {
+    test(
+      'exact canonical wins over same-op misplaced canonical-shaped, legacy '
+      'and temp copies (${exactFirst ? 'exact' : 'misplaced'} first)',
+      () async {
+        final op = operation(id: 'exact-with-misplaced');
+        final exactName = canonicalName(op.operationId);
+        final misplacedName = canonicalName('misplaced-same-op');
+        final legacyName = 'legacy-exact-with-misplaced.json';
+        final tempName = 'pending-exact-with-misplaced.tmp';
+        final artifacts = <(String, SyncOperation)>[
+          if (exactFirst) ...[
+            (exactName, op),
+            (misplacedName, op),
+            (legacyName, op),
+            (tempName, op),
+          ] else ...[
+            (tempName, op),
+            (legacyName, op),
+            (misplacedName, op),
+            (exactName, op),
+          ],
+        ];
+        for (final (name, item) in artifacts) {
+          await writeManifest(name, item);
+        }
+        final exact = File('${userDirectory().path}/$exactName');
+        final misplaced = File('${userDirectory().path}/$misplacedName');
+        final legacy = File('${userDirectory().path}/$legacyName');
+        final temp = File('${userDirectory().path}/$tempName');
+        final exactBytes = await exact.readAsString();
+        final misplacedBytes = await misplaced.readAsString();
+
+        for (var load = 0; load < 2; load++) {
+          final active = await store.loadActive('user-1');
+
+          expect(active.map((item) => item.operationId), [op.operationId]);
+          expect(await exact.readAsString(), exactBytes);
+          expect(await misplaced.readAsString(), misplacedBytes);
+          expect(exact.existsSync(), isTrue);
+          expect(misplaced.existsSync(), isTrue);
+          expect(legacy.existsSync(), isFalse);
+          expect(temp.existsSync(), isFalse);
+        }
+        expect(fileNameList(), [exactName, misplacedName]..sort());
+      },
+    );
+  }
+
   test('recovers a valid temp-only manifest and returns it only once',
       () async {
     final op = operation(id: 'temp-only');
