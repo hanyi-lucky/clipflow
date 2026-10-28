@@ -37,6 +37,21 @@ LAN、加密、userId 派生或 token 持久化。
 5. **hash 路径冲突保护**
    - 若目标 canonical 文件属于另一个合法 opId，不得覆盖或误删。
    - 两个操作都返回，原 canonical 保持不动；冲突组的 legacy 副本保留。
+   - 任何 non-target canonical-shaped 文件（文件名符合 canonical 格式，但
+     不是该 manifest 内容 operationId 对应的目标路径）都是持久占用者：
+     `loadActive` 不得删除、迁移或覆盖它，即使其 manifest 内容与另一个
+     exact canonical 的 opId 相同。
+   - “canonical > legacy > temp”只描述同一 opId 的副本选择优先级，不表示
+     可以清理所有非选中副本。普通 legacy 与 valid temp 可清理；non-target
+     canonical-shaped 永远不走该清理路径。
+   - 同一 opId 同时存在 exact canonical、同内容的 misplaced
+     canonical-shaped、普通 legacy 与 valid temp 时：返回 exact canonical
+     一次，exact canonical 字节保持不变；普通 legacy/temp 被清理；
+     misplaced canonical-shaped 字节与其占用路径持续保留。反向创建顺序
+     结果相同，连续两次 `loadActive` 也保持幂等。
+   - 若 exact canonical 不存在而只有 misplaced canonical-shaped，仍按
+     manifest 内容 identity 返回该 operation；该文件继续占用其原文件名
+     对应的目标路径，不迁移。
 6. **remove**
    - 按 manifest 内容匹配 operationId，兼容 canonical、legacy、temp。
    - 先删除所有非 canonical 副本，最后删除 canonical；任一前置删除失败
