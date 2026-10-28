@@ -8,6 +8,7 @@ import '../models/sync_operation.dart';
 import 'outbox_store.dart';
 
 typedef OutboxRename = Future<void> Function(File source, String target);
+typedef OutboxDelete = Future<void> Function(File file);
 
 class _OutboxRecord {
   final File file;
@@ -23,14 +24,19 @@ class _CorruptManifest implements Exception {
 class LocalOutboxStore implements OutboxStore {
   final String? _overrideDirectoryPath;
   final OutboxRename _rename;
+  final OutboxDelete _delete;
   int _tempSequence = 0;
 
-  LocalOutboxStore({String? directoryPath, OutboxRename? rename})
-      : _overrideDirectoryPath = directoryPath,
+  LocalOutboxStore({
+    String? directoryPath,
+    OutboxRename? rename,
+    OutboxDelete? deleteFile,
+  })  : _overrideDirectoryPath = directoryPath,
         _rename = rename ??
             ((source, target) async {
               await source.rename(target);
-            });
+            }),
+        _delete = deleteFile ?? ((file) => file.delete());
 
   Future<String> _basePath() async {
     return _overrideDirectoryPath ??
@@ -145,7 +151,8 @@ class LocalOutboxStore implements OutboxStore {
           await _writeManifest(operation, target);
           operation = await _readManifest(target);
         } on FileSystemException {
-          operation = current.operation;
+          // Return pending in memory; the canonical source stays recoverable
+          // and will be rewritten on the next load.
         } on _CorruptManifest {
           operation = current.operation;
         }
@@ -376,6 +383,6 @@ class LocalOutboxStore implements OutboxStore {
   }
 
   Future<void> _deleteRequired(File file) async {
-    if (file.existsSync()) await file.delete();
+    if (file.existsSync()) await _delete(file);
   }
 }

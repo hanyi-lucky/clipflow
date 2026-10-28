@@ -489,6 +489,48 @@ void main() {
     expect(bad.existsSync(), isFalse);
   });
 
+  test('restores a sending canonical to pending when the rewrite rename fails',
+      () async {
+    final op = operation(id: 'sending-failure', state: SyncOperationState.sending);
+    final canonical = await writeManifest(canonicalName(op.operationId), op);
+    final failingStore = LocalOutboxStore(
+      directoryPath: directory.path,
+      rename: (source, target) async {
+        throw const FileSystemException('rename failed');
+      },
+    );
+
+    final active = await failingStore.loadActive('user-1');
+
+    expect(active.single.operationId, op.operationId);
+    expect(active.single.state, SyncOperationState.pending);
+    expect(canonical.existsSync(), isTrue);
+  });
+
+  test('keeps canonical when deleting a legacy copy fails', () async {
+    final op = operation(id: 'remove-failure');
+    await store.put(op);
+    final canonical = canonicalFile(op);
+    final legacy = await writeManifest('${op.operationId}.json', op);
+    final failingStore = LocalOutboxStore(
+      directoryPath: directory.path,
+      deleteFile: (file) async {
+        if (file.path == legacy.path) {
+          throw const FileSystemException('delete failed');
+        }
+        await file.delete();
+      },
+    );
+
+    await expectLater(
+      failingStore.remove('user-1', op.operationId),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(canonical.existsSync(), isTrue);
+    expect(legacy.existsSync(), isTrue);
+  });
+
   test('writes a JSON manifest containing no plaintext outside payload contract',
       () async {
     await store.put(operation());
