@@ -228,7 +228,7 @@ void main() {
     expect(File('${userDirectory().path}/v2-foreign.json').existsSync(), isTrue);
   });
 
-  test('dual canonical and legacy records yield one canonical operation',
+  test('canonical wins over legacy and temp while retaining canonical bytes',
       () async {
     final op = operation();
     final canonical = await writeManifest(
@@ -239,17 +239,25 @@ void main() {
       '${op.operationId}.json',
       op.copyWith(updatedAtMs: 200),
     );
+    final temp = await writeManifest(
+      '${canonicalName(op.operationId)}.tmp',
+      op.copyWith(updatedAtMs: 300),
+    );
+    final canonicalBytes = await canonical.readAsString();
 
     final active = await store.loadActive('user-1');
 
     expect(active, hasLength(1));
     expect(active.single.updatedAtMs, 100);
     expect(canonical.existsSync(), isTrue);
+    expect(await canonical.readAsString(), canonicalBytes);
     expect(legacy.existsSync(), isFalse);
+    expect(temp.existsSync(), isFalse);
     expect(fileNameList(), [canonicalName(op.operationId)]);
   });
 
-  test('recovers a temp-only manifest and returns it only once', () async {
+  test('recovers a valid temp-only manifest and returns it only once',
+      () async {
     final op = operation(id: 'temp-only');
     final temp = await writeManifest('${canonicalName(op.operationId)}.tmp', op);
 
@@ -260,6 +268,39 @@ void main() {
     expect(second, hasLength(1));
     expect(canonicalFile(op).existsSync(), isTrue);
     expect(temp.existsSync(), isFalse);
+  });
+
+  test('preserves partial canonical temp without promoting or returning it',
+      () async {
+    final op = operation(id: 'partial-temp');
+    final partial =
+        await writeManifest('${canonicalName(op.operationId)}.tmp', op);
+    await partial.writeAsString('{"operationId":');
+
+    final first = await store.loadActive('user-1');
+    final second = await store.loadActive('user-1');
+
+    expect(first, isEmpty);
+    expect(second, isEmpty);
+    expect(partial.existsSync(), isTrue);
+    expect(canonicalFile(op).existsSync(), isFalse);
+  });
+
+  test('partial canonical temp does not shadow valid canonical', () async {
+    final op = operation(id: 'partial-with-canonical');
+    final canonical = await writeManifest(canonicalName(op.operationId), op);
+    final partial =
+        await writeManifest('${canonicalName(op.operationId)}.tmp', op);
+    await partial.writeAsString('{not-json');
+    final canonicalBytes = await canonical.readAsString();
+
+    final first = await store.loadActive('user-1');
+    final second = await store.loadActive('user-1');
+
+    expect(first.single.operationId, op.operationId);
+    expect(second.single.operationId, op.operationId);
+    expect(await canonical.readAsString(), canonicalBytes);
+    expect(partial.existsSync(), isTrue);
   });
 
   test('corrupt canonical falls back to a valid legacy record', () async {
@@ -306,38 +347,63 @@ void main() {
     expect(canonicalFile(op).existsSync(), isTrue);
   });
 
-  test('preserves both operations when a canonical path has another opId',
+  for (final occupantFirst in <bool>[true, false]) {
+    test(
+      'misplaced canonical-shaped occupant blocks promotion regardless of '
+      'creation order (${occupantFirst ? 'occupant' : 'legacy'} first)',
       () async {
-    final first = operation(id: 'first-op');
-    final second = operation(id: 'second-op');
-    // A deterministic SHA-256 collision cannot be constructed practically.
-    // Simulate the filesystem condition: second-op's target is occupied by a
-    // valid manifest for first-op, while second-op has a generic legacy copy.
-    await writeManifest(canonicalName(second.operationId), first);
-    await writeManifest('legacy-second.json', second);
+        final first = operation(id: 'first-op');
+        final second = operation(id: 'second-op');
+        // A deterministic SHA-256 collision cannot be constructed practically.
+        // Simulate second-op's target containing first-op while second-op only
+        // has a generic legacy copy.
+        final artifacts = <(String, SyncOperation)>[
+          if (occupantFirst) ...[
+            (canonicalName(second.operationId), first),
+            ('legacy-second.json', second),
+          ] else ...[
+            ('legacy-second.json', second),
+            (canonicalName(second.operationId), first),
+          ],
+        ];
+        for (final (name, op) in artifacts) {
+          await writeManifest(name, op);
+        }
+        final occupant = File(
+          '${userDirectory().path}/${canonicalName(second.operationId)}',
+        );
+        final legacySecond = File(
+          '${userDirectory().path}/legacy-second.json',
+        );
 
-    final active = await store.loadActive('user-1');
-    expect(
-      active.map((item) => item.operationId),
-      containsAll(<String>[first.operationId, second.operationId]),
-    );
+        final firstLoad = await store.loadActive('user-1');
+        final secondLoad = await store.loadActive('user-1');
 
-    final reloaded = await store.loadActive('user-1');
-    expect(
-      reloaded.map((item) => item.operationId),
-      containsAll(<String>[first.operationId, second.operationId]),
+        for (final active in [firstLoad, secondLoad]) {
+          expect(
+            active.where((item) => item.operationId == first.operationId),
+            hasLength(1),
+          );
+          expect(
+            active.where((item) => item.operationId == second.operationId),
+            hasLength(1),
+          );
+        }
+        expect(
+          (jsonDecode(await occupant.readAsString())
+              as Map<String, dynamic>)['operationId'],
+          first.operationId,
+        );
+        expect(occupant.existsSync(), isTrue);
+        expect(legacySecond.existsSync(), isTrue);
+        expect(
+          File('${userDirectory().path}/${canonicalName(first.operationId)}')
+              .existsSync(),
+          isFalse,
+        );
+      },
     );
-    expect(
-      (jsonDecode(await canonicalFile(first).readAsString())
-          as Map<String, dynamic>)['operationId'],
-      first.operationId,
-    );
-    expect(
-      (jsonDecode(await canonicalFile(second).readAsString())
-          as Map<String, dynamic>)['operationId'],
-      second.operationId,
-    );
-  });
+  }
 
   test('put refuses to overwrite a canonical path owned by another opId',
       () async {
