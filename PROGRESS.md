@@ -12,6 +12,14 @@
 
 ## 已完成的功能
 
+### Phase 1A：Windows outbox 文件名兼容（2026-10-28）
+
+- `LocalOutboxStore` 改为 `v2-<sha256(operationId)>.json` canonical 文件名；唯一临时文件 + 直接 rename，不再先删 target。
+- 以 manifest 内容识别 operationId；支持旧 UUID/普通 legacy 迁移、temp recovery、canonical 优先、双份去重、hash 路径占用保护、remove 双路径与 clearUser 去重。
+- Windows 混合路径分隔符问题修复：路径身份统一用 URI key，remove 扫描 I/O 失败 fail-closed。
+- 本机目标测试 51/51、串行全量 567/567；Windows 专项 outbox 33 passed/1 POSIX-only skipped、coordinator 17/17、release 构建通过。
+- 已知限制：旧 `del:`/`rest:` 若在 Windows 历史落成 ADS，Dart 目录枚举无法恢复；真实 outbox 当前为空，新文件名不会产生新 ADS。
+
 ### 0. 全项目交付后审查 + P1/P2 修复批（2026-09-04）
 
 > 依据 `docs/project-review-prompt.md` 定制审查工作流执行：Phase 0 事实基线 → 五维并行审查（质量/安全/验收/文档债/功能与三端统一性）→ 交叉验证 → 汇总。结论：26 条交付声明零虚报（24✅/2⚠️）、13 项安全机制全部成立、无 P0；产出 8 项 P1 + 13 项 P2。本批修复其中最高优先级的 4 组。

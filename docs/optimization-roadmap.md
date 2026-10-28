@@ -11,7 +11,7 @@
 | 阶段 | 主题 | 目标 | 当前状态 |
 |---|---|---|---|
 | Phase 0 | 治理基线 | 阻止状态、agent 和专题文档继续漂移；让 AI 指引入口保持轻量 | 已完成（待提交） |
-| Phase 1 | 同步正确性 | 删除/恢复、离线重放、Windows 持久化和 LAN-only 不复活、不丢失 | 1A 收尾；1B/1C 未开始 |
+| Phase 1 | 同步正确性 | 删除/恢复、离线重放、Windows 持久化和 LAN-only 不复活、不丢失 | 1A 完成（已知 ADS 限制）；1B/1C 未开始 |
 | Phase 2 | 数据与运维韧性 | 服务端可备份、可恢复、可验证，发布可追溯 | 未开始 |
 | Phase 3 | 网络与资源效率 | 降低空闲流量、峰值内存和磁盘无界增长 | 未开始 |
 | Phase 4 | 体验与工程治理 | 提高错误可见性，补齐 CI、诊断和依赖维护 | 未开始 |
@@ -73,12 +73,13 @@
 
 逻辑 operationId 使用 `del:<entryId>` / `rest:<entryId>`，但 `LocalOutboxStore` 直接把它作为文件名。冒号在 Windows 是保留字符，可能导致写入失败、ADS 或无法重新加载。
 
-**实施结果（2026-10-28，SHA cdc785d）**
+**实施结果（2026-10-28，SHA cdc785d + 验收文档 d27a9ee）**
 
 - canonical 文件名已改为 `v2-<sha256>.json`，临时文件唯一化，直接 rename 替换；
 - 路径身份统一走 URI key，修复 Windows 混合分隔符误判；
 - 旧 UUID / 通用旧文件名可迁移；旧 `del:`/`rest:` 若已落成 ADS，Dart 目录枚举无法恢复，已记录为明确残余风险；
 - 本机与 Windows 专项测试、coordinator 测试和 Windows release 构建通过。
+- 结论：新 canonical 路径在 Windows 已验收；旧冒号 ADS 不恢复，作为已知残余风险记录。Phase 1A 关闭。
 
 **范围**
 
