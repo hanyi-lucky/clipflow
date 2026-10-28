@@ -114,6 +114,77 @@ void main() {
     expect(await outbox.loadActive('user-1'), isEmpty);
   });
 
+  test('restart replays a canonical outbox operation exactly once', () async {
+    final firstTransport = _RecordingTransport(failuresRemaining: 1);
+    final firstCoordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: firstTransport,
+      outbox: outbox,
+      fileStore: fileStore,
+      retryBaseDelay: Duration.zero,
+    );
+
+    await expectLater(
+      firstCoordinator.uploadContent('restart-once'),
+      throwsA(isA<SocketException>()),
+    );
+    final active = await outbox.loadActive('user-1');
+    expect(active, hasLength(1));
+    final operationId = active.single.operationId;
+
+    final restartedOutbox = LocalOutboxStore(directoryPath: directory.path);
+    final secondTransport = _RecordingTransport();
+    final secondCoordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: secondTransport,
+      outbox: restartedOutbox,
+      fileStore: fileStore,
+    );
+
+    await secondCoordinator.drainOnce();
+
+    expect(secondTransport.sent, hasLength(1));
+    expect(secondTransport.sent.single.operationId, operationId);
+    expect(await restartedOutbox.loadActive('user-1'), isEmpty);
+  });
+
+  test('keeps legacy del: and rest: operation ids unchanged on the wire',
+      () async {
+    final transport = _RecordingTransport(failuresRemaining: 999);
+    final coordinator = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: transport,
+      outbox: outbox,
+      fileStore: fileStore,
+    );
+
+    await expectLater(
+      coordinator.enqueueDelete('entry-wire'),
+      throwsA(isA<SocketException>()),
+    );
+    expect(transport.sent.single.operationId, 'del:entry-wire');
+
+    final restarted = SyncCoordinator(
+      userId: 'user-1',
+      syncService: syncService,
+      transport: _RecordingTransport(failuresRemaining: 999),
+      outbox: LocalOutboxStore(directoryPath: directory.path),
+      fileStore: fileStore,
+    );
+    await expectLater(
+      restarted.enqueueRestore('entry-wire'),
+      throwsA(isA<SocketException>()),
+    );
+    final pending = await outbox.loadActive('user-1');
+    expect(
+      pending.map((item) => item.operationId),
+      contains('rest:entry-wire'),
+    );
+  });
+
   test('keeps the same operation id when a retry succeeds', () async {
     final transport = _RecordingTransport(failuresRemaining: 1);
     var now = DateTime.fromMillisecondsSinceEpoch(1000);

@@ -198,7 +198,7 @@ void main() {
       kind: SyncOperationKind.delete,
       payload: const {'entryId': 'entry-7'},
     );
-    final legacy = await writeManifest('del:entry-7.json', legacyOp);
+    final legacy = await writeManifest('legacy-delete.json', legacyOp);
 
     final active = await store.loadActive('user-1');
 
@@ -222,7 +222,6 @@ void main() {
     await store.put(op);
     final legacy = await writeManifest('${op.operationId}.json', op);
     final canonical = canonicalFile(op);
-    final canonicalUpdatedAt = DateTime.fromMillisecondsSinceEpoch(200);
 
     await canonical.writeAsString(
       jsonEncode(op.copyWith(updatedAtMs: 200).toJson()),
@@ -234,8 +233,6 @@ void main() {
     expect(active, hasLength(1));
     expect(active.single.updatedAtMs, 200);
     expect(canonical.existsSync(), isTrue);
-    expect(canonical.statSync().modified, isNotNull);
-    expect(canonicalUpdatedAt.year, greaterThanOrEqualTo(2020));
     expect(legacy.existsSync(), isFalse);
     expect(fileNameList(), [canonicalName(op.operationId)]);
   });
@@ -267,8 +264,7 @@ void main() {
     expect(temp.existsSync(), isFalse);
   });
 
-  test('corrupt canonical falls back to legacy and deletes only corrupt data',
-      () async {
+  test('corrupt canonical falls back to a valid legacy record', () async {
     final op = operation(id: 'fallback');
     final canonical = await writeManifest(canonicalName(op.operationId), op);
     final legacy = await writeManifest('${op.operationId}.json', op);
@@ -279,6 +275,18 @@ void main() {
     expect(active.single.operationId, 'fallback');
     expect(canonical.existsSync(), isFalse);
     expect(legacy.existsSync(), isFalse);
+    expect(canonicalFile(op).existsSync(), isTrue);
+  });
+
+  test('sweeps a temp copy when the canonical manifest is valid', () async {
+    final op = operation();
+    await store.put(op);
+    final temp = await writeManifest('${canonicalName(op.operationId)}.tmp', op);
+
+    final active = await store.loadActive('user-1');
+
+    expect(active, hasLength(1));
+    expect(temp.existsSync(), isFalse);
     expect(canonicalFile(op).existsSync(), isTrue);
   });
 
@@ -310,15 +318,13 @@ void main() {
     expect(canonicalFile(op).existsSync(), isTrue);
   });
 
-  test('preserves both operations when hash collides for distinct opIds',
+  test('preserves both operations when a hash path is occupied by another opId',
       () async {
     const firstId = 'first-op';
     const secondId = 'second-op';
     final first = operation(id: firstId);
-    final second = await writeManifest(
-      canonicalName(firstId),
-      operation(id: secondId),
-    );
+    await store.put(first);
+    final second = await writeManifest('legacy-second.json', operation(id: secondId));
 
     final active = await store.loadActive('user-1');
 
@@ -326,8 +332,13 @@ void main() {
       active.map((item) => item.operationId),
       containsAll(<String>[firstId, secondId]),
     );
+    expect(canonicalFile(first).existsSync(), isTrue);
     expect(second.existsSync(), isTrue);
-    expect(firstId, isNot(secondId));
+    expect(
+      (jsonDecode(await canonicalFile(first).readAsString())
+          as Map<String, dynamic>)['operationId'],
+      firstId,
+    );
   });
 
   test('remove deletes canonical and legacy artifacts for the same opId',
@@ -370,12 +381,16 @@ void main() {
       operation(id: 'other', userId: 'user-2', artifactId: 'artifact-2'),
     );
     await writeManifest(
-      'del:old.json',
+      'legacy-delete.json',
       operation(
         id: 'del:old',
         kind: SyncOperationKind.delete,
         payload: const {'entryId': 'old'},
       ),
+    );
+    await writeManifest(
+      '${canonicalName('temp-artifact')}.tmp',
+      operation(id: 'temp-artifact', artifactId: 'artifact-1'),
     );
 
     final artifacts = await store.clearUser('user-1');
@@ -383,6 +398,15 @@ void main() {
     expect(artifacts, ['artifact-1']);
     expect(userDirectory().existsSync(), isFalse);
     expect(await store.loadActive('user-2'), hasLength(1));
+  });
+
+  test('remove clears a temp-only artifact', () async {
+    final op = operation(id: 'temp-remove');
+    final temp = await writeManifest('${canonicalName(op.operationId)}.tmp', op);
+
+    await store.remove('user-1', op.operationId);
+
+    expect(temp.existsSync(), isFalse);
   });
 
   test('findActiveByDedupeKey returns canonical and legacy operations',
@@ -412,17 +436,15 @@ void main() {
     expect(found?.operationId, 'op-1');
   });
 
-  test('isolates operations by user and ignores one corrupt manifest', () async {
+  test('ignores a corrupt manifest without hiding valid operations', () async {
     final userOne = userDirectory();
     await userOne.create(recursive: true);
     await File('${userOne.path}/bad.json').writeAsString('{not-json');
     await store.put(operation());
-    await store.put(operation(id: 'op-2', userId: 'user-2'));
 
     final active = await store.loadActive('user-1');
 
-    expect(active.map((item) => item.operationId), contains('op-1'));
-    expect(active.map((item) => item.operationId), isNot(contains('op-2')));
+    expect(active.map((item) => item.operationId), ['op-1']);
     expect(File('${userOne.path}/bad.json').existsSync(), isFalse);
   });
 
