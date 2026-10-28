@@ -16,3 +16,4 @@
 | 009 Windows Win32 DNS-SD | 现行 |
 | 010 OSS 直传 | 已实现，生产暂缓 |
 | 011 历史保留语义 | 现行 |
+| 012 outbox canonical 文件名 Phase 1A | 已实现，Windows 验收待完成 |
